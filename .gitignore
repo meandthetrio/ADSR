@@ -1,0 +1,12 @@
+build/
+cmake-build-*/
+out/
+*.o
+*.a
+*.elf
+*.bin
+*.hex
+*.map
+.DS_Store
+.vscode/*
+!.vscode/tasks.json
