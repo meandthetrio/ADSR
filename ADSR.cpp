@@ -6,33 +6,51 @@
 #include "util/bsp_sd_diskio.h"
 #include <math.h>
 #include <cstring>
+#include <cstdio>
 
 using namespace daisy;
 using namespace daisysp;
 
 using PodDisplay = OledDisplay<SSD130xI2c128x64Driver>;
 
+constexpr bool kLogEnabled = true;
 constexpr int32_t kMenuCount = 3;
 constexpr int32_t kMaxWavFiles = 32;
 constexpr size_t kMaxWavNameLen = 32;
 constexpr int32_t kLoadFontScale = 2;
 constexpr size_t kMaxSampleSamples = 2 * 1024 * 1024;
+constexpr int32_t kRecordMaxSeconds = 5;
 constexpr size_t kSampleChunkFrames = 256;
 constexpr int32_t kBaseMidiNote = 60;
 constexpr float kSampleScale = 1.0f / 32768.0f;
 constexpr int32_t kLoadProgressStep = 5;
+constexpr float kLedBlinkPeriodMs = 25.0f;
+constexpr float kLedBlinkDuty = 0.5f;
+constexpr float kKnobArc = 4.1887902f; // 240 degrees total sweep (-120 to +120)
+constexpr bool kPlaybackVerboseLog = false;
+constexpr float kPi = 3.14159265f;
 
 enum class UiMode : int32_t
 {
 	Main,
 	Load,
 	Play,
+	Record,
+	Tune,
+};
+
+enum class RecordState : int32_t
+{
+	Armed,
+	Recording,
+	Review,
 };
 
 DaisyPod    hw;
 PodDisplay  display;
 SdmmcHandler   sdcard;
 FatFSInterface fsi;
+Encoder      encoder_r;
 
 volatile UiMode ui_mode = UiMode::Main;
 volatile int32_t menu_index = 0;
@@ -53,6 +71,8 @@ int32_t load_chars_per_line = 1;
 DSY_SDRAM_BSS int16_t sample_buffer_l[kMaxSampleSamples];
 DSY_SDRAM_BSS int16_t sample_buffer_r[kMaxSampleSamples];
 volatile size_t sample_length = 0;
+volatile size_t sample_play_start = 0;
+volatile size_t sample_play_end = 0;
 volatile uint32_t sample_rate = 48000;
 volatile uint16_t sample_channels = 1;
 volatile bool sample_loaded = false;
@@ -61,6 +81,43 @@ volatile float playback_rate = 1.0f;
 volatile float playback_phase = 0.0f;
 volatile float playback_amp = 0.0f;
 volatile int32_t current_note = -1;
+
+constexpr size_t kRecordMaxFrames = static_cast<size_t>(kRecordMaxSeconds) * 48000U;
+volatile RecordState record_state = RecordState::Armed;
+volatile size_t record_pos = 0;
+volatile bool record_waveform_pending = false;
+volatile int32_t encoder_r_accum = 0;
+volatile bool encoder_r_button_press = false;
+volatile bool request_length_redraw = false;
+volatile bool request_playhead_redraw = false;
+volatile bool button1_press = false;
+volatile bool request_playback_stop_log = false;
+float led1_level = 0.0f;
+float led1_phase_ms = 0.0f;
+int32_t tune_selected = 0;
+int32_t tune_coarse = 0;
+int32_t tune_fine = 0;
+int32_t tune_level_pos = -120;
+volatile bool request_tune_redraw = false;
+float tune_phase = 0.0f;
+constexpr bool kUiLogsEnabled = false;
+
+static inline bool UiLogEnabled()
+{
+	if (!kUiLogsEnabled)
+	{
+		return false;
+	}
+	if (ui_mode == UiMode::Record && record_state == RecordState::Review)
+	{
+		return false;
+	}
+	if (ui_mode == UiMode::Tune)
+	{
+		return false;
+	}
+	return true;
+}
 
 int16_t waveform_min[128];
 int16_t waveform_max[128];
@@ -73,7 +130,15 @@ const char* kMenuLabels[kMenuCount] = {"LOAD", "RECORD", "PLAY"};
 template <typename... Va>
 static void LogLine(const char* format, Va... va)
 {
-	DaisySeed::PrintLine(format, va...);
+	if (kLogEnabled)
+	{
+		DaisySeed::PrintLine(format, va...);
+	}
+	else
+	{
+		(void)format;
+		(void)sizeof...(va);
+	}
 }
 
 static const char* FresultName(FRESULT res)
@@ -111,6 +176,8 @@ static const char* UiModeName(UiMode mode)
 		case UiMode::Main: return "MAIN";
 		case UiMode::Load: return "LOAD";
 		case UiMode::Play: return "PLAY";
+		case UiMode::Record: return "RECORD";
+		case UiMode::Tune: return "TUNE";
 		default: return "UNKNOWN";
 	}
 }
@@ -556,6 +623,86 @@ static void ComputeWaveform()
 	}
 }
 
+static void AdjustPlayWindow(int32_t delta_start, int32_t delta_end)
+{
+	if (!sample_loaded || sample_length == 0)
+	{
+		return;
+	}
+	size_t start = sample_play_start;
+	size_t end = sample_play_end;
+	if (end > sample_length || end == 0)
+	{
+		end = sample_length;
+	}
+	if (end <= start)
+	{
+		start = 0;
+		end = sample_length;
+	}
+	const size_t min_window = (sample_length > 1) ? 2 : 1;
+	const size_t base_step = (sample_length >= 512) ? (sample_length / 256) : 1;
+
+	const auto scaled_step = [base_step](int32_t delta) -> int64_t {
+		int32_t mag = (delta < 0) ? -delta : delta;
+		if (mag < 1)
+		{
+			mag = 1;
+		}
+		int32_t log2_mag = 0;
+		int32_t tmp = mag;
+		while (tmp > 1)
+		{
+			tmp >>= 1;
+			++log2_mag;
+		}
+		const int64_t scale = static_cast<int64_t>(2) * (1 + static_cast<int64_t>(log2_mag));
+		return static_cast<int64_t>(base_step) * scale;
+	};
+
+	if (delta_start != 0)
+	{
+		const int64_t step = scaled_step(delta_start);
+		int64_t next = static_cast<int64_t>(start) + static_cast<int64_t>(delta_start) * step;
+		if (next < 0)
+		{
+			next = 0;
+		}
+		if (static_cast<size_t>(next) + min_window > end && end > min_window)
+		{
+			next = static_cast<int64_t>(end - min_window);
+		}
+		start = static_cast<size_t>(next);
+	}
+
+	if (delta_end != 0)
+	{
+		const int64_t step = scaled_step(delta_end);
+		int64_t next = static_cast<int64_t>(end) + static_cast<int64_t>(delta_end) * step;
+		if (next < static_cast<int64_t>(start + min_window))
+		{
+			next = static_cast<int64_t>(start + min_window);
+		}
+		if (next > static_cast<int64_t>(sample_length))
+		{
+			next = static_cast<int64_t>(sample_length);
+		}
+		end = static_cast<size_t>(next);
+	}
+
+	if (end > sample_length)
+	{
+		end = sample_length;
+	}
+	if (end <= start)
+	{
+		end = (sample_length > 0) ? sample_length : 0;
+		start = 0;
+	}
+	sample_play_start = start;
+	sample_play_end = end;
+}
+
 static bool LoadSampleFromPath(const char* path)
 {
 	FIL* file = &wav_file;
@@ -566,6 +713,8 @@ static bool LoadSampleFromPath(const char* path)
 	sample_loaded = false;
 	sample_length = 0;
 	sample_channels = 1;
+	sample_play_start = 0;
+	sample_play_end = 0;
 
 	LogLine("Loading sample: %s", path);
 	FILINFO finfo;
@@ -717,6 +866,8 @@ static bool LoadSampleFromPath(const char* path)
 		LogLine("Load failed: no audio data read");
 		return false;
 	}
+	sample_play_start = 0;
+	sample_play_end = sample_length;
 	LogLine("Load complete: %lu frames", static_cast<unsigned long>(sample_length));
 	ComputeWaveform();
 	return true;
@@ -907,6 +1058,36 @@ static void DrawLoadMenu(int32_t top_index, int32_t selected)
 	display.Update();
 }
 
+static void DrawRecordArmed()
+{
+	const FontDef font = Font_6x8;
+	display.Fill(false);
+	display.SetCursor(0, 0);
+	display.WriteString("RECORD ENABLE", font, true);
+	display.SetCursor(0, font.FontHeight + 2);
+	display.WriteString("PRESS ENC TO REC", font, true);
+	display.Update();
+}
+
+static void DrawRecordRecording()
+{
+	const FontDef font = Font_6x8;
+	display.Fill(false);
+	display.SetCursor(0, 0);
+	display.WriteString("RECORDING", font, true);
+	const int32_t percent =
+		(record_pos >= kRecordMaxFrames)
+			? 100
+			: static_cast<int32_t>((record_pos * 100U) / kRecordMaxFrames);
+	char buf[24];
+	snprintf(buf, sizeof(buf), "PROGRESS %ld%%", static_cast<long>(percent));
+	display.SetCursor(0, font.FontHeight + 2);
+	display.WriteString(buf, font, true);
+	display.SetCursor(0, font.FontHeight * 2 + 4);
+	display.WriteString("MAX 5S MONO", font, true);
+	display.Update();
+}
+
 static void DrawPlayMenu()
 {
 	const FontDef font = Font_6x8;
@@ -937,10 +1118,49 @@ static void DrawPlayMenu()
 	}
 	const int32_t center = wave_top + wave_height / 2;
 	const float scale = static_cast<float>(wave_height / 2 - 1) * kSampleScale;
+	int start_x = 0;
+	int end_x = width - 1;
+	if (sample_length > 0)
+	{
+		size_t window_start = sample_play_start;
+		size_t window_end = sample_play_end;
+		if (window_end > sample_length)
+		{
+			window_end = sample_length;
+		}
+		if (window_end <= window_start)
+		{
+			window_start = 0;
+			window_end = sample_length;
+		}
+		start_x = static_cast<int>((static_cast<uint64_t>(window_start) * static_cast<uint64_t>(width)) / sample_length);
+		end_x = static_cast<int>((static_cast<uint64_t>(window_end) * static_cast<uint64_t>(width)) / sample_length);
+		if (start_x < 0)
+		{
+			start_x = 0;
+		}
+		if (start_x >= width)
+		{
+			start_x = width - 1;
+		}
+		if (end_x < 0)
+		{
+			end_x = 0;
+		}
+		if (end_x >= width)
+		{
+			end_x = width - 1;
+		}
+	}
 	for (int32_t x = 0; x < width; ++x)
 	{
 		const int16_t min_val = waveform_min[x];
 		const int16_t max_val = waveform_max[x];
+		const bool in_window = (x >= start_x && x <= end_x);
+		if (!in_window && (x & 1))
+		{
+			continue; // shade: skip every other column outside window
+		}
 		int32_t y1 = center - static_cast<int32_t>(max_val * scale);
 		int32_t y2 = center - static_cast<int32_t>(min_val * scale);
 		if (y1 < wave_top)
@@ -953,6 +1173,86 @@ static void DrawPlayMenu()
 		}
 		display.DrawLine(x, y1, x, y2, true);
 	}
+	if (sample_length > 0)
+	{
+		display.DrawLine(start_x, wave_top, start_x, wave_top + wave_height - 1, true);
+		display.DrawLine(end_x, wave_top, end_x, wave_top + wave_height - 1, true);
+	}
+	if (sample_length > 0 && playback_active)
+	{
+		int play_x = static_cast<int>((static_cast<uint64_t>(playback_phase) * static_cast<uint64_t>(width)) / sample_length);
+		if (play_x < 0)
+		{
+			play_x = 0;
+		}
+		if (play_x >= width)
+		{
+			play_x = width - 1;
+		}
+		display.DrawLine(play_x, wave_top, play_x, wave_top + wave_height - 1, true);
+	}
+	display.Update();
+}
+
+static void DrawRecordReview()
+{
+	DrawPlayMenu();
+}
+
+static float DbToLin(float db)
+{
+	return powf(10.0f, db / 20.0f);
+}
+
+static void DrawKnob(int cx,
+					 int cy,
+					 int radius,
+					 const char* label,
+					 int32_t value,
+					 int32_t min_val,
+					 int32_t max_val,
+					 bool selected)
+{
+	const FontDef font = Font_6x8;
+	const int box_w = 30;
+	const int box_h = font.FontHeight + 4;
+	const int box_x = cx - box_w / 2;
+	const int box_y = 0;
+	display.DrawRect(box_x,
+					 box_y,
+					 box_x + box_w - 1,
+					 box_y + box_h - 1,
+					 true,
+					 selected);
+	const int label_x = box_x + (box_w - font.FontWidth * static_cast<int>(StrLen(label))) / 2;
+	const int label_y = box_y + 2;
+	display.SetCursor(label_x, label_y);
+	display.WriteString(label, font, !selected);
+
+	display.DrawCircle(cx, cy, radius, true);
+	display.DrawCircle(cx, cy, radius - 1, true);
+
+	const float norm = (max_val == min_val)
+		? 0.0f
+		: (static_cast<float>(value - min_val)
+			/ static_cast<float>(max_val - min_val));
+	const float angle = (-kPi * 0.5f) + (norm - 0.5f) * kKnobArc;
+	const float dx = cosf(angle);
+	const float dy = sinf(angle);
+	const int line_len = radius - 2;
+	const int x2 = cx + static_cast<int>(dx * line_len);
+	const int y2 = cy + static_cast<int>(dy * line_len);
+	display.DrawLine(cx, cy, x2, y2, true);
+}
+
+static void DrawTuneScreen()
+{
+	display.Fill(false);
+	const int radius = 12;
+	const int y = 40;
+	DrawKnob(22, y, radius, "LVL", tune_level_pos, -120, 120, tune_selected == 2);
+	DrawKnob(64, y, radius, "CRSE", tune_coarse, -24, 24, tune_selected == 0);
+	DrawKnob(106, y, radius, "FINE", tune_fine, -100, 100, tune_selected == 1);
 	display.Update();
 }
 
@@ -960,6 +1260,29 @@ static void StartPlayback(uint8_t note)
 {
 	if (!sample_loaded || sample_length < 1)
 	{
+		if (kPlaybackVerboseLog && UiLogEnabled())
+		{
+			LogLine("Playback: start rejected (no sample)");
+		}
+		return;
+	}
+	size_t window_start = sample_play_start;
+	size_t window_end = sample_play_end;
+	if (window_end > sample_length || window_end == 0)
+	{
+		window_end = sample_length;
+	}
+	if (window_end <= window_start)
+	{
+		window_start = 0;
+		window_end = sample_length;
+	}
+	if (window_end == 0)
+	{
+		if (kPlaybackVerboseLog && UiLogEnabled())
+		{
+			LogLine("Playback: start rejected (empty window)");
+		}
 		return;
 	}
 	current_note = note;
@@ -967,8 +1290,66 @@ static void StartPlayback(uint8_t note)
 	const float semis = static_cast<float>(note - kBaseMidiNote);
 	const float pitch = powf(2.0f, semis / 12.0f);
 	playback_rate = pitch * (static_cast<float>(sample_rate) / hw.AudioSampleRate());
-	playback_phase = 0.0f;
+	playback_phase = static_cast<float>(window_start);
 	playback_active = true;
+	if (kPlaybackVerboseLog && UiLogEnabled())
+	{
+		LogLine("Playback: start note=%u pitch=%.3f win=[%lu,%lu) rate=%.6f apply_pitch=1",
+				static_cast<unsigned>(note),
+				static_cast<double>(pitch),
+				static_cast<unsigned long>(window_start),
+				static_cast<unsigned long>(window_end),
+				static_cast<double>(playback_rate));
+	}
+}
+
+static void StartPlayback(uint8_t note, bool apply_pitch)
+{
+	if (!sample_loaded || sample_length < 1)
+	{
+		if (kPlaybackVerboseLog && UiLogEnabled())
+		{
+			LogLine("Playback: start rejected (no sample)");
+		}
+		return;
+	}
+	size_t window_start = sample_play_start;
+	size_t window_end = sample_play_end;
+	if (window_end > sample_length || window_end == 0)
+	{
+		window_end = sample_length;
+	}
+	if (window_end <= window_start)
+	{
+		window_start = 0;
+		window_end = sample_length;
+	}
+	if (window_end == 0)
+	{
+		if (kPlaybackVerboseLog && UiLogEnabled())
+		{
+			LogLine("Playback: start rejected (empty window)");
+		}
+		return;
+	}
+	current_note = note;
+	playback_amp = 1.0f;
+	const float semis = apply_pitch ? static_cast<float>(note - kBaseMidiNote) : 0.0f;
+	const float pitch = powf(2.0f, semis / 12.0f);
+	playback_rate = pitch * (static_cast<float>(sample_rate) / hw.AudioSampleRate());
+	playback_phase = static_cast<float>(window_start);
+	playback_active = true;
+	if (kPlaybackVerboseLog && UiLogEnabled())
+	{
+		LogLine("Playback: start note=%u pitch=%.3f win=[%lu,%lu) rate=%.6f apply_pitch=%d",
+				static_cast<unsigned>(note),
+				static_cast<double>(pitch),
+				static_cast<unsigned long>(window_start),
+				static_cast<unsigned long>(window_end),
+				static_cast<double>(playback_rate),
+				static_cast<int>(apply_pitch));
+	}
+	request_playhead_redraw = true;
 }
 
 static void StopPlayback(uint8_t note)
@@ -976,11 +1357,16 @@ static void StopPlayback(uint8_t note)
 	if (note == current_note)
 	{
 		playback_active = false;
+		request_playback_stop_log = true;
 	}
 }
 
 static void HandleMidiMessage(MidiEvent msg)
 {
+	if (ui_mode == UiMode::Record && record_state == RecordState::Recording)
+	{
+		return;
+	}
 	switch (msg.type)
 	{
 		case NoteOn:
@@ -997,27 +1383,41 @@ static void HandleMidiMessage(MidiEvent msg)
 		}
 		break;
 		case NoteOff:
-		{
-			const NoteOffEvent note = msg.AsNoteOff();
-			StopPlayback(note.note);
-		}
+	{
+		const NoteOffEvent note = msg.AsNoteOff();
+		StopPlayback(note.note);
+	}
+	break;
+	default:
 		break;
-		default:
-			break;
 	}
 }
 
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size)
 {
 	hw.ProcessAllControls();
-	const int32_t inc = hw.encoder.Increment();
-	const bool encoder_pressed = hw.encoder.RisingEdge();
-	const bool button2_pressed = hw.button2.RisingEdge();
+	const int32_t encoder_l_inc = hw.encoder.Increment();
+	const bool encoder_l_pressed = hw.encoder.RisingEdge();
+	encoder_r.Debounce();
+	const int32_t encoder_r_inc = encoder_r.Increment();
+	if (encoder_r_inc != 0)
+	{
+		encoder_r_accum += encoder_r_inc;
+	}
+	const bool encoder_r_pressed = encoder_r.RisingEdge();
+	if (encoder_r_pressed)
+	{
+		encoder_r_button_press = true;
+	}
+	if (hw.button1.RisingEdge())
+	{
+		button1_press = true;
+	}
 	if (ui_mode == UiMode::Main)
 	{
-		if (inc != 0)
+		if (encoder_l_inc != 0)
 		{
-			int32_t next = menu_index + inc;
+			int32_t next = menu_index + encoder_l_inc;
 			while (next < 0)
 			{
 				next += kMenuCount;
@@ -1028,24 +1428,33 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			}
 			menu_index = next;
 		}
-		if (encoder_pressed && menu_index == 0)
+		if (encoder_r_pressed && menu_index == 0)
 		{
 			ui_mode = UiMode::Load;
 			load_selected = 0;
 			load_scroll = 0;
 			request_load_scan = true;
 		}
-		else if (encoder_pressed && menu_index == 2 && sample_loaded)
+		else if (encoder_r_pressed && menu_index == 1)
+		{
+			ui_mode = UiMode::Record;
+			record_state = RecordState::Armed;
+			record_pos = 0;
+			playback_active = false;
+			LogLine("Record: entered (monitor ON), max %ld s @48k mono",
+					static_cast<long>(kRecordMaxSeconds));
+		}
+		else if (encoder_r_pressed && menu_index == 2 && sample_loaded)
 		{
 			ui_mode = UiMode::Play;
 		}
 	}
 	else if (ui_mode == UiMode::Load)
 	{
-		if (inc != 0 && wav_file_count > 0)
+		if (encoder_l_inc != 0 && wav_file_count > 0)
 		{
 			const int32_t count = wav_file_count;
-			int32_t next = load_selected + inc;
+			int32_t next = load_selected + encoder_l_inc;
 			if (next < 0)
 			{
 				next = 0;
@@ -1077,29 +1486,234 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				load_scroll = max_top;
 			}
 		}
-		if (encoder_pressed && wav_file_count > 0)
+		if (encoder_r_pressed && wav_file_count > 0)
 		{
 			request_load_sample = true;
 			request_load_index = load_selected;
 		}
-		if (button2_pressed)
+		if (encoder_l_pressed)
 		{
 			ui_mode = UiMode::Main;
+		}
+	}
+	else if (ui_mode == UiMode::Record)
+	{
+		if (encoder_r_pressed)
+		{
+			if (record_state == RecordState::Armed)
+			{
+				record_pos = 0;
+				sample_length = 0;
+				sample_loaded = false;
+				playback_active = false;
+				sample_channels = 1;
+				sample_rate = 48000;
+				sample_play_start = 0;
+				sample_play_end = 0;
+				CopyString(loaded_sample_name, "RECORD", kMaxWavNameLen);
+				record_state = RecordState::Recording;
+				LogLine("Record: start (monitor ON)");
+			}
+			else if (record_state == RecordState::Recording)
+			{
+				sample_length = record_pos;
+				sample_channels = 1;
+				sample_rate = 48000;
+				sample_loaded = (sample_length > 0);
+				playback_active = false;
+				sample_play_start = 0;
+				sample_play_end = sample_length;
+				record_state = RecordState::Review;
+				record_waveform_pending = true;
+				LogLine("Record: stop, frames=%lu", static_cast<unsigned long>(sample_length));
+			}
+			else if (record_state == RecordState::Review && sample_loaded)
+			{
+				LogLine("Record review: enter TUNE");
+				ui_mode = UiMode::Tune;
+				tune_selected = 0;
+				tune_coarse = 0;
+				tune_fine = 0;
+				tune_level_pos = -120;
+				request_tune_redraw = true;
+				tune_phase = 0.0f;
+			}
+		}
+		if (encoder_l_pressed)
+		{
+			ui_mode = UiMode::Main;
+			record_state = RecordState::Armed;
+			playback_active = false;
+		}
+		if (record_state == RecordState::Review && sample_loaded)
+		{
+			if (encoder_l_inc != 0 || encoder_r_inc != 0)
+			{
+				AdjustPlayWindow(encoder_l_inc, encoder_r_inc);
+				request_length_redraw = true;
+			}
+		}
+	}
+	else if (ui_mode == UiMode::Tune)
+	{
+		if (encoder_l_inc != 0)
+		{
+			tune_selected += encoder_l_inc;
+			while (tune_selected < 0)
+			{
+				tune_selected += 3;
+			}
+			while (tune_selected >= 3)
+			{
+				tune_selected -= 3;
+			}
+			request_tune_redraw = true;
+		}
+		if (encoder_r_inc != 0)
+		{
+			if (tune_selected == 0)
+			{
+				tune_coarse += encoder_r_inc;
+				if (tune_coarse < -24)
+				{
+					tune_coarse = -24;
+				}
+				if (tune_coarse > 24)
+				{
+					tune_coarse = 24;
+				}
+			}
+			else if (tune_selected == 1)
+			{
+				tune_fine += encoder_r_inc;
+				if (tune_fine < -100)
+				{
+					tune_fine = -100;
+				}
+				if (tune_fine > 100)
+				{
+					tune_fine = 100;
+				}
+			}
+			else
+			{
+				tune_level_pos += encoder_r_inc;
+				if (tune_level_pos < -120)
+				{
+					tune_level_pos = -120;
+				}
+				if (tune_level_pos > 120)
+				{
+					tune_level_pos = 120;
+				}
+			}
+			request_tune_redraw = true;
+		}
+		if (encoder_l_pressed)
+		{
+			ui_mode = UiMode::Record;
+			record_state = RecordState::Review;
+			request_length_redraw = true;
 		}
 	}
 	else
 	{
-		if (button2_pressed)
+		if (encoder_l_pressed)
 		{
 			ui_mode = UiMode::Main;
 		}
 	}
-	(void)in;
+
+	size_t window_start = sample_play_start;
+	size_t window_end = sample_play_end;
+	if (window_end > sample_length || window_end == 0)
+	{
+		window_end = sample_length;
+	}
+	if (window_end <= window_start)
+	{
+		window_start = 0;
+		window_end = sample_length;
+	}
+	const bool window_valid = (window_end > 0 && window_end > window_start);
+	if (playback_active && !window_valid)
+	{
+		playback_active = false;
+	}
+
 	for (size_t i = 0; i < size; i++)
 	{
 		float sig_l = 0.0f;
 		float sig_r = 0.0f;
-		if (sample_loaded && playback_active)
+	const bool monitor_active =
+			(ui_mode == UiMode::Record && record_state != RecordState::Review);
+	const bool tune_active = (ui_mode == UiMode::Tune);
+	const float tune_sr = static_cast<float>(hw.AudioSampleRate());
+	const float tune_freq = 440.0f
+		* powf(2.0f, (static_cast<float>(tune_coarse)
+			+ static_cast<float>(tune_fine) / 100.0f) / 12.0f);
+	const float lvl_norm_raw = (static_cast<float>(tune_level_pos) + 120.0f) / 240.0f;
+	const float lvl_norm = (lvl_norm_raw < 0.0f) ? 0.0f : (lvl_norm_raw > 1.0f ? 1.0f : lvl_norm_raw);
+	const float lvl_shape = powf(lvl_norm, 0.193f); // more logarithmic
+	float tune_level_db = -50.0f + 40.0f * lvl_shape; // -50dB @ -120deg, ~-15dB @ 0deg, -10dB @ +120deg
+	float tune_amp = DbToLin(tune_level_db);
+	if (tune_amp > 2.0f)
+	{
+		tune_amp = 2.0f;
+	}
+		float monitor_l = 0.0f;
+		float monitor_r = 0.0f;
+		if (monitor_active)
+		{
+			monitor_l = in[0][i];
+			monitor_r = in[1][i];
+		}
+		float tune_sig = 0.0f;
+		if (tune_active)
+		{
+			tune_phase += tune_freq / tune_sr;
+			if (tune_phase >= 1.0f)
+			{
+				tune_phase -= 1.0f;
+			}
+			tune_sig = sinf(2.0f * kPi * tune_phase) * tune_amp;
+		}
+	if (record_state == RecordState::Recording)
+	{
+		if (record_pos < kRecordMaxFrames)
+		{
+			float in_l = in[0][i];
+				int32_t s = static_cast<int32_t>(in_l * 32767.0f);
+				if (s > 32767)
+				{
+					s = 32767;
+				}
+				else if (s < -32768)
+				{
+					s = -32768;
+				}
+				const int16_t samp = static_cast<int16_t>(s);
+				sample_buffer_l[record_pos] = samp;
+				sample_buffer_r[record_pos] = samp;
+				++record_pos;
+			}
+			if (record_pos >= kRecordMaxFrames)
+			{
+				sample_length = record_pos;
+				sample_channels = 1;
+				sample_rate = 48000;
+				sample_loaded = (sample_length > 0);
+				playback_active = false;
+				request_playback_stop_log = true;
+				sample_play_start = 0;
+				sample_play_end = sample_length;
+				record_state = RecordState::Review;
+				record_waveform_pending = true;
+				LogLine("Record: auto-stop at max frames=%lu",
+						static_cast<unsigned long>(sample_length));
+			}
+		}
+		if (sample_loaded && playback_active && record_state != RecordState::Recording && window_valid)
 		{
 			if (sample_length == 1)
 			{
@@ -1110,7 +1724,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			else
 			{
 				const size_t idx = static_cast<size_t>(playback_phase);
-				if (idx + 1 < sample_length)
+				if (idx + 1 < window_end)
 				{
 					const float frac = playback_phase - static_cast<float>(idx);
 					const float l0 = static_cast<float>(sample_buffer_l[idx]);
@@ -1120,20 +1734,33 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 					sig_l = (l0 + (l1 - l0) * frac) * kSampleScale * playback_amp;
 					sig_r = (r0 + (r1 - r0) * frac) * kSampleScale * playback_amp;
 					playback_phase += playback_rate;
-					if (playback_phase >= static_cast<float>(sample_length - 1))
+					if (playback_phase >= static_cast<float>(window_end - 1))
 					{
 						playback_active = false;
+						request_playback_stop_log = true;
 					}
 				}
 				else
 				{
 					playback_active = false;
+					request_playback_stop_log = true;
 				}
 			}
+		}
+		if (monitor_active)
+		{
+			sig_l += monitor_l;
+			sig_r += monitor_r;
+		}
+		if (tune_active)
+		{
+			sig_l += tune_sig;
+			sig_r += tune_sig;
 		}
 		out[0][i] = sig_l;
 		out[1][i] = sig_r;
 	}
+	request_playhead_redraw = true;
 }
 
 int main(void)
@@ -1143,6 +1770,8 @@ int main(void)
 	hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 	hw.seed.StartLog(false);
 	LogLine("Logger started");
+
+	encoder_r.Init(seed::D7, seed::D8, seed::D22, hw.AudioSampleRate());
 
 	PodDisplay::Config disp_cfg;
 	disp_cfg.driver_config.transport_config.i2c_config.pin_config.scl = seed::D11;
@@ -1170,12 +1799,43 @@ int main(void)
 	int32_t last_selected = -1;
 	int32_t last_file_count = -1;
 	bool last_sd_mounted = false;
+	RecordState last_record_state = RecordState::Armed;
+	bool last_playback_active = false;
 	while(1)
 	{
 		hw.midi.Listen();
 		while(hw.midi.HasEvents())
 		{
 			HandleMidiMessage(hw.midi.PopEvent());
+		}
+	if (button1_press && sample_loaded)
+	{
+		button1_press = false;
+		if (UiLogEnabled())
+		{
+			LogLine("Button1: playback request (unpitched)");
+		}
+		StartPlayback(kBaseMidiNote, false);
+		request_playhead_redraw = true;
+	}
+
+		int32_t aux_delta = 0;
+		if (encoder_r_accum != 0)
+		{
+			aux_delta = encoder_r_accum;
+			encoder_r_accum = 0;
+		}
+		if (aux_delta != 0 && UiLogEnabled())
+		{
+			LogLine("Encoder R delta=%ld", static_cast<long>(aux_delta));
+		}
+		if (encoder_r_button_press)
+		{
+			encoder_r_button_press = false;
+			if (UiLogEnabled())
+			{
+				LogLine("Encoder R button pressed");
+			}
 		}
 
 		if (request_load_scan)
@@ -1184,17 +1844,17 @@ int main(void)
 			LogLine("Load menu: scan requested");
 			ScanWavFiles();
 		}
-		if (request_load_sample)
+	if (request_load_sample)
+	{
+		request_load_sample = false;
+		const int32_t index = request_load_index;
+		request_load_index = -1;
+		LogLine("Load menu: sample request index=%ld", static_cast<long>(index));
+		if (index >= 0 && index < wav_file_count)
 		{
-			request_load_sample = false;
-			const int32_t index = request_load_index;
-			request_load_index = -1;
-			LogLine("Load menu: sample request index=%ld", static_cast<long>(index));
-			if (index >= 0 && index < wav_file_count)
-			{
-				LogLine("Load menu: sample name=%s", wav_files[index]);
-			}
-			else
+			LogLine("Load menu: sample name=%s", wav_files[index]);
+		}
+		else
 			{
 				LogLine("Load menu: sample name unavailable (count=%ld)", static_cast<long>(wav_file_count));
 			}
@@ -1207,6 +1867,37 @@ int main(void)
 			{
 				LogLine("Load failed");
 			}
+		}
+
+		if (record_waveform_pending)
+		{
+			record_waveform_pending = false;
+			if (sample_loaded && sample_length > 0)
+			{
+				ComputeWaveform();
+				if (ui_mode == UiMode::Record && record_state == RecordState::Review)
+				{
+					DrawRecordReview();
+					last_record_state = record_state;
+				}
+			}
+		}
+		if (request_length_redraw)
+		{
+			request_length_redraw = false;
+			if (ui_mode == UiMode::Record && record_state == RecordState::Review)
+			{
+				DrawRecordReview();
+			}
+			else if (ui_mode == UiMode::Play)
+			{
+				DrawPlayMenu();
+			}
+		}
+		if (request_tune_redraw && ui_mode == UiMode::Tune)
+		{
+			request_tune_redraw = false;
+			DrawTuneScreen();
 		}
 
 		const UiMode mode = ui_mode;
@@ -1226,9 +1917,28 @@ int main(void)
 							? wav_files[load_selected]
 							: "UNKNOWN");
 			}
-			else
+			else if (mode == UiMode::Play)
 			{
 				DrawPlayMenu();
+			}
+			else if (mode == UiMode::Tune)
+			{
+				DrawTuneScreen();
+			}
+			else
+			{
+				if (record_state == RecordState::Armed)
+				{
+					DrawRecordArmed();
+				}
+				else if (record_state == RecordState::Recording)
+				{
+					DrawRecordRecording();
+				}
+				else
+				{
+					DrawRecordReview();
+				}
 			}
 			last_mode = mode;
 			last_menu = menu_index;
@@ -1236,6 +1946,7 @@ int main(void)
 			last_selected = load_selected;
 			last_file_count = wav_file_count;
 			last_sd_mounted = sd_mounted;
+			last_record_state = record_state;
 		}
 		else if (mode == UiMode::Main)
 		{
@@ -1274,6 +1985,72 @@ int main(void)
 				last_sd_mounted = sd_mounted;
 			}
 		}
+		else if (mode == UiMode::Record)
+		{
+			const RecordState current_state = record_state;
+			if (current_state != last_record_state)
+			{
+				if (current_state == RecordState::Armed)
+				{
+					DrawRecordArmed();
+				}
+				else if (current_state == RecordState::Recording)
+				{
+					DrawRecordRecording();
+				}
+				else
+				{
+					DrawRecordReview();
+				}
+				last_record_state = current_state;
+			}
+		}
+		if (request_playhead_redraw || (playback_active != last_playback_active))
+		{
+			request_playhead_redraw = false;
+			if (mode == UiMode::Play
+				|| (mode == UiMode::Record && record_state == RecordState::Review))
+			{
+				if (mode == UiMode::Play)
+				{
+					DrawPlayMenu();
+				}
+				else
+				{
+					DrawRecordReview();
+				}
+			}
+		}
+		last_playback_active = playback_active;
+		if (request_playback_stop_log)
+		{
+			request_playback_stop_log = false;
+			if (UiLogEnabled())
+			{
+				LogLine("Playback: stopped (win=[%lu,%lu) phase=%.3f)",
+						static_cast<unsigned long>(sample_play_start),
+						static_cast<unsigned long>(sample_play_end),
+						static_cast<double>(playback_phase));
+			}
+		}
+		if ((ui_mode == UiMode::Record && record_state == RecordState::Review)
+			|| ui_mode == UiMode::Tune)
+		{
+			led1_phase_ms += 10.0f;
+			if (led1_phase_ms >= kLedBlinkPeriodMs)
+			{
+				led1_phase_ms -= kLedBlinkPeriodMs;
+			}
+			const float on_time = kLedBlinkDuty * kLedBlinkPeriodMs;
+			led1_level = (led1_phase_ms < on_time) ? 1.0f : 0.0f;
+		}
+		else
+		{
+			led1_phase_ms = 0.0f;
+			led1_level = 0.0f;
+		}
+		hw.led1.Set(0.0f, led1_level, 0.0f);
+		hw.UpdateLeds();
 		hw.DelayMs(10);
 	}
 }
