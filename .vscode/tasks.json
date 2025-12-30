@@ -1,106 +1,62 @@
 {
+  "version": "2.0.0",
   "tasks": [
     {
-      "command": "make clean; make",
+      "label": "Build",
+      "type": "shell",
+      "command": "make -j4",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$gcc"
+      ],
       "group": {
-        "isDefault": true,
-        "kind": "build"
-      },
-      "label": "build",
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "Flash QSPI (wait)",
+      "type": "shell",
+      "command": "${workspaceFolder}/tools/flash_qspi_wait.sh",
       "options": {
         "cwd": "${workspaceFolder}"
       },
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "type": "shell"
+      "problemMatcher": []
     },
     {
-      "command": "make clean; make; make program",
-      "label": "build_and_program",
-      "options": {
-        "cwd": "${workspaceFolder}"
-      },
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "type": "shell"
-    },
-    {
-      "command": "make clean; make; make program-dfu",
-      "label": "build_and_program_dfu",
-      "options": {
-        "cwd": "${workspaceFolder}"
-      },
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "type": "shell"
-    },
-    {
-      "command": "make clean;make",
+      "label": "Build then Flash QSPI (wait)",
+      "type": "shell",
       "dependsOn": [
-        "build_libdaisy",
-        "build_daisysp"
+        "Build",
+        "Flash QSPI (wait)"
       ],
-      "label": "build_all",
-      "options": {
-        "cwd": "${workspaceFolder}"
-      },
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "type": "shell"
+      "dependsOrder": "sequence",
+      "command": "echo \"Build then flash complete\"",
+      "problemMatcher": []
     },
     {
-      "command": "make clean;DEBUG=1 make",
-      "dependsOn": [
-        "build_libdaisy",
-        "build_daisysp"
-      ],
-      "label": "build_all_debug",
-      "options": {
-        "cwd": "${workspaceFolder}"
-      },
-      "problemMatcher": [
-        "$gcc"
-      ],
-      "type": "shell"
-    },
-    {
-      "command": "make program-dfu",
-      "label": "program-dfu",
-      "problemMatcher": [],
-      "type": "shell"
-    },
-    {
-      "command": "make program",
-      "label": "program",
-      "problemMatcher": [],
-      "type": "shell"
-    },
-    {
-      "command": "make",
       "label": "build_libdaisy",
+      "type": "shell",
+      "command": "make",
       "options": {
         "cwd": "${workspaceFolder}/../libDaisy/"
       },
       "problemMatcher": [
         "$gcc"
-      ],
-      "type": "shell"
+      ]
     },
     {
-      "command": "make",
       "label": "build_daisysp",
+      "type": "shell",
+      "command": "make",
       "options": {
         "cwd": "${workspaceFolder}/../DaisySP/"
       },
       "problemMatcher": [
         "$gcc"
-      ],
-      "type": "shell"
+      ]
     }
-  ],
-  "version": "2.0.0"
+  ]
 }

@@ -5,8 +5,11 @@ TARGET = ADSR
 CPP_SOURCES = ADSR.cpp
 
 # Library Locations
-LIBDAISY_DIR = ../libDaisy/
-DAISYSP_DIR = ../DaisySP/
+LIBDAISY_DIR = ../../libDaisy/
+DAISYSP_DIR = ../../DaisySP/
+
+# Build for Daisy bootloader in external QSPI flash
+APP_TYPE = BOOT_QSPI
 
 # Includes FatFS source files within project.
 USE_FATFS = 1
