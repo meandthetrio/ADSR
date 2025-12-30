@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_BIN="${1:-build/ADSR.bin}"
+APP_BIN="${1:-build/WaveContV3.bin}"
 ADDR="0x90040000"
 
 if ! command -v dfu-util >/dev/null 2>&1; then

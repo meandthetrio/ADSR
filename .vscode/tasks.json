@@ -19,7 +19,11 @@
     {
       "label": "Flash QSPI (wait)",
       "type": "shell",
-      "command": "${workspaceFolder}/tools/flash_qspi_wait.sh",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "\"$(cygpath -u '${workspaceFolder}')/tools/flash_qspi_wait.sh\""
+      ],
       "options": {
         "cwd": "${workspaceFolder}"
       },

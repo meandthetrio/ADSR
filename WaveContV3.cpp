@@ -19,7 +19,7 @@ constexpr bool kLogEnabled = true;
 constexpr int32_t kMenuCount = 3;
 constexpr int32_t kMaxWavFiles = 32;
 constexpr size_t kMaxWavNameLen = 32;
-constexpr int32_t kLoadFontScale = 2;
+constexpr int32_t kLoadFontScale = 1;
 constexpr size_t kMaxSampleSamples = 2 * 1024 * 1024;
 constexpr int32_t kRecordMaxSeconds = 5;
 constexpr size_t kSampleChunkFrames = 256;
@@ -85,6 +85,20 @@ volatile float playback_rate = 1.0f;
 volatile float playback_phase = 0.0f;
 volatile float playback_amp = 0.0f;
 volatile int32_t current_note = -1;
+
+// Normalized trim window (0..1 over entire sample)
+float trim_start = 0.0f;
+float trim_end = 1.0f;
+
+// Derived frame window (engine space)
+uint32_t snap_start_frame = 0;
+uint32_t snap_end_frame = 0;
+
+// Waveform preview buffers (128 columns)
+static int16_t waveform_min[128];
+static int16_t waveform_max[128];
+static bool waveform_ready = false;
+static bool waveform_dirty = false;
 
 constexpr size_t kRecordMaxFrames = static_cast<size_t>(kRecordMaxSeconds) * 48000U;
 volatile RecordState record_state = RecordState::Armed;
@@ -257,9 +271,6 @@ static void ForCirclePixels(int cx, int cy, int r, F&& fn)
 		}
 	}
 }
-
-int16_t waveform_min[128];
-int16_t waveform_max[128];
 
 static FIL wav_file;
 alignas(32) static int16_t wav_read[kSampleChunkFrames * 2];
@@ -710,12 +721,8 @@ static void ScanWavFiles()
 
 static void ComputeWaveform()
 {
-	int32_t width = static_cast<int32_t>(display.Width());
-	if (width > 128)
-	{
-		width = 128;
-	}
-	if (!sample_loaded || sample_length == 0 || width <= 0)
+	const int32_t width = 128;
+	if (!sample_loaded || sample_length == 0)
 	{
 		for (int32_t i = 0; i < width; ++i)
 		{
@@ -725,122 +732,106 @@ static void ComputeWaveform()
 		return;
 	}
 
-	for (int32_t x = 0; x < width; ++x)
-	{
-		const size_t start = (sample_length * static_cast<size_t>(x)) / width;
-		size_t end = (sample_length * static_cast<size_t>(x + 1)) / width;
-		if (end <= start)
-		{
-			end = start + 1;
-		}
-		if (end > sample_length)
-		{
-			end = sample_length;
-		}
-
-		int16_t min_val = 32767;
-		int16_t max_val = -32768;
-		for (size_t i = start; i < end; ++i)
-		{
-			int32_t sample = sample_buffer_l[i];
-			if (sample_channels == 2)
-			{
-				sample = (sample + sample_buffer_r[i]) / 2;
-			}
-			const int16_t samp = static_cast<int16_t>(sample);
-			if (samp < min_val)
-			{
-				min_val = samp;
-			}
-			if (samp > max_val)
-			{
-				max_val = samp;
-			}
-		}
-		waveform_min[x] = min_val;
-		waveform_max[x] = max_val;
-	}
-}
-
-static void AdjustPlayWindow(int32_t delta_start, int32_t delta_end)
-{
-	if (!sample_loaded || sample_length == 0)
+	const size_t frames = sample_length;
+	if (frames < 2)
 	{
 		return;
 	}
-	size_t start = sample_play_start;
-	size_t end = sample_play_end;
-	if (end > sample_length || end == 0)
-	{
-		end = sample_length;
-	}
-	if (end <= start)
-	{
-		start = 0;
-		end = sample_length;
-	}
-	const size_t min_window = (sample_length > 1) ? 2 : 1;
-	const size_t base_step = (sample_length >= 512) ? (sample_length / 256) : 1;
 
-	const auto scaled_step = [base_step](int32_t delta) -> int64_t {
-		int32_t mag = (delta < 0) ? -delta : delta;
-		if (mag < 1)
+	const size_t columns = 128;
+	size_t step = frames / columns;
+	if (step == 0)
+	{
+		step = 1;
+	}
+
+	for (size_t col = 0; col < columns; ++col)
+	{
+		float minv = 1.0f;
+		float maxv = -1.0f;
+
+		const size_t start = col * step;
+		const size_t end = (col == columns - 1) ? frames : (start + step);
+
+		for (size_t i = start; i < end; ++i)
 		{
-			mag = 1;
+			const float s = static_cast<float>(sample_buffer_l[i]) * kSampleScale;
+			if (s < minv)
+			{
+				minv = s;
+			}
+			if (s > maxv)
+			{
+				maxv = s;
+			}
 		}
-		int32_t log2_mag = 0;
-		int32_t tmp = mag;
-		while (tmp > 1)
+
+		const float scale = 28.0f;
+		waveform_min[col] = static_cast<int16_t>(minv * scale);
+		waveform_max[col] = static_cast<int16_t>(maxv * scale);
+	}
+}
+
+static void UpdateTrimFrames()
+{
+	if(sample_length < 2)
+	{
+		sample_play_start = 0;
+		sample_play_end   = sample_length;
+		return;
+	}
+
+	if(trim_start < 0.0f) trim_start = 0.0f;
+	if(trim_end   > 1.0f) trim_end   = 1.0f;
+
+	const float min_norm = 2.0f / (float)sample_length;
+	if(trim_end - trim_start < min_norm)
+	{
+		trim_end = trim_start + min_norm;
+		if(trim_end > 1.0f)
 		{
-			tmp >>= 1;
-			++log2_mag;
+			trim_end = 1.0f;
+			trim_start = trim_end - min_norm;
 		}
-		const int64_t scale = static_cast<int64_t>(2) * (1 + static_cast<int64_t>(log2_mag));
-		return static_cast<int64_t>(base_step) * scale;
+	}
+
+	snap_start_frame = (uint32_t)(trim_start * sample_length);
+	snap_end_frame   = (uint32_t)(trim_end   * sample_length);
+
+	if(snap_end_frame <= snap_start_frame)
+		snap_end_frame = snap_start_frame + 2;
+
+	sample_play_start = snap_start_frame;
+	sample_play_end   = snap_end_frame;
+}
+
+static void AdjustTrimNormalized(int32_t start_delta, int32_t end_delta)
+{
+	if(sample_length < 2)
+		return;
+
+	const float base_step = 1.0f / 32.0f;
+
+	auto step = [&](int d)
+	{
+		int mag = abs(d);
+		if(mag < 1) mag = 1;
+		int log2 = 0;
+		while(mag > 1) { mag >>= 1; ++log2; }
+		return base_step * (1 << log2);
 	};
 
-	if (delta_start != 0)
-	{
-		const int64_t step = scaled_step(delta_start);
-		int64_t next = static_cast<int64_t>(start) + static_cast<int64_t>(delta_start) * step;
-		if (next < 0)
-		{
-			next = 0;
-		}
-		if (static_cast<size_t>(next) + min_window > end && end > min_window)
-		{
-			next = static_cast<int64_t>(end - min_window);
-		}
-		start = static_cast<size_t>(next);
-	}
+	if(start_delta != 0)
+		trim_start += start_delta * step(start_delta);
 
-	if (delta_end != 0)
-	{
-		const int64_t step = scaled_step(delta_end);
-		int64_t next = static_cast<int64_t>(end) + static_cast<int64_t>(delta_end) * step;
-		if (next < static_cast<int64_t>(start + min_window))
-		{
-			next = static_cast<int64_t>(start + min_window);
-		}
-		if (next > static_cast<int64_t>(sample_length))
-		{
-			next = static_cast<int64_t>(sample_length);
-		}
-		end = static_cast<size_t>(next);
-	}
+	if(end_delta != 0)
+		trim_end   += end_delta   * step(end_delta);
 
-	if (end > sample_length)
-	{
-		end = sample_length;
-	}
-	if (end <= start)
-	{
-		end = (sample_length > 0) ? sample_length : 0;
-		start = 0;
-	}
-	sample_play_start = start;
-	sample_play_end = end;
+	UpdateTrimFrames();
+	waveform_dirty = true;
+	request_length_redraw = true;
 }
+
 
 static bool LoadSampleFromPath(const char* path)
 {
@@ -852,8 +843,8 @@ static bool LoadSampleFromPath(const char* path)
 	sample_loaded = false;
 	sample_length = 0;
 	sample_channels = 1;
-	sample_play_start = 0;
-	sample_play_end = 0;
+	trim_start = 0.0f;
+	trim_end = 1.0f;
 
 	LogLine("Loading sample: %s", path);
 	FILINFO finfo;
@@ -1005,10 +996,13 @@ static bool LoadSampleFromPath(const char* path)
 		LogLine("Load failed: no audio data read");
 		return false;
 	}
-	sample_play_start = 0;
-	sample_play_end = sample_length;
+	trim_start = 0.0f;
+	trim_end = 1.0f;
 	LogLine("Load complete: %lu frames", static_cast<unsigned long>(sample_length));
 	ComputeWaveform();
+	waveform_ready = true;
+	waveform_dirty = true;
+	UpdateTrimFrames();
 	return true;
 }
 
@@ -1553,6 +1547,109 @@ static void DrawRecordRecording()
 	display.Update();
 }
 
+static inline int ClampI(int v, int lo, int hi)
+{
+	return (v < lo) ? lo : (v > hi ? hi : v);
+}
+
+static void DrawWaveform()
+{
+	if(!sample_loaded || sample_length == 0)
+	{
+		display.Fill(false);
+		display.SetCursor(0, 0);
+		display.WriteString("NO SAMPLE LOADED", Font_6x8, true);
+		display.SetCursor(0, (Font_6x8.FontHeight + 1) * 2);
+		display.WriteString("PLEASE LOAD A", Font_6x8, true);
+		display.SetCursor(0, (Font_6x8.FontHeight + 1) * 3);
+		display.WriteString("SAMPLE FROM", Font_6x8, true);
+		display.SetCursor(0, (Font_6x8.FontHeight + 1) * 4);
+		display.WriteString("THE MAIN MENU", Font_6x8, true);
+		display.Update();
+		return;
+	}
+	if(!waveform_ready || !waveform_dirty)
+		return;
+
+	waveform_dirty = false;
+	display.Fill(false);
+
+	const int W = 128;
+	const int H = 64;
+	const int text_h = Font_6x8.FontHeight + 1;
+	const int mid = text_h + (H - text_h) / 2;
+
+	int start_x = (int)(trim_start * (W - 1));
+	int end_x   = (int)(trim_end   * (W - 1));
+
+	start_x = ClampI(start_x, 0, W - 1);
+	end_x   = ClampI(end_x,   0, W - 1);
+	if(end_x < start_x)
+	{
+		const int tmp = start_x;
+		start_x = end_x;
+		end_x = tmp;
+	}
+
+	for(int x = 0; x < W; x++)
+	{
+		int top    = mid + waveform_min[x];
+		int bottom = mid + waveform_max[x];
+
+		if(top > bottom)
+		{
+			const int tmp = top;
+			top = bottom;
+			bottom = tmp;
+		}
+
+		top    = ClampI(top,    text_h, H - 1);
+		bottom = ClampI(bottom, text_h, H - 1);
+
+		const bool inside = (x >= start_x && x <= end_x);
+
+		if(inside)
+		{
+			for(int y = top; y <= bottom; y++)
+				if((y & 1) == 0)
+					display.DrawPixel(x, y, true);
+		}
+		else
+		{
+			display.DrawLine(x, top, x, bottom, true);
+		}
+	}
+
+	const int cap = 5;
+	auto DrawBracket = [&](int x, bool start)
+	{
+		for(int y = text_h; y < H; y++)
+		{
+			display.DrawPixel(x, y, true);
+			if(x + 1 < W)
+				display.DrawPixel(x + 1, y, true);
+		}
+
+		for(int dx = 0; dx < cap; dx++)
+		{
+			int px = start ? (x + dx) : (x - dx);
+			if(px >= 0 && px < W)
+			{
+				display.DrawPixel(px, text_h, true);
+				display.DrawPixel(px, H - 1, true);
+			}
+		}
+	};
+
+	DrawBracket(start_x, true);
+	DrawBracket(end_x,   false);
+
+	display.SetCursor(0, 0);
+	display.WriteString(loaded_sample_name, Font_6x8, true);
+
+	display.Update();
+}
+
 static void DrawPlayMenu()
 {
 	const FontDef font = Font_6x8;
@@ -1661,7 +1758,7 @@ static void DrawPlayMenu()
 
 static void DrawRecordReview()
 {
-	DrawPlayMenu();
+	DrawWaveform();
 }
 
 static float DbToLin(float db)
@@ -1910,9 +2007,15 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			LogLine("Record: entered (monitor ON), max %ld s @48k mono",
 					static_cast<long>(kRecordMaxSeconds));
 		}
-		else if (encoder_r_pressed && menu_index == 2 && sample_loaded)
+		else if (encoder_r_pressed && menu_index == 2)
 		{
 			ui_mode = UiMode::Play;
+			if(sample_loaded && sample_length > 0)
+			{
+				waveform_ready = true;
+			}
+			waveform_dirty = true;
+			request_length_redraw = true;
 		}
 	}
 	else if (ui_mode == UiMode::Load)
@@ -1974,8 +2077,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				playback_active = false;
 				sample_channels = 1;
 				sample_rate = 48000;
-				sample_play_start = 0;
-				sample_play_end = 0;
+				trim_start = 0.0f;
+				trim_end = 1.0f;
 				CopyString(loaded_sample_name, "RECORD", kMaxWavNameLen);
 				record_state = RecordState::Recording;
 				LogLine("Record: start (monitor ON)");
@@ -1987,8 +2090,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				sample_rate = 48000;
 				sample_loaded = (sample_length > 0);
 				playback_active = false;
-				sample_play_start = 0;
-				sample_play_end = sample_length;
+				trim_start = 0.0f;
+				trim_end = 1.0f;
 				record_state = RecordState::Review;
 				record_waveform_pending = true;
 				LogLine("Record: stop, frames=%lu", static_cast<unsigned long>(sample_length));
@@ -2014,10 +2117,9 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		}
 		if (record_state == RecordState::Review && sample_loaded)
 		{
-			if (encoder_l_inc != 0 || encoder_r_inc != 0)
+			if(encoder_l_inc != 0 || encoder_r_inc != 0)
 			{
-				AdjustPlayWindow(encoder_l_inc, encoder_r_inc);
-				request_length_redraw = true;
+				AdjustTrimNormalized(encoder_l_inc, encoder_r_inc);
 			}
 		}
 	}
@@ -2036,11 +2138,13 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			}
 			request_tune_redraw = true;
 		}
+		const int32_t tune_step_coarse = encoder_r_inc * 4;
+		const int32_t tune_step_fast = encoder_r_inc * 8;
 		if (encoder_r_inc != 0)
 		{
 			if (tune_selected == 0)
 			{
-				tune_coarse += encoder_r_inc;
+				tune_coarse += tune_step_coarse;
 				if (tune_coarse < -24)
 				{
 					tune_coarse = -24;
@@ -2052,7 +2156,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			}
 			else if (tune_selected == 1)
 			{
-				tune_fine += encoder_r_inc;
+				tune_fine += tune_step_fast;
 				if (tune_fine < -100)
 				{
 					tune_fine = -100;
@@ -2064,7 +2168,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			}
 			else
 			{
-				tune_level_pos += encoder_r_inc;
+				tune_level_pos += tune_step_fast;
 				if (tune_level_pos < -120)
 				{
 					tune_level_pos = -120;
@@ -2081,6 +2185,17 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			ui_mode = UiMode::Record;
 			record_state = RecordState::Review;
 			request_length_redraw = true;
+		}
+	}
+	else if (ui_mode == UiMode::Play)
+	{
+		if (encoder_l_inc != 0 || encoder_r_inc != 0)
+		{
+			AdjustTrimNormalized(encoder_l_inc, encoder_r_inc);
+		}
+		if (encoder_l_pressed)
+		{
+			ui_mode = UiMode::Main;
 		}
 	}
 	else
@@ -2172,8 +2287,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				sample_loaded = (sample_length > 0);
 				playback_active = false;
 				request_playback_stop_log = true;
-				sample_play_start = 0;
-				sample_play_end = sample_length;
+				trim_start = 0.0f;
+				trim_end = 1.0f;
 				record_state = RecordState::Review;
 				record_waveform_pending = true;
 				LogLine("Record: auto-stop at max frames=%lu",
@@ -2342,6 +2457,9 @@ int main(void)
 			if (sample_loaded && sample_length > 0)
 			{
 				ComputeWaveform();
+				waveform_ready = true;
+				waveform_dirty = true;
+				UpdateTrimFrames();
 				if (ui_mode == UiMode::Record && record_state == RecordState::Review)
 				{
 					DrawRecordReview();
@@ -2358,7 +2476,7 @@ int main(void)
 			}
 			else if (ui_mode == UiMode::Play)
 			{
-				DrawPlayMenu();
+				DrawWaveform();
 			}
 		}
 		if (request_tune_redraw && ui_mode == UiMode::Tune)
@@ -2394,7 +2512,7 @@ int main(void)
 			}
 			else if (mode == UiMode::Play)
 			{
-				DrawPlayMenu();
+				DrawWaveform();
 			}
 			else if (mode == UiMode::Tune)
 			{
@@ -2493,7 +2611,7 @@ int main(void)
 			{
 				if (mode == UiMode::Play)
 				{
-					DrawPlayMenu();
+					DrawWaveform();
 				}
 				else
 				{

@@ -1,8 +1,8 @@
 # Project Name
-TARGET = ADSR
+TARGET = WaveContV3
 
 # Sources
-CPP_SOURCES = ADSR.cpp
+CPP_SOURCES = WaveContV3.cpp
 
 # Library Locations
 LIBDAISY_DIR = ../../libDaisy/
