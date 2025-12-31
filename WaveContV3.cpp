@@ -17,6 +17,7 @@ using PodDisplay = OledDisplay<SSD130xI2c128x64Driver>;
 
 constexpr bool kLogEnabled = true;
 constexpr int32_t kMenuCount = 3;
+constexpr int32_t kShiftMenuCount = 3;
 constexpr int32_t kMaxWavFiles = 32;
 constexpr size_t kMaxWavNameLen = 32;
 constexpr int32_t kLoadFontScale = 1;
@@ -41,13 +42,21 @@ enum class UiMode : int32_t
 	Play,
 	Record,
 	Tune,
+	Shift,
 };
 
 enum class RecordState : int32_t
 {
 	Armed,
+	Countdown,
 	Recording,
 	Review,
+};
+
+enum class RecordInput : int32_t
+{
+	LineIn,
+	Mic,
 };
 
 DaisyPod    hw;
@@ -55,9 +64,13 @@ PodDisplay  display;
 SdmmcHandler   sdcard;
 FatFSInterface fsi;
 Encoder      encoder_r;
+Switch       shift_button;
 
 volatile UiMode ui_mode = UiMode::Main;
 volatile int32_t menu_index = 0;
+volatile int32_t shift_menu_index = 0;
+volatile UiMode shift_prev_mode = UiMode::Main;
+volatile RecordInput record_input = RecordInput::LineIn;
 volatile int32_t load_selected = 0;
 volatile int32_t load_scroll = 0;
 volatile bool request_load_scan = false;
@@ -99,9 +112,18 @@ static int16_t waveform_min[128];
 static int16_t waveform_max[128];
 static bool waveform_ready = false;
 static bool waveform_dirty = false;
+static bool waveform_from_recording = false;
+static const char* waveform_title = nullptr;
+static int16_t live_wave_min[128];
+static int16_t live_wave_max[128];
+static int16_t live_wave_peak = 1;
+static bool live_wave_dirty = false;
+static int32_t live_wave_last_col = -1;
 
 constexpr size_t kRecordMaxFrames = static_cast<size_t>(kRecordMaxSeconds) * 48000U;
+constexpr uint32_t kRecordCountdownMs = 4000;
 volatile RecordState record_state = RecordState::Armed;
+volatile uint32_t record_countdown_start_ms = 0;
 volatile size_t record_pos = 0;
 volatile bool record_waveform_pending = false;
 volatile int32_t encoder_r_accum = 0;
@@ -124,6 +146,7 @@ static uint8_t record_text_mask[kDisplayH][kDisplayW];
 static uint8_t record_invert_mask[kDisplayH][kDisplayW];
 static uint8_t record_fb_buf[kDisplayH][kDisplayW];
 static uint8_t record_bold_mask[kDisplayH][kDisplayW];
+static bool request_shift_redraw = false;
 
 static inline bool UiLogEnabled()
 {
@@ -276,6 +299,7 @@ static FIL wav_file;
 alignas(32) static int16_t wav_read[kSampleChunkFrames * 2];
 
 const char* kMenuLabels[kMenuCount] = {"LOAD", "RECORD", "PLAY"};
+const char* kShiftMenuLabels[kShiftMenuCount] = {"SAVE", "LINE IN", "MICROPHONE"};
 
 template <typename... Va>
 static void LogLine(const char* format, Va... va)
@@ -328,6 +352,7 @@ static const char* UiModeName(UiMode mode)
 		case UiMode::Play: return "PLAY";
 		case UiMode::Record: return "RECORD";
 		case UiMode::Tune: return "TUNE";
+		case UiMode::Shift: return "SHIFT";
 		default: return "UNKNOWN";
 	}
 }
@@ -624,6 +649,11 @@ static void MountSd()
 	{
 		return;
 	}
+	if (!BSP_SD_IsDetected())
+	{
+		LogLine("SD mount skipped: no card detected");
+		return;
+	}
 	sd_mounted = (f_mount(&fsi.GetSDFileSystem(), fsi.GetSDPath(), 1) == FR_OK);
 	if (sd_mounted)
 	{
@@ -638,7 +668,29 @@ static void MountSd()
 static void ScanWavFiles()
 {
 	LogLine("Scanning WAV files...");
-	MountSd();
+	if (!BSP_SD_IsDetected())
+	{
+		sd_mounted = false;
+		wav_file_count = 0;
+		load_selected = 0;
+		load_scroll = 0;
+		LogLine("Scan aborted: SD not detected");
+		return;
+	}
+	if (!sd_mounted)
+	{
+		MountSd();
+	}
+	if (!sd_mounted)
+	{
+		SdmmcHandler::Config sd_cfg;
+		sd_cfg.Defaults();
+		sdcard.Init(sd_cfg);
+		fsi.Init(FatFSInterface::Config::MEDIA_SD);
+		const uint8_t init_res = BSP_SD_Init();
+		LogLine("SD init: %u", static_cast<unsigned>(init_res));
+		MountSd();
+	}
 	if (!sd_mounted)
 	{
 		wav_file_count = 0;
@@ -745,6 +797,25 @@ static void ComputeWaveform()
 		step = 1;
 	}
 
+	float scale = 28.0f;
+	if (waveform_from_recording)
+	{
+		float peak = 0.0f;
+		for (size_t i = 0; i < frames; ++i)
+		{
+			const float s = static_cast<float>(sample_buffer_l[i]) * kSampleScale;
+			const float a = (s < 0.0f) ? -s : s;
+			if (a > peak)
+			{
+				peak = a;
+			}
+		}
+		if (peak > 0.0001f)
+		{
+			scale = 28.0f / peak;
+		}
+	}
+
 	for (size_t col = 0; col < columns; ++col)
 	{
 		float minv = 1.0f;
@@ -766,7 +837,6 @@ static void ComputeWaveform()
 			}
 		}
 
-		const float scale = 28.0f;
 		waveform_min[col] = static_cast<int16_t>(minv * scale);
 		waveform_max[col] = static_cast<int16_t>(maxv * scale);
 	}
@@ -832,7 +902,6 @@ static void AdjustTrimNormalized(int32_t start_delta, int32_t end_delta)
 	request_length_redraw = true;
 }
 
-
 static bool LoadSampleFromPath(const char* path)
 {
 	FIL* file = &wav_file;
@@ -858,6 +927,11 @@ static bool LoadSampleFromPath(const char* path)
 		LogLine("f_stat failed: %s (%d)", FresultName(res), static_cast<int>(res));
 	}
 
+	if (BSP_SD_GetCardState() != SD_TRANSFER_OK)
+	{
+		LogLine("Load failed: SD not ready");
+		return false;
+	}
 	res = f_open(file, path, FA_READ);
 	if (res != FR_OK)
 	{
@@ -999,6 +1073,7 @@ static bool LoadSampleFromPath(const char* path)
 	trim_start = 0.0f;
 	trim_end = 1.0f;
 	LogLine("Load complete: %lu frames", static_cast<unsigned long>(sample_length));
+	waveform_from_recording = false;
 	ComputeWaveform();
 	waveform_ready = true;
 	waveform_dirty = true;
@@ -1008,9 +1083,31 @@ static bool LoadSampleFromPath(const char* path)
 
 static bool LoadSampleAtIndex(int32_t index)
 {
+	if (!BSP_SD_IsDetected())
+	{
+		LogLine("Load failed: SD not detected");
+		sd_mounted = false;
+		return false;
+	}
 	MountSd();
 	if (!sd_mounted)
 	{
+		SdmmcHandler::Config sd_cfg;
+		sd_cfg.Defaults();
+		sdcard.Init(sd_cfg);
+		fsi.Init(FatFSInterface::Config::MEDIA_SD);
+		const uint8_t init_res = BSP_SD_Init();
+		LogLine("SD init: %u", static_cast<unsigned>(init_res));
+		MountSd();
+	}
+	if (!sd_mounted)
+	{
+		LogLine("Load failed: SD not mounted");
+		return false;
+	}
+	if (BSP_SD_GetCardState() != SD_TRANSFER_OK)
+	{
+		LogLine("Load failed: SD not ready");
 		return false;
 	}
 	if (index < 0 || index >= wav_file_count)
@@ -1209,16 +1306,18 @@ static void DrawRecordReadyScreen()
 	const int cx = kDisplayW / 2;
 	const int cy = kDisplayH / 2;
 
-	// Prepare text mask (RECORD / READY) using big font.
-	const int scale = 2;
-	const int char_spacing = scale;
-	const int line_gap = scale * 2;
-	const int char_h = Font5x7::H * scale;
-	const char* line1 = "RECORD";
+	// Prepare text mask using big font, but shrink if needed.
+	const char* line1 = (record_input == RecordInput::Mic)
+		? "RECORD MICROPHONE"
+		: "RECORD LINE IN";
 	const char* line2 = "READY";
+	int scale = 2;
+	int char_spacing = scale;
+	int line_gap = scale * 2;
+	int char_h = Font5x7::H * scale;
 	const int lines = 2;
-	const int text_h = lines * char_h + (lines - 1) * line_gap;
-	const int y0 = (kDisplayH / 2) - (text_h / 2);
+	int text_h = lines * char_h + (lines - 1) * line_gap;
+	int y0 = (kDisplayH / 2) - (text_h / 2);
 
 	auto mark_char = [&](int x, int y, char c)
 	{
@@ -1259,6 +1358,33 @@ static void DrawRecordReadyScreen()
 			cx0 += char_w + char_spacing;
 		}
 	};
+
+	auto width = [&](const char* t)
+	{
+		const int len = static_cast<int>(std::strlen(t));
+		if (len <= 0)
+		{
+			return 0;
+		}
+		const int char_w = Font5x7::W * scale;
+		return len * char_w + (len - 1) * char_spacing;
+	};
+
+	int max_w = width(line1);
+	const int line2_w = width(line2);
+	if (line2_w > max_w)
+	{
+		max_w = line2_w;
+	}
+	if (max_w > kDisplayW)
+	{
+		scale = 1;
+		char_spacing = scale;
+		line_gap = scale * 2;
+		char_h = Font5x7::H * scale;
+	}
+	text_h = lines * char_h + (lines - 1) * line_gap;
+	y0 = (kDisplayH / 2) - (text_h / 2);
 
 	auto mark_centered = [&](const char* t1, const char* t2)
 	{
@@ -1528,22 +1654,196 @@ static void DrawRecordArmed()
 	DrawRecordReadyScreen();
 }
 
+static inline int ClampI(int v, int lo, int hi);
+
+static void StartRecording()
+{
+	record_pos = 0;
+	sample_length = 0;
+	sample_loaded = false;
+	playback_active = false;
+	sample_channels = 1;
+	sample_rate = 48000;
+	trim_start = 0.0f;
+	trim_end = 1.0f;
+	CopyString(loaded_sample_name, "RECORD", kMaxWavNameLen);
+	for (int i = 0; i < 128; ++i)
+	{
+		live_wave_min[i] = 0;
+		live_wave_max[i] = 0;
+	}
+	live_wave_last_col = -1;
+	live_wave_peak = 1;
+	live_wave_dirty = true;
+	record_state = RecordState::Recording;
+	LogLine("Record: start (monitor ON)");
+}
+
+static void DrawRecordCountdown()
+{
+	const FontDef font = Font_6x8;
+	const uint32_t now = System::GetNow();
+	const uint32_t elapsed = now - record_countdown_start_ms;
+	uint32_t remaining_ms = 0;
+	if (elapsed < kRecordCountdownMs)
+	{
+		remaining_ms = kRecordCountdownMs - elapsed;
+	}
+	const uint32_t remaining_s = (remaining_ms + 999) / 1000;
+
+	display.Fill(false);
+
+	const int cx = kDisplayW / 2;
+	const int cy = kDisplayH / 2;
+
+	auto DrawPixelInv = [&](int x, int y, bool on)
+	{
+		if (x < 0 || x >= kDisplayW || y < 0 || y >= kDisplayH)
+		{
+			return;
+		}
+		display.DrawPixel(x, y, on);
+	};
+
+	auto DrawLineInv = [&](int x0, int y0, int x1, int y1, bool on)
+	{
+		int dx = abs(x1 - x0);
+		int sx = x0 < x1 ? 1 : -1;
+		int dy = -abs(y1 - y0);
+		int sy = y0 < y1 ? 1 : -1;
+		int err = dx + dy;
+		while (true)
+		{
+			DrawPixelInv(x0, y0, on);
+			if (x0 == x1 && y0 == y1)
+				break;
+			int e2 = 2 * err;
+			if (e2 >= dy)
+			{
+				err += dy;
+				x0 += sx;
+			}
+			if (e2 <= dx)
+			{
+				err += dx;
+				y0 += sy;
+			}
+		}
+	};
+
+	auto DrawScaledCharInv = [&](char ch, int x, int y, int scale)
+	{
+		if (ch < 32 || ch > 126)
+		{
+			return;
+		}
+		const uint32_t base = static_cast<uint32_t>(ch - 32) * font.FontHeight;
+		for (uint32_t row = 0; row < font.FontHeight; ++row)
+		{
+			const uint32_t bits = font.data[base + row];
+			for (uint32_t col = 0; col < font.FontWidth; ++col)
+			{
+				const bool pixel_on = ((bits << col) & 0x8000) != 0;
+				if (!pixel_on)
+				{
+					continue;
+				}
+				const int px = x + static_cast<int>(col * scale);
+				const int py = y + static_cast<int>(row * scale);
+				for (int dy = 0; dy < scale; ++dy)
+				{
+					for (int dx = 0; dx < scale; ++dx)
+					{
+						DrawPixelInv(px + dx, py + dy, true);
+					}
+				}
+			}
+		}
+	};
+
+	// Big countdown number centered.
+	char buf[8];
+	snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(remaining_s));
+	const int scale = 4;
+	const int text_w = static_cast<int>(std::strlen(buf)) * font.FontWidth * scale;
+	const int text_h = font.FontHeight * scale;
+	const int text_x = (kDisplayW - text_w) / 2;
+	const int text_y = (kDisplayH - text_h) / 2;
+	for (int i = 0; buf[i] != '\0'; ++i)
+	{
+		DrawScaledCharInv(buf[i], text_x + i * font.FontWidth * scale, text_y, scale);
+	}
+
+	// Old movie reel style: crosshair + double ring + sweeping hand.
+	const int outer_r = 30;
+	const int inner_r = 22;
+	ForCirclePixels(cx, cy, outer_r, [&](int x, int y) {
+		DrawPixelInv(x, y, true);
+	});
+	ForCirclePixels(cx, cy, inner_r, [&](int x, int y) {
+		DrawPixelInv(x, y, true);
+	});
+	DrawLineInv(cx, 0, cx, kDisplayH - 1, true);
+	DrawLineInv(0, cy, kDisplayW - 1, cy, true);
+
+	const float phase = (elapsed % 1000) / 1000.0f;
+	const float angle = phase * 2.0f * kPi;
+	const int hand_r = outer_r - 2;
+	const int hx = cx + static_cast<int>(cosf(angle) * hand_r);
+	const int hy = cy + static_cast<int>(sinf(angle) * hand_r);
+	DrawLineInv(cx, cy, hx, hy, true);
+
+	display.Update();
+}
+
 static void DrawRecordRecording()
 {
 	const FontDef font = Font_6x8;
 	display.Fill(false);
 	display.SetCursor(0, 0);
-	display.WriteString("RECORDING", font, true);
-	const int32_t percent =
-		(record_pos >= kRecordMaxFrames)
-			? 100
-			: static_cast<int32_t>((record_pos * 100U) / kRecordMaxFrames);
-	char buf[24];
-	snprintf(buf, sizeof(buf), "PROGRESS %ld%%", static_cast<long>(percent));
-	display.SetCursor(0, font.FontHeight + 2);
-	display.WriteString(buf, font, true);
-	display.SetCursor(0, font.FontHeight * 2 + 4);
-	display.WriteString("MAX 5S MONO", font, true);
+	display.WriteString("RECORDING: 5 SEC MAX", font, true);
+
+	const int wave_top = font.FontHeight + 2;
+	const int wave_bottom = kDisplayH - 1;
+	const int mid = wave_top + (wave_bottom - wave_top) / 2;
+	for (int x = 0; x < 128; ++x)
+	{
+		int top = mid + live_wave_min[x];
+		int bottom = mid + live_wave_max[x];
+		if (top > bottom)
+		{
+			const int tmp = top;
+			top = bottom;
+			bottom = tmp;
+		}
+		top = ClampI(top, wave_top, wave_bottom);
+		bottom = ClampI(bottom, wave_top, wave_bottom);
+		display.DrawLine(x, top, x, bottom, true);
+	}
+	display.Update();
+}
+
+static void DrawShiftMenu(int32_t selected)
+{
+	const FontDef font = Font_6x8;
+	display.Fill(false);
+	const int line_h = font.FontHeight + 2;
+	for (int32_t i = 0; i < kShiftMenuCount; ++i)
+	{
+		const int y = i * line_h;
+		const bool is_selected = (i == selected);
+		if (is_selected)
+		{
+			display.DrawRect(0,
+							 y,
+							 display.Width() - 1,
+							 y + line_h - 1,
+							 true,
+							 true);
+		}
+		display.SetCursor(2, y + 1);
+		display.WriteString(kShiftMenuLabels[i], font, !is_selected);
+	}
 	display.Update();
 }
 
@@ -1645,120 +1945,16 @@ static void DrawWaveform()
 	DrawBracket(end_x,   false);
 
 	display.SetCursor(0, 0);
-	display.WriteString(loaded_sample_name, Font_6x8, true);
+	display.WriteString(waveform_title ? waveform_title : loaded_sample_name, Font_6x8, true);
 
-	display.Update();
-}
-
-static void DrawPlayMenu()
-{
-	const FontDef font = Font_6x8;
-	display.Fill(false);
-
-	if (!sample_loaded || sample_length == 0)
-	{
-		display.SetCursor(0, 0);
-		display.WriteString("NO SAMPLE", font, true);
-		display.Update();
-		return;
-	}
-
-	display.SetCursor(0, 0);
-	display.WriteString(loaded_sample_name, font, true);
-
-	int32_t width = static_cast<int32_t>(display.Width());
-	if (width > 128)
-	{
-		width = 128;
-	}
-	const int32_t wave_top = font.FontHeight + 1;
-	const int32_t wave_height = static_cast<int32_t>(display.Height()) - wave_top;
-	if (wave_height <= 1)
-	{
-		display.Update();
-		return;
-	}
-	const int32_t center = wave_top + wave_height / 2;
-	const float scale = static_cast<float>(wave_height / 2 - 1) * kSampleScale;
-	int start_x = 0;
-	int end_x = width - 1;
-	if (sample_length > 0)
-	{
-		size_t window_start = sample_play_start;
-		size_t window_end = sample_play_end;
-		if (window_end > sample_length)
-		{
-			window_end = sample_length;
-		}
-		if (window_end <= window_start)
-		{
-			window_start = 0;
-			window_end = sample_length;
-		}
-		start_x = static_cast<int>((static_cast<uint64_t>(window_start) * static_cast<uint64_t>(width)) / sample_length);
-		end_x = static_cast<int>((static_cast<uint64_t>(window_end) * static_cast<uint64_t>(width)) / sample_length);
-		if (start_x < 0)
-		{
-			start_x = 0;
-		}
-		if (start_x >= width)
-		{
-			start_x = width - 1;
-		}
-		if (end_x < 0)
-		{
-			end_x = 0;
-		}
-		if (end_x >= width)
-		{
-			end_x = width - 1;
-		}
-	}
-	for (int32_t x = 0; x < width; ++x)
-	{
-		const int16_t min_val = waveform_min[x];
-		const int16_t max_val = waveform_max[x];
-		const bool in_window = (x >= start_x && x <= end_x);
-		if (!in_window && (x & 1))
-		{
-			continue; // shade: skip every other column outside window
-		}
-		int32_t y1 = center - static_cast<int32_t>(max_val * scale);
-		int32_t y2 = center - static_cast<int32_t>(min_val * scale);
-		if (y1 < wave_top)
-		{
-			y1 = wave_top;
-		}
-		if (y2 > wave_top + wave_height - 1)
-		{
-			y2 = wave_top + wave_height - 1;
-		}
-		display.DrawLine(x, y1, x, y2, true);
-	}
-	if (sample_length > 0)
-	{
-		display.DrawLine(start_x, wave_top, start_x, wave_top + wave_height - 1, true);
-		display.DrawLine(end_x, wave_top, end_x, wave_top + wave_height - 1, true);
-	}
-	if (sample_length > 0 && playback_active)
-	{
-		int play_x = static_cast<int>((static_cast<uint64_t>(playback_phase) * static_cast<uint64_t>(width)) / sample_length);
-		if (play_x < 0)
-		{
-			play_x = 0;
-		}
-		if (play_x >= width)
-		{
-			play_x = width - 1;
-		}
-		display.DrawLine(play_x, wave_top, play_x, wave_top + wave_height - 1, true);
-	}
 	display.Update();
 }
 
 static void DrawRecordReview()
 {
+	waveform_title = "RECORDED PLAYBACK";
 	DrawWaveform();
+	waveform_title = nullptr;
 }
 
 static float DbToLin(float db)
@@ -1971,11 +2167,64 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	{
 		encoder_r_button_press = true;
 	}
+	shift_button.Debounce();
+	if (shift_button.RisingEdge())
+	{
+		if (ui_mode == UiMode::Shift)
+		{
+			ui_mode = shift_prev_mode;
+		}
+		else
+		{
+			shift_prev_mode = ui_mode;
+			ui_mode = UiMode::Shift;
+			shift_menu_index = 0;
+		}
+		request_shift_redraw = true;
+	}
 	if (hw.button1.RisingEdge())
 	{
 		button1_press = true;
 	}
-	if (ui_mode == UiMode::Main)
+	if (ui_mode == UiMode::Shift)
+	{
+		if (encoder_l_inc != 0)
+		{
+			int32_t next = shift_menu_index + encoder_l_inc;
+			while (next < 0)
+			{
+				next += kShiftMenuCount;
+			}
+			while (next >= kShiftMenuCount)
+			{
+				next -= kShiftMenuCount;
+			}
+			shift_menu_index = next;
+			request_shift_redraw = true;
+		}
+		if (encoder_r_pressed)
+		{
+			LogLine("Shift menu select: %s", kShiftMenuLabels[shift_menu_index]);
+			if (shift_menu_index == 1)
+			{
+				record_input = RecordInput::LineIn;
+				LogLine("Record input set: LINE IN (L)");
+			}
+			else if (shift_menu_index == 2)
+			{
+				record_input = RecordInput::Mic;
+				LogLine("Record input set: MIC (R)");
+			}
+			ui_mode = shift_prev_mode;
+			request_shift_redraw = true;
+		}
+		if (encoder_l_pressed)
+		{
+			ui_mode = shift_prev_mode;
+			request_shift_redraw = true;
+		}
+	}
+	else if (ui_mode == UiMode::Main)
 	{
 		if (encoder_l_inc != 0)
 		{
@@ -2071,17 +2320,9 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		{
 			if (record_state == RecordState::Armed)
 			{
-				record_pos = 0;
-				sample_length = 0;
-				sample_loaded = false;
-				playback_active = false;
-				sample_channels = 1;
-				sample_rate = 48000;
-				trim_start = 0.0f;
-				trim_end = 1.0f;
-				CopyString(loaded_sample_name, "RECORD", kMaxWavNameLen);
-				record_state = RecordState::Recording;
-				LogLine("Record: start (monitor ON)");
+				record_state = RecordState::Countdown;
+				record_countdown_start_ms = System::GetNow();
+				request_length_redraw = true;
 			}
 			else if (record_state == RecordState::Recording)
 			{
@@ -2092,8 +2333,17 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				playback_active = false;
 				trim_start = 0.0f;
 				trim_end = 1.0f;
+				waveform_from_recording = true;
 				record_state = RecordState::Review;
 				record_waveform_pending = true;
+				if (sample_loaded)
+				{
+					ComputeWaveform();
+					waveform_ready = true;
+					waveform_dirty = true;
+					UpdateTrimFrames();
+					request_length_redraw = true;
+				}
 				LogLine("Record: stop, frames=%lu", static_cast<unsigned long>(sample_length));
 			}
 			else if (record_state == RecordState::Review && sample_loaded)
@@ -2206,6 +2456,14 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		}
 	}
 
+	if (record_state == RecordState::Countdown)
+	{
+		if ((System::GetNow() - record_countdown_start_ms) >= kRecordCountdownMs)
+		{
+			StartRecording();
+		}
+	}
+
 	size_t window_start = sample_play_start;
 	size_t window_end = sample_play_end;
 	if (window_end > sample_length || window_end == 0)
@@ -2260,12 +2518,12 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			}
 			tune_sig = sinf(2.0f * kPi * tune_phase) * tune_amp;
 		}
-	if (record_state == RecordState::Recording)
+		if (record_state == RecordState::Recording)
 	{
 		if (record_pos < kRecordMaxFrames)
 		{
-			float in_l = in[0][i];
-				int32_t s = static_cast<int32_t>(in_l * 32767.0f);
+			const float in_sel = (record_input == RecordInput::Mic) ? in[1][i] : in[0][i];
+				int32_t s = static_cast<int32_t>(in_sel * 32767.0f);
 				if (s > 32767)
 				{
 					s = 32767;
@@ -2277,6 +2535,33 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				const int16_t samp = static_cast<int16_t>(s);
 				sample_buffer_l[record_pos] = samp;
 				sample_buffer_r[record_pos] = samp;
+				int16_t abs_s = samp < 0 ? static_cast<int16_t>(-samp) : samp;
+				if (abs_s > live_wave_peak)
+				{
+					live_wave_peak = abs_s;
+				}
+				const float norm = (live_wave_peak > 0)
+					? (28.0f / (static_cast<float>(live_wave_peak) * kSampleScale))
+					: 1.0f;
+				const float s_scaled = static_cast<float>(samp) * kSampleScale * norm;
+				int16_t s_pix = static_cast<int16_t>(s_scaled);
+				const int32_t col = static_cast<int32_t>(
+					(static_cast<uint64_t>(record_pos) * 128U) / kRecordMaxFrames);
+				if (col >= 0 && col < 128)
+				{
+					if (col != live_wave_last_col)
+					{
+						live_wave_min[col] = s_pix;
+						live_wave_max[col] = s_pix;
+						live_wave_last_col = col;
+						live_wave_dirty = true;
+					}
+					else
+					{
+						if (s_pix < live_wave_min[col]) live_wave_min[col] = s_pix;
+						if (s_pix > live_wave_max[col]) live_wave_max[col] = s_pix;
+					}
+				}
 				++record_pos;
 			}
 			if (record_pos >= kRecordMaxFrames)
@@ -2289,8 +2574,17 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				request_playback_stop_log = true;
 				trim_start = 0.0f;
 				trim_end = 1.0f;
+				waveform_from_recording = true;
 				record_state = RecordState::Review;
 				record_waveform_pending = true;
+				if (sample_loaded)
+				{
+					ComputeWaveform();
+					waveform_ready = true;
+					waveform_dirty = true;
+					UpdateTrimFrames();
+					request_length_redraw = true;
+				}
 				LogLine("Record: auto-stop at max frames=%lu",
 						static_cast<unsigned long>(sample_length));
 			}
@@ -2354,6 +2648,7 @@ int main(void)
 	LogLine("Logger started");
 
 	encoder_r.Init(seed::D7, seed::D8, seed::D22, hw.AudioSampleRate());
+	shift_button.Init(seed::D9, 1000);
 
 	PodDisplay::Config disp_cfg;
 	disp_cfg.driver_config.transport_config.i2c_config.pin_config.scl = seed::D11;
@@ -2377,6 +2672,7 @@ int main(void)
 	hw.midi.StartReceive();
 	UiMode last_mode = UiMode::Main;
 	int32_t last_menu = -1;
+	int32_t last_shift_menu = -1;
 	int32_t last_scroll = -1;
 	int32_t last_selected = -1;
 	int32_t last_file_count = -1;
@@ -2484,6 +2780,12 @@ int main(void)
 			request_tune_redraw = false;
 			DrawTuneScreen();
 		}
+		if (request_shift_redraw && ui_mode == UiMode::Shift)
+		{
+			request_shift_redraw = false;
+			DrawShiftMenu(shift_menu_index);
+			last_shift_menu = shift_menu_index;
+		}
 
 		const UiMode mode = ui_mode;
 		if (mode != last_mode)
@@ -2518,11 +2820,20 @@ int main(void)
 			{
 				DrawTuneScreen();
 			}
+			else if (mode == UiMode::Shift)
+			{
+				DrawShiftMenu(shift_menu_index);
+				last_shift_menu = shift_menu_index;
+			}
 			else
 			{
 				if (record_state == RecordState::Armed)
 				{
 					DrawRecordArmed();
+				}
+				else if (record_state == RecordState::Countdown)
+				{
+					DrawRecordCountdown();
 				}
 				else if (record_state == RecordState::Recording)
 				{
@@ -2530,6 +2841,13 @@ int main(void)
 				}
 				else
 				{
+					if (sample_loaded && sample_length > 0)
+					{
+						ComputeWaveform();
+						waveform_ready = true;
+						waveform_dirty = true;
+						UpdateTrimFrames();
+					}
 					DrawRecordReview();
 				}
 			}
@@ -2551,6 +2869,15 @@ int main(void)
 						static_cast<long>(current));
 				DrawMenu(current);
 				last_menu = current;
+			}
+		}
+		else if (mode == UiMode::Shift)
+		{
+			const int32_t current = shift_menu_index;
+			if (current != last_shift_menu)
+			{
+				DrawShiftMenu(current);
+				last_shift_menu = current;
 			}
 		}
 		else if (mode == UiMode::Load)
@@ -2588,6 +2915,10 @@ int main(void)
 					record_anim_start_ms = NowMs();
 					DrawRecordArmed();
 				}
+				else if (current_state == RecordState::Countdown)
+				{
+					DrawRecordCountdown();
+				}
 				else if (current_state == RecordState::Recording)
 				{
 					DrawRecordRecording();
@@ -2599,9 +2930,21 @@ int main(void)
 				last_record_state = current_state;
 			}
 		}
-		if (mode == UiMode::Record && record_state == RecordState::Armed)
+		if (mode == UiMode::Record && record_state == RecordState::Recording)
+		{
+			if (live_wave_dirty)
+			{
+				live_wave_dirty = false;
+				DrawRecordRecording();
+			}
+		}
+		else if (mode == UiMode::Record && record_state == RecordState::Armed)
 		{
 			DrawRecordReadyScreen();
+		}
+		else if (mode == UiMode::Record && record_state == RecordState::Countdown)
+		{
+			DrawRecordCountdown();
 		}
 		if (request_playhead_redraw || (playback_active != last_playback_active))
 		{
