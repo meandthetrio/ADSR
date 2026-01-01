@@ -49,10 +49,18 @@ enum class UiMode : int32_t
 {
 	Main,
 	Load,
+	LoadTarget,
 	Play,
 	Record,
 	Tune,
+	AdsrSelect,
 	Shift,
+};
+
+enum class LoadDestination : int32_t
+{
+	Play = 0,
+	Bake = 1,
 };
 
 enum class RecordState : int32_t
@@ -87,7 +95,11 @@ volatile int32_t load_scroll = 0;
 volatile bool request_load_scan = false;
 volatile bool request_load_sample = false;
 volatile int32_t request_load_index = -1;
+volatile LoadDestination request_load_destination = LoadDestination::Play;
 volatile int32_t wav_file_count = 0;
+volatile int32_t load_target_index = -1;
+volatile LoadDestination load_target_selected = LoadDestination::Play;
+volatile bool request_sample_pitch_estimate = false;
 
 bool sd_mounted = false;
 static bool sd_detected_last = true;
@@ -145,6 +157,17 @@ volatile float playback_rate = 1.0f;
 volatile float playback_phase = 0.0f;
 volatile float playback_amp = 0.0f;
 volatile int32_t current_note = -1;
+volatile float last_tune_freq_hz = 440.0f;
+float sample_pitch_hz = 0.0f;
+int32_t adsr_selected = 0;
+size_t adsr_a_end = 0;
+size_t adsr_d_end = 0;
+size_t adsr_s_end = 0;
+size_t adsr_r_end = 0;
+size_t adsr_last_init_start = 0;
+size_t adsr_last_init_end = 0;
+bool adsr_initialized = false;
+bool request_adsr_redraw = false;
 
 // Normalized trim window (0..1 over entire sample)
 float trim_start = 0.0f;
@@ -166,6 +189,8 @@ static int16_t live_wave_max[128];
 static int16_t live_wave_peak = 1;
 static bool live_wave_dirty = false;
 static int32_t live_wave_last_col = -1;
+static float pitch_buf[4096];
+static float pitch_scores[4096];
 
 constexpr size_t kRecordMaxFrames = static_cast<size_t>(kRecordMaxSeconds) * 48000U;
 constexpr uint32_t kRecordCountdownMs = 4000;
@@ -179,6 +204,7 @@ volatile bool encoder_r_button_press = false;
 volatile bool request_length_redraw = false;
 volatile bool request_playhead_redraw = false;
 volatile bool button1_press = false;
+volatile bool button2_press = false;
 volatile bool request_playback_stop_log = false;
 volatile bool preview_hold = false;
 volatile bool preview_active = false;
@@ -435,9 +461,11 @@ static const char* UiModeName(UiMode mode)
 	{
 		case UiMode::Main: return "MAIN";
 		case UiMode::Load: return "LOAD";
+		case UiMode::LoadTarget: return "LOAD_TARGET";
 		case UiMode::Play: return "PLAY";
 		case UiMode::Record: return "RECORD";
 		case UiMode::Tune: return "TUNE";
+		case UiMode::AdsrSelect: return "ADSR_SELECT";
 		case UiMode::Shift: return "SHIFT";
 		default: return "UNKNOWN";
 	}
@@ -679,6 +707,37 @@ static void CopyString(char* dst, const char* src, size_t max_len)
 		dst[i] = src[i];
 	}
 	dst[i] = '\0';
+}
+
+static float FreqToMidi(float freq_hz)
+{
+	if (freq_hz <= 0.0f)
+	{
+		return 24.0f;
+	}
+	const float midi = 69.0f + 12.0f * log2f(freq_hz / 440.0f);
+	if (midi < 24.0f)
+	{
+		return 24.0f;
+	}
+	if (midi > 108.0f)
+	{
+		return 108.0f;
+	}
+	return midi;
+}
+
+static int FreqToStripX(float freq_hz, int strip_x, int strip_w)
+{
+	if (strip_w <= 1)
+	{
+		return strip_x;
+	}
+	const float midi = FreqToMidi(freq_hz);
+	const float norm = (midi - 24.0f) / (108.0f - 24.0f);
+	const float clamped = (norm < 0.0f) ? 0.0f : (norm > 1.0f ? 1.0f : norm);
+	const float x = static_cast<float>(strip_x) + clamped * static_cast<float>(strip_w - 1);
+	return strip_x + static_cast<int>(x - static_cast<float>(strip_x) + 0.5f);
 }
 
 static bool HasWavExtension(const char* name)
@@ -1111,21 +1170,7 @@ static void ComputeWaveform()
 		step = 1;
 	}
 
-	float scale = 28.0f;
-	float peak = 0.0f;
-	for (size_t i = 0; i < frames; ++i)
-	{
-		const float s = static_cast<float>(sample_buffer_l[i]) * kSampleScale;
-		const float a = (s < 0.0f) ? -s : s;
-		if (a > peak)
-		{
-			peak = a;
-		}
-	}
-	if (peak > 0.0001f)
-	{
-		scale = 28.0f / peak;
-	}
+	const float scale = 28.0f;
 
 	for (size_t col = 0; col < columns; ++col)
 	{
@@ -1159,6 +1204,7 @@ static void UpdateTrimFrames()
 	{
 		sample_play_start = 0;
 		sample_play_end   = sample_length;
+		adsr_initialized = false;
 		return;
 	}
 
@@ -1184,14 +1230,19 @@ static void UpdateTrimFrames()
 
 	sample_play_start = snap_start_frame;
 	sample_play_end   = snap_end_frame;
+	adsr_initialized = false;
+	if (ui_mode == UiMode::AdsrSelect)
+	{
+		request_adsr_redraw = true;
+	}
 }
 
-static void AdjustTrimNormalized(int32_t start_delta, int32_t end_delta)
+static void AdjustTrimNormalized(int32_t start_delta, int32_t end_delta, bool fine = false)
 {
 	if(sample_length < 2)
 		return;
 
-	const float base_step = 1.0f / 32.0f;
+	const float base_step = fine ? (1.0f / 64.0f) : (1.0f / 32.0f);
 
 	auto step = [&](int d)
 	{
@@ -1211,6 +1262,283 @@ static void AdjustTrimNormalized(int32_t start_delta, int32_t end_delta)
 	UpdateTrimFrames();
 	waveform_dirty = true;
 	request_length_redraw = true;
+	if (ui_mode == UiMode::AdsrSelect)
+	{
+		request_adsr_redraw = true;
+	}
+}
+
+static void EnsureAdsrInit()
+{
+	size_t window_start = sample_play_start;
+	size_t window_end = sample_play_end;
+	if (window_end > sample_length || window_end == 0)
+	{
+		window_end = sample_length;
+	}
+	if (window_end <= window_start)
+	{
+		window_start = 0;
+		window_end = sample_length;
+	}
+	const size_t window_len = (window_end > window_start) ? (window_end - window_start) : 0;
+	if (!adsr_initialized || window_start != adsr_last_init_start || window_end != adsr_last_init_end)
+	{
+		adsr_initialized = true;
+		adsr_last_init_start = window_start;
+		adsr_last_init_end = window_end;
+		adsr_a_end = window_start;
+		adsr_d_end = window_start + (window_len * 2) / 4;
+		adsr_s_end = window_start + (window_len * 3) / 4;
+		adsr_r_end = window_end;
+		if (adsr_d_end < adsr_a_end) adsr_d_end = adsr_a_end;
+		if (adsr_s_end < adsr_d_end) adsr_s_end = adsr_d_end;
+		if (adsr_r_end < adsr_s_end) adsr_r_end = adsr_s_end;
+	}
+}
+
+static void MoveAdsrMarker(int index, int32_t delta)
+{
+	if (delta == 0 || !sample_loaded)
+	{
+		return;
+	}
+	size_t window_start = sample_play_start;
+	size_t window_end = sample_play_end;
+	if (window_end > sample_length || window_end == 0)
+	{
+		window_end = sample_length;
+	}
+	if (window_end <= window_start)
+	{
+		window_start = 0;
+		window_end = sample_length;
+	}
+	const size_t window_len = (window_end > window_start) ? (window_end - window_start) : 0;
+	if (window_len == 0)
+	{
+		return;
+	}
+
+	size_t* markers[4] = {&adsr_a_end, &adsr_d_end, &adsr_s_end, &adsr_r_end};
+	const size_t base_step = (window_len >= 256) ? (window_len / 256) : 1;
+	auto scaled_step = [base_step](int32_t d) -> int64_t
+	{
+		int32_t mag = (d < 0) ? -d : d;
+		if (mag < 1) mag = 1;
+		int32_t log2_mag = 0;
+		int32_t tmp = mag;
+		while (tmp > 1) { tmp >>= 1; ++log2_mag; }
+		const int64_t scale = static_cast<int64_t>(2) * (1 + static_cast<int64_t>(log2_mag));
+		return static_cast<int64_t>(base_step) * scale;
+	};
+
+	const int64_t step = scaled_step(delta);
+	const int64_t move = static_cast<int64_t>(delta) * step;
+
+	size_t current = *markers[index];
+	int64_t next = static_cast<int64_t>(current) + move;
+
+	size_t min_bound = (index == 0) ? window_start : (*markers[index - 1] + 1);
+	size_t max_bound = (index == 3) ? window_end : (*markers[index + 1] - 1);
+	if (max_bound < min_bound)
+	{
+		max_bound = min_bound;
+	}
+
+	if (next < static_cast<int64_t>(min_bound))
+	{
+		next = static_cast<int64_t>(min_bound);
+	}
+	if (next > static_cast<int64_t>(max_bound))
+	{
+		next = static_cast<int64_t>(max_bound);
+	}
+
+	*markers[index] = static_cast<size_t>(next);
+}
+
+static bool EstimateSamplePitchHzWindow(float& out_hz)
+{
+	if (!sample_loaded || sample_length < 64 || sample_rate == 0)
+	{
+		return false;
+	}
+
+	const float kMinFreq = 32.703f;   // C1
+	const float kMaxFreq = 4186.01f;  // C8
+	const int kDownsample = 4;
+	const float kConfidenceThresh = 0.4f;
+
+	size_t region_start = sample_play_start;
+	size_t region_end = sample_play_end;
+	if (region_end > sample_length || region_end == 0)
+	{
+		region_end = sample_length;
+	}
+	if (region_end <= region_start)
+	{
+		return false;
+	}
+	const size_t region_len = region_end - region_start;
+
+	auto analyze = [&](size_t target_n, float& best_hz) -> bool
+	{
+		if (target_n == 0 || target_n > sizeof(pitch_buf) / sizeof(pitch_buf[0]))
+		{
+			return false;
+		}
+
+		size_t needed_frames = target_n * static_cast<size_t>(kDownsample);
+		if (needed_frames > region_len)
+		{
+			const size_t possible_n = region_len / static_cast<size_t>(kDownsample);
+			if (possible_n < 128)
+			{
+				return false;
+			}
+			target_n = possible_n;
+			needed_frames = target_n * static_cast<size_t>(kDownsample);
+		}
+
+		size_t start = region_start;
+		if (needed_frames < region_len)
+		{
+			const size_t slack = region_len - needed_frames;
+			start = region_start + slack / 2;
+		}
+		if (start + needed_frames > sample_length)
+		{
+			start = (sample_length > needed_frames) ? (sample_length - needed_frames) : 0;
+		}
+
+		const size_t actual_n = target_n;
+		float mean = 0.0f;
+		for (size_t i = 0; i < actual_n; ++i)
+		{
+			const size_t idx = start + i * static_cast<size_t>(kDownsample);
+			float s = static_cast<float>(sample_buffer_l[idx]);
+			if (sample_channels == 2)
+			{
+				s = 0.5f * (s + static_cast<float>(sample_buffer_r[idx]));
+			}
+			mean += s;
+		}
+		mean /= static_cast<float>(actual_n);
+
+		float energy0 = 0.0f;
+		for (size_t i = 0; i < actual_n; ++i)
+		{
+			const size_t idx = start + i * static_cast<size_t>(kDownsample);
+			float s = static_cast<float>(sample_buffer_l[idx]);
+			if (sample_channels == 2)
+			{
+				s = 0.5f * (s + static_cast<float>(sample_buffer_r[idx]));
+			}
+			const float v = s * kSampleScale - mean * kSampleScale;
+			pitch_buf[i] = v;
+			energy0 += v * v;
+		}
+
+		if (energy0 <= 1e-9f)
+		{
+			return false;
+		}
+
+		const float ds_rate = static_cast<float>(sample_rate) / static_cast<float>(kDownsample);
+		size_t lag_min = static_cast<size_t>(ceilf(ds_rate / kMaxFreq));
+		size_t lag_max = static_cast<size_t>(floorf(ds_rate / kMinFreq));
+		if (lag_min < 2)
+		{
+			lag_min = 2;
+		}
+		if (lag_max >= actual_n - 1)
+		{
+			lag_max = (actual_n > 1) ? (actual_n - 2) : 1;
+		}
+		if (lag_max <= lag_min)
+		{
+			return false;
+		}
+
+		const size_t scores_limit = (lag_max + 2 < (sizeof(pitch_scores) / sizeof(pitch_scores[0])))
+			? (lag_max + 2)
+			: (sizeof(pitch_scores) / sizeof(pitch_scores[0]));
+		for (size_t i = 0; i < scores_limit; ++i)
+		{
+			pitch_scores[i] = 0.0f;
+		}
+
+		for (size_t lag = lag_min; lag <= lag_max; ++lag)
+		{
+			const size_t limit = actual_n - lag;
+			float corr = 0.0f;
+			for (size_t i = 0; i < limit; ++i)
+			{
+				corr += pitch_buf[i] * pitch_buf[i + lag];
+			}
+			const float score = corr / energy0;
+			if (lag < (sizeof(pitch_scores) / sizeof(pitch_scores[0])))
+			{
+				pitch_scores[lag] = score;
+			}
+		}
+
+		float best_peak_score = -1.0f;
+		size_t best_peak_lag = lag_min;
+		for (size_t lag = lag_min + 1; lag + 1 <= lag_max; ++lag)
+		{
+			const float s = pitch_scores[lag];
+			if (s > pitch_scores[lag - 1] && s >= pitch_scores[lag + 1])
+			{
+				if (s > best_peak_score)
+				{
+					best_peak_score = s;
+					best_peak_lag = lag;
+				}
+			}
+		}
+
+		if (best_peak_score <= 0.0f)
+		{
+			return false;
+		}
+
+		if (best_peak_score < kConfidenceThresh)
+		{
+			return false;
+		}
+
+		const float near_thresh = best_peak_score * 0.9f;
+		size_t chosen_lag = best_peak_lag;
+		for (size_t lag = lag_min + 1; lag + 1 <= lag_max; ++lag)
+		{
+			const float s = pitch_scores[lag];
+			if (s > pitch_scores[lag - 1] && s >= pitch_scores[lag + 1] && s >= near_thresh)
+			{
+				if (lag > chosen_lag)
+				{
+					chosen_lag = lag;
+				}
+			}
+		}
+
+		best_hz = ds_rate / static_cast<float>(chosen_lag);
+		return true;
+	};
+
+	float hz = 0.0f;
+	if (analyze(2048, hz))
+	{
+		out_hz = hz;
+		return true;
+	}
+	if (analyze(4096, hz))
+	{
+		out_hz = hz;
+		return true;
+	}
+	return false;
 }
 
 static bool LoadSampleFromPath(const char* path)
@@ -1376,6 +1704,7 @@ static bool LoadSampleFromPath(const char* path)
 	sample_length = dest_index;
 	sample_rate = wav.sample_rate;
 	sample_loaded = (sample_length > 0);
+	sample_pitch_hz = 0.0f;
 	if (!sample_loaded)
 	{
 		LogLine("Load failed: no audio data read");
@@ -1389,6 +1718,7 @@ static bool LoadSampleFromPath(const char* path)
 	waveform_ready = true;
 	waveform_dirty = true;
 	UpdateTrimFrames();
+	adsr_initialized = false;
 	return true;
 }
 
@@ -1907,6 +2237,39 @@ static void DrawLoadMenu(int32_t top_index, int32_t selected)
 	display.Update();
 }
 
+static void DrawLoadTargetMenu(LoadDestination selected)
+{
+	const FontDef font = Font_6x8;
+	display.Fill(false);
+
+	display.SetCursor(0, 0);
+	display.WriteString("LOAD TO?", font, true);
+
+	const int box_y = font.FontHeight + 4;
+	const int box_h = 40;
+	const int box_w = 56;
+	const int gap = 8;
+	const int start_x = (static_cast<int>(display.Width()) - (box_w * 2 + gap)) / 2;
+
+	auto draw_box = [&](int x, const char* label, bool highlight)
+	{
+		display.DrawRect(x,
+						 box_y,
+						 x + box_w - 1,
+						 box_y + box_h - 1,
+						 true,
+						 highlight);
+		const int text_x = x + (box_w - static_cast<int>(StrLen(label)) * font.FontWidth) / 2;
+		const int text_y = box_y + (box_h - font.FontHeight) / 2;
+		display.SetCursor(text_x, text_y);
+		display.WriteString(label, font, !highlight);
+	};
+
+	draw_box(start_x, "PLAY", selected == LoadDestination::Play);
+	draw_box(start_x + box_w + gap, "BAKE", selected == LoadDestination::Bake);
+	display.Update();
+}
+
 static void DrawRecordReadyScreen()
 {
 	display.Fill(false);
@@ -2324,12 +2687,14 @@ static void StartRecording()
 	record_pos = 0;
 	sample_length = 0;
 	sample_loaded = false;
+	sample_pitch_hz = 0.0f;
 	playback_active = false;
 	sample_channels = 1;
 	sample_rate = 48000;
 	trim_start = 0.0f;
 	trim_end = 1.0f;
 	CopyString(loaded_sample_name, "RECORD", kMaxWavNameLen);
+	adsr_initialized = false;
 	for (int i = 0; i < 128; ++i)
 	{
 		live_wave_min[i] = 0;
@@ -2736,10 +3101,205 @@ static void DrawTuneScreen()
 {
 	display.Fill(false);
 	const int radius = 12;
-	const int y = 40;
+	const int y = 32;
 	DrawKnob(22, y, radius, "LVL", tune_level_pos, -120, 120, tune_selected == 2);
-	DrawKnob(64, y, radius, "CRSE", tune_coarse, -24, 24, tune_selected == 0);
+	DrawKnob(64, y, radius, "CRSE", tune_coarse, -48, 48, tune_selected == 0);
 	DrawKnob(106, y, radius, "FINE", tune_fine, -100, 100, tune_selected == 1);
+
+	const int strip_margin_x = 4;
+	const int strip_gap_y = 4;
+	const int strip_height = 10;
+	int strip_x = strip_margin_x;
+	int strip_w = static_cast<int>(display.Width()) - strip_margin_x * 2;
+	if (strip_w < 2)
+	{
+		strip_w = 2;
+	}
+	int strip_y = y + radius + strip_gap_y;
+	if (strip_y + strip_height > static_cast<int>(display.Height()))
+	{
+		strip_y = static_cast<int>(display.Height()) - strip_height;
+		if (strip_y < 0)
+		{
+			strip_y = 0;
+		}
+	}
+	const int strip_bottom = strip_y + strip_height - 1;
+	display.DrawRect(strip_x,
+					 strip_y,
+					 strip_x + strip_w - 1,
+					 strip_bottom,
+					 true,
+					 false);
+
+	const int triangle_x = FreqToStripX(last_tune_freq_hz, strip_x, strip_w);
+	const int tri_base_y = strip_bottom - 1;
+	const int tri_height = 4;
+	for (int dy = 0; dy < tri_height; ++dy)
+	{
+		const int row_y = tri_base_y - dy;
+		if (row_y < strip_y)
+		{
+			break;
+		}
+		int x0 = triangle_x - dy;
+		int x1 = triangle_x + dy;
+		if (x0 < strip_x)
+		{
+			x0 = strip_x;
+		}
+		if (x1 > strip_x + strip_w - 1)
+		{
+			x1 = strip_x + strip_w - 1;
+		}
+		display.DrawLine(x0, row_y, x1, row_y, true);
+	}
+
+	if (sample_pitch_hz > 0.0f)
+	{
+		const int circle_x = FreqToStripX(sample_pitch_hz, strip_x, strip_w);
+		const int r = 2;
+		int circle_y = strip_y + strip_height / 2;
+		if (circle_y - r < strip_y)
+		{
+			circle_y = strip_y + r;
+		}
+		if (circle_y + r > strip_bottom)
+		{
+			circle_y = strip_bottom - r;
+		}
+		for (int dy = -r; dy <= r; ++dy)
+		{
+			const int yy = circle_y + dy;
+			const int span = static_cast<int>(sqrtf(static_cast<float>(r * r - dy * dy)));
+			int x0 = circle_x - span;
+			int x1 = circle_x + span;
+			if (x0 < strip_x)
+			{
+				x0 = strip_x;
+			}
+			if (x1 > strip_x + strip_w - 1)
+			{
+				x1 = strip_x + strip_w - 1;
+			}
+			display.DrawLine(x0, yy, x1, yy, true);
+		}
+	}
+	display.Update();
+}
+
+static void DrawAdsrSelectScreen()
+{
+	EnsureAdsrInit();
+	display.Fill(false);
+
+	const FontDef font = Font_6x8;
+	const char* labels[4] = {"A", "D", "S", "R"};
+	const int boxes = 4;
+	const int box_w = static_cast<int>(display.Width()) / boxes;
+	const int box_h = font.FontHeight + 6;
+
+	for (int i = 0; i < boxes; ++i)
+	{
+		const int x0 = i * box_w;
+		const int x1 = (i == boxes - 1) ? static_cast<int>(display.Width()) - 1 : (x0 + box_w - 1);
+		const bool sel = (i == adsr_selected);
+		display.DrawRect(x0, 0, x1, box_h - 1, true, sel);
+		const int label_w = static_cast<int>(StrLen(labels[i])) * font.FontWidth;
+		const int lx = x0 + (box_w - label_w) / 2;
+		const int ly = (box_h - font.FontHeight) / 2;
+		display.SetCursor(lx, ly);
+		display.WriteString(labels[i], font, !sel);
+	}
+
+	const int wave_top = box_h + 4;
+	int wave_h = static_cast<int>(display.Height()) - wave_top;
+	if (wave_h < 2)
+	{
+		display.Update();
+		return;
+	}
+	const int wave_center = wave_top + wave_h / 2;
+
+	size_t window_start = sample_play_start;
+	size_t window_end = sample_play_end;
+	if (window_end > sample_length || window_end == 0)
+	{
+		window_end = sample_length;
+	}
+	if (window_end <= window_start)
+	{
+		window_start = 0;
+		window_end = sample_length;
+	}
+	const size_t window_len = (window_end > window_start) ? (window_end - window_start) : 0;
+
+	if (!sample_loaded || window_len == 0)
+	{
+		display.SetCursor(0, wave_top);
+		display.WriteString("NO WINDOW", font, true);
+		display.Update();
+		return;
+	}
+
+	const int width = static_cast<int>(display.Width());
+	const float scale = static_cast<float>(wave_h / 2 - 1) * kSampleScale;
+	for (int x = 0; x < width; ++x)
+	{
+		const size_t start = window_start + (window_len * static_cast<size_t>(x)) / static_cast<size_t>(width);
+		size_t end = window_start + (window_len * static_cast<size_t>(x + 1)) / static_cast<size_t>(width);
+		if (end <= start)
+		{
+			end = start + 1;
+		}
+		if (end > window_end)
+		{
+			end = window_end;
+		}
+
+		int16_t min_val = 32767;
+		int16_t max_val = -32768;
+		for (size_t i = start; i < end; ++i)
+		{
+			int32_t sample = sample_buffer_l[i];
+			if (sample_channels == 2)
+			{
+				sample = (sample + sample_buffer_r[i]) / 2;
+			}
+			const int16_t samp = static_cast<int16_t>(sample);
+			if (samp < min_val) min_val = samp;
+			if (samp > max_val) max_val = samp;
+		}
+
+		int y1 = wave_center - static_cast<int>(max_val * scale);
+		int y2 = wave_center - static_cast<int>(min_val * scale);
+		if (y1 < wave_top) y1 = wave_top;
+		if (y2 > wave_top + wave_h - 1) y2 = wave_top + wave_h - 1;
+		display.DrawLine(x, y1, x, y2, true);
+	}
+
+	auto MarkerX = [&](size_t pos) -> int
+	{
+		if (window_len == 0) return 0;
+		const uint64_t num = (pos - window_start) * static_cast<uint64_t>(width);
+		int x = static_cast<int>(num / window_len);
+		if (x < 0) x = 0;
+		if (x >= width) x = width - 1;
+		return x;
+	};
+
+	const int markers[4] = {
+		MarkerX(adsr_a_end),
+		MarkerX(adsr_d_end),
+		MarkerX(adsr_s_end),
+		MarkerX(adsr_r_end),
+	};
+	for (int i = 0; i < 4; ++i)
+	{
+		const int x = markers[i];
+		display.DrawLine(x, wave_top, x, wave_top + wave_h - 1, true);
+	}
+
 	display.Update();
 }
 
@@ -2899,23 +3459,13 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	}
 	const bool ui_blocked = (sd_init_in_progress || save_in_progress);
 	shift_button.Debounce();
-	if (!ui_blocked && shift_button.RisingEdge())
-	{
-	if (ui_mode == UiMode::Shift && !ui_blocked)
-	{
-			ui_mode = shift_prev_mode;
-		}
-		else
-		{
-			shift_prev_mode = ui_mode;
-			ui_mode = UiMode::Shift;
-			shift_menu_index = 0;
-		}
-		request_shift_redraw = true;
-	}
 	if (hw.button1.RisingEdge())
 	{
 		button1_press = true;
+	}
+	if (hw.button2.RisingEdge())
+	{
+		button2_press = true;
 	}
 	preview_hold = (ui_mode == UiMode::Load && !delete_mode) ? hw.button1.Pressed() : false;
 	if (!sd_init_in_progress && ui_mode == UiMode::Shift)
@@ -3082,8 +3632,9 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				}
 				else
 				{
-					request_load_sample = true;
-					request_load_index = load_selected;
+					load_target_selected = LoadDestination::Play;
+					load_target_index = load_selected;
+					ui_mode = UiMode::LoadTarget;
 				}
 			}
 			if (encoder_l_pressed)
@@ -3099,6 +3650,32 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 					ui_mode = UiMode::Main;
 				}
 			}
+		}
+	}
+	else if (!ui_blocked && ui_mode == UiMode::LoadTarget)
+	{
+		if (encoder_l_inc != 0)
+		{
+			int32_t next = static_cast<int32_t>(load_target_selected) + encoder_l_inc;
+			while (next < 0)
+			{
+				next += 2;
+			}
+			while (next >= 2)
+			{
+				next -= 2;
+			}
+			load_target_selected = static_cast<LoadDestination>(next);
+		}
+		if (encoder_r_pressed && load_target_index >= 0 && load_target_index < wav_file_count)
+		{
+			request_load_destination = load_target_selected;
+			request_load_sample = true;
+			request_load_index = load_target_index;
+		}
+		if (encoder_l_pressed)
+		{
+			ui_mode = UiMode::Load;
 		}
 	}
 	else if (!ui_blocked && ui_mode == UiMode::Record)
@@ -3181,7 +3758,16 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		{
 			if(encoder_l_inc != 0 || encoder_r_inc != 0)
 			{
-				AdjustTrimNormalized(encoder_l_inc, encoder_r_inc);
+				int32_t dl = encoder_l_inc;
+				int32_t dr = encoder_r_inc;
+				if (shift_button.Pressed())
+				{
+					if (dl > 0) dl = 1;
+					else if (dl < 0) dl = -1;
+					if (dr > 0) dr = 1;
+					else if (dr < 0) dr = -1;
+				}
+				AdjustTrimNormalized(dl, dr, shift_button.Pressed());
 			}
 		}
 	}
@@ -3207,13 +3793,13 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			if (tune_selected == 0)
 			{
 				tune_coarse += tune_step_coarse;
-				if (tune_coarse < -24)
+				if (tune_coarse < -48)
 				{
-					tune_coarse = -24;
+					tune_coarse = -48;
 				}
-				if (tune_coarse > 24)
+				if (tune_coarse > 48)
 				{
-					tune_coarse = 24;
+					tune_coarse = 48;
 				}
 			}
 			else if (tune_selected == 1)
@@ -3242,22 +3828,60 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			}
 			request_tune_redraw = true;
 		}
+		if (encoder_r_pressed)
+		{
+			ui_mode = UiMode::AdsrSelect;
+			adsr_selected = 0;
+			adsr_initialized = false;
+			request_adsr_redraw = true;
+		}
 		if (encoder_l_pressed)
 		{
-			ui_mode = UiMode::Record;
-			record_state = RecordState::Review;
-			request_length_redraw = true;
+			ui_mode = UiMode::AdsrSelect;
+			adsr_selected = 0;
+			adsr_initialized = false;
+			request_adsr_redraw = true;
 		}
 	}
 	else if (!ui_blocked && ui_mode == UiMode::Play)
 	{
 		if (encoder_l_inc != 0 || encoder_r_inc != 0)
 		{
-			AdjustTrimNormalized(encoder_l_inc, encoder_r_inc);
+			int32_t dl = encoder_l_inc;
+			int32_t dr = encoder_r_inc;
+			if (shift_button.Pressed())
+			{
+				if (dl > 0) dl = 1;
+				else if (dl < 0) dl = -1;
+				if (dr > 0) dr = 1;
+				else if (dr < 0) dr = -1;
+			}
+			AdjustTrimNormalized(dl, dr, shift_button.Pressed());
 		}
 		if (encoder_l_pressed)
 		{
 			ui_mode = UiMode::Main;
+		}
+	}
+	else if (!ui_blocked && ui_mode == UiMode::AdsrSelect)
+	{
+		EnsureAdsrInit();
+		if (encoder_l_inc != 0)
+		{
+			adsr_selected += encoder_l_inc;
+			while (adsr_selected < 0) adsr_selected += 4;
+			while (adsr_selected >= 4) adsr_selected -= 4;
+			request_adsr_redraw = true;
+		}
+		if (encoder_r_inc != 0)
+		{
+			MoveAdsrMarker(adsr_selected, encoder_r_inc);
+			request_adsr_redraw = true;
+		}
+		if (encoder_l_pressed)
+		{
+			ui_mode = UiMode::Tune;
+			request_tune_redraw = true;
 		}
 	}
 	else
@@ -3304,6 +3928,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	const float tune_freq = 440.0f
 		* powf(2.0f, (static_cast<float>(tune_coarse)
 			+ static_cast<float>(tune_fine) / 100.0f) / 12.0f);
+	last_tune_freq_hz = tune_freq;
 	const float lvl_norm_raw = (static_cast<float>(tune_level_pos) + 120.0f) / 240.0f;
 	const float lvl_norm = (lvl_norm_raw < 0.0f) ? 0.0f : (lvl_norm_raw > 1.0f ? 1.0f : lvl_norm_raw);
 	const float lvl_shape = powf(lvl_norm, 0.193f); // more logarithmic
@@ -3519,6 +4144,7 @@ int main(void)
 	bool last_sd_mounted = false;
 	RecordState last_record_state = RecordState::Armed;
 	bool last_playback_active = false;
+	LoadDestination last_load_target = LoadDestination::Play;
 	while(1)
 	{
 		hw.midi.Listen();
@@ -3540,19 +4166,31 @@ int main(void)
 		{
 			encoder_r_button_press = false;
 			if (UiLogEnabled())
-			{
-				LogLine("Encoder R button pressed");
-			}
-		}
-		const bool ui_blocked = (sd_init_in_progress || save_in_progress);
-		if (button1_press && sample_loaded && ui_mode != UiMode::Load)
 		{
-			button1_press = false;
-			if (UiLogEnabled())
-			{
+			LogLine("Encoder R button pressed");
+		}
+	}
+	const bool ui_blocked = (sd_init_in_progress || save_in_progress);
+	if (button2_press)
+	{
+		button2_press = false;
+		if (!ui_blocked)
+		{
+			shift_prev_mode = ui_mode;
+			ui_mode = UiMode::Shift;
+			shift_menu_index = 0;
+			request_shift_redraw = true;
+		}
+	}
+	if (button1_press && sample_loaded && ui_mode != UiMode::Load && ui_mode != UiMode::LoadTarget)
+	{
+		button1_press = false;
+		if (UiLogEnabled())
+		{
 				LogLine("Button1: playback request (unpitched)");
 			}
 			StartPlayback(kBaseMidiNote, false);
+			request_sample_pitch_estimate = true;
 			request_playhead_redraw = true;
 		}
 		if (request_load_scan)
@@ -3586,7 +4224,10 @@ int main(void)
 				request_load_sample = false;
 				const int32_t index = request_load_index;
 				request_load_index = -1;
-				LogLine("Load menu: sample request index=%ld", static_cast<long>(index));
+				const LoadDestination dest = request_load_destination;
+				LogLine("Load menu: sample request index=%ld target=%s",
+						static_cast<long>(index),
+						(dest == LoadDestination::Bake) ? "BAKE" : "PLAY");
 				if (index >= 0 && index < wav_file_count)
 				{
 					LogLine("Load menu: sample name=%s", wav_files[index]);
@@ -3597,12 +4238,23 @@ int main(void)
 				}
 				if (LoadSampleAtIndex(index))
 				{
-					LogLine("Load success, entering PLAY menu");
-					ui_mode = UiMode::Play;
+					if (dest == LoadDestination::Bake)
+					{
+						LogLine("Load success, entering BAKE (trim review)");
+						ui_mode = UiMode::Record;
+						record_state = RecordState::Review;
+						request_length_redraw = true;
+					}
+					else
+					{
+						LogLine("Load success, entering PLAY menu");
+						ui_mode = UiMode::Play;
+					}
 				}
 				else
 				{
 					LogLine("Load failed");
+					ui_mode = UiMode::Load;
 				}
 			}
 		}
@@ -3799,6 +4451,23 @@ int main(void)
 			request_tune_redraw = false;
 			DrawTuneScreen();
 		}
+		if (!ui_blocked && request_sample_pitch_estimate)
+		{
+			request_sample_pitch_estimate = false;
+			if (sample_loaded)
+			{
+				float hz = 0.0f;
+				if (EstimateSamplePitchHzWindow(hz))
+				{
+					sample_pitch_hz = hz;
+					request_tune_redraw = true;
+					if (UiLogEnabled())
+					{
+						LogLine("Pitch estimate: %.2f Hz", static_cast<double>(sample_pitch_hz));
+					}
+				}
+			}
+		}
 		if (!ui_blocked && request_shift_redraw && ui_mode == UiMode::Shift)
 		{
 			request_shift_redraw = false;
@@ -3850,9 +4519,19 @@ int main(void)
 			{
 				DrawWaveform();
 			}
+			else if (mode == UiMode::LoadTarget)
+			{
+				DrawLoadTargetMenu(load_target_selected);
+				LogLine("Load target: %s",
+						(load_target_selected == LoadDestination::Bake) ? "BAKE" : "PLAY");
+			}
 			else if (mode == UiMode::Tune)
 			{
 				DrawTuneScreen();
+			}
+			else if (mode == UiMode::AdsrSelect)
+			{
+				DrawAdsrSelectScreen();
 			}
 			else if (mode == UiMode::Shift)
 			{
@@ -3896,6 +4575,7 @@ int main(void)
 			last_file_count = wav_file_count;
 			last_sd_mounted = sd_mounted;
 			last_record_state = record_state;
+			last_load_target = load_target_selected;
 		}
 		else if (mode == UiMode::Main)
 		{
@@ -3957,6 +4637,23 @@ int main(void)
 					last_file_count = current_count;
 					last_sd_mounted = sd_mounted;
 				}
+			}
+		}
+		else if (mode == UiMode::LoadTarget)
+		{
+			const LoadDestination current_target = load_target_selected;
+			if (current_target != last_load_target)
+			{
+				DrawLoadTargetMenu(current_target);
+				last_load_target = current_target;
+			}
+		}
+		else if (mode == UiMode::AdsrSelect)
+		{
+			if (request_adsr_redraw)
+			{
+				request_adsr_redraw = false;
+				DrawAdsrSelectScreen();
 			}
 		}
 		else if (mode == UiMode::Record)

@@ -1,10 +1,27 @@
-# WaveContV3 Branch
+# 1/1/26 EDGE
+
+
+-Added ADSR select window
+
+-Changed PodButton2 to the Save/Delete Menu
+
+-Changed the shift button to function as a fine-adjust for moving START/END times on the START/END select screen.  I.e. HOLD SHIFT and turn encoder will move the line 1/64th of sample vs 1/32nd of sample
+
+
+
+
+
+feature/Record2 Branch
+# 1/1/2026
 
 ## Author
 
-<!-- CUZ -->
+<!-- EDGE -->
 
 ## Description
+
+// Added BAKE feature
+
 
 // Updated main menu to Load, Record, Perform, Play. Perform is meant to be used with Midi, and Play will eventually be the sequencer.
 
