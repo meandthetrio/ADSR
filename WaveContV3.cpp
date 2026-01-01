@@ -16,14 +16,21 @@ using namespace daisysp;
 using PodDisplay = OledDisplay<SSD130xI2c128x64Driver>;
 
 constexpr bool kLogEnabled = true;
-constexpr int32_t kMenuCount = 3;
-constexpr int32_t kShiftMenuCount = 3;
+constexpr int32_t kMenuCount = 4;
+constexpr int32_t kShiftMenuCount = 2;
+constexpr uint32_t kSdInitMinMs = 800;
+constexpr uint32_t kSdInitRetryMs = 300;
+constexpr uint32_t kSdInitResultMs = 1500;
+constexpr int32_t kSdInitAttempts = 3;
+constexpr uint32_t kSaveResultMs = 1500;
+constexpr uint32_t kSaveStepBudgetMs = 3;
 constexpr int32_t kMaxWavFiles = 32;
 constexpr size_t kMaxWavNameLen = 32;
 constexpr int32_t kLoadFontScale = 1;
 constexpr size_t kMaxSampleSamples = 2 * 1024 * 1024;
 constexpr int32_t kRecordMaxSeconds = 5;
 constexpr size_t kSampleChunkFrames = 256;
+constexpr size_t kSaveChunkFrames = 2048;
 constexpr int32_t kBaseMidiNote = 60;
 constexpr float kSampleScale = 1.0f / 32768.0f;
 constexpr int32_t kLoadProgressStep = 5;
@@ -34,6 +41,9 @@ constexpr bool kPlaybackVerboseLog = false;
 constexpr float kPi = 3.14159265f;
 constexpr int kDisplayW = 128;
 constexpr int kDisplayH = 64;
+constexpr uint32_t kPreviewReadBudgetMs = 2;
+constexpr size_t kPreviewBufferFrames = 4096;
+constexpr size_t kPreviewReadFrames = 256;
 
 enum class UiMode : int32_t
 {
@@ -47,6 +57,7 @@ enum class UiMode : int32_t
 
 enum class RecordState : int32_t
 {
+	SourceSelect,
 	Armed,
 	Countdown,
 	Recording,
@@ -79,6 +90,42 @@ volatile int32_t request_load_index = -1;
 volatile int32_t wav_file_count = 0;
 
 bool sd_mounted = false;
+static bool sd_detected_last = true;
+static bool sd_need_reinit = false;
+static bool sd_init_in_progress = false;
+static bool sd_init_done = false;
+static bool sd_init_success = false;
+static uint32_t sd_init_start_ms = 0;
+static uint32_t sd_init_next_ms = 0;
+static uint32_t sd_init_result_until_ms = 0;
+static uint32_t sd_init_draw_next_ms = 0;
+static int32_t sd_init_attempts = 0;
+static UiMode sd_init_prev_mode = UiMode::Main;
+static bool save_in_progress = false;
+static bool save_done = false;
+static bool save_success = false;
+static bool save_started = false;
+static uint32_t save_start_ms = 0;
+static uint32_t save_result_until_ms = 0;
+static uint32_t save_draw_next_ms = 0;
+static UiMode save_prev_mode = UiMode::Main;
+static char save_filename[kMaxWavNameLen] = {0};
+static FIL save_file;
+static size_t save_frames_written = 0;
+static bool save_file_open = false;
+static bool save_header_written = false;
+static uint16_t save_channels = 1;
+static uint32_t save_sr = 48000;
+static uint32_t save_data_bytes = 0;
+static FRESULT save_last_error = FR_OK;
+static volatile bool delete_mode = false;
+static UiMode delete_prev_mode = UiMode::Main;
+static volatile bool request_delete_scan = false;
+static volatile bool request_delete_file = false;
+static volatile int32_t request_delete_index = -1;
+static volatile bool delete_confirm = false;
+static bool request_delete_redraw = false;
+static char delete_confirm_name[kMaxWavNameLen] = {0};
 char wav_files[kMaxWavFiles][kMaxWavNameLen];
 char loaded_sample_name[kMaxWavNameLen] = {0};
 int32_t load_lines = 1;
@@ -123,6 +170,7 @@ static int32_t live_wave_last_col = -1;
 constexpr size_t kRecordMaxFrames = static_cast<size_t>(kRecordMaxSeconds) * 48000U;
 constexpr uint32_t kRecordCountdownMs = 4000;
 volatile RecordState record_state = RecordState::Armed;
+volatile int32_t record_source_index = 0;
 volatile uint32_t record_countdown_start_ms = 0;
 volatile size_t record_pos = 0;
 volatile bool record_waveform_pending = false;
@@ -132,6 +180,20 @@ volatile bool request_length_redraw = false;
 volatile bool request_playhead_redraw = false;
 volatile bool button1_press = false;
 volatile bool request_playback_stop_log = false;
+volatile bool preview_hold = false;
+volatile bool preview_active = false;
+volatile int32_t preview_index = -1;
+volatile uint32_t preview_sample_rate = 48000;
+volatile uint16_t preview_channels = 1;
+volatile float preview_rate = 1.0f;
+volatile float preview_read_frac = 0.0f;
+volatile size_t preview_read_index = 0;
+volatile size_t preview_write_index = 0;
+volatile uint32_t preview_data_offset = 0;
+static FIL preview_file;
+static bool preview_file_open = false;
+alignas(32) static int16_t preview_buffer[kPreviewBufferFrames];
+alignas(32) static int16_t preview_read_buf[kPreviewReadFrames * 2];
 float led1_level = 0.0f;
 float led1_phase_ms = 0.0f;
 int32_t tune_selected = 0;
@@ -298,8 +360,32 @@ static void ForCirclePixels(int cx, int cy, int r, F&& fn)
 static FIL wav_file;
 alignas(32) static int16_t wav_read[kSampleChunkFrames * 2];
 
-const char* kMenuLabels[kMenuCount] = {"LOAD", "RECORD", "PLAY"};
-const char* kShiftMenuLabels[kShiftMenuCount] = {"SAVE", "LINE IN", "MICROPHONE"};
+const char* kMenuLabels[kMenuCount] = {"LOAD", "RECORD", "PERFORM", "PLAY"};
+
+static int32_t NextMenuIndex(int32_t current, int32_t delta)
+{
+	static const int32_t order[kMenuCount] = {0, 1, 3, 2};
+	int32_t pos = 0;
+	for (int32_t i = 0; i < kMenuCount; ++i)
+	{
+		if (order[i] == current)
+		{
+			pos = i;
+			break;
+		}
+	}
+	pos += delta;
+	while (pos < 0)
+	{
+		pos += kMenuCount;
+	}
+	while (pos >= kMenuCount)
+	{
+		pos -= kMenuCount;
+	}
+	return order[pos];
+}
+const char* kShiftMenuLabels[kShiftMenuCount] = {"SAVE", "DELETE"};
 
 template <typename... Va>
 static void LogLine(const char* format, Va... va)
@@ -416,6 +502,7 @@ struct WavInfo
 alignas(32) static uint8_t wav_riff_hdr[12];
 alignas(32) static uint8_t wav_chunk_hdr[8];
 alignas(32) static uint8_t wav_fmt_buf[32];
+alignas(32) static int16_t wav_write[kSaveChunkFrames * 2];
 
 static bool ParseWavHeader(FIL* file, WavInfo& info)
 {
@@ -643,6 +730,11 @@ static void InitLoadLayout()
 	}
 }
 
+static int32_t LoadVisibleLines()
+{
+	return load_lines;
+}
+
 static void MountSd()
 {
 	if (sd_mounted)
@@ -665,30 +757,252 @@ static void MountSd()
 	}
 }
 
-static void ScanWavFiles()
+static bool BuildNextSaveName(char* out_name, size_t out_len)
 {
-	LogLine("Scanning WAV files...");
+	if (out_len == 0)
+	{
+		return false;
+	}
+	for (int i = 1; i <= 9999; ++i)
+	{
+		char name[16];
+		snprintf(name, sizeof(name), "Rec%04d.wav", i);
+		char path[64];
+		BuildFilePath(name, path, sizeof(path));
+		FILINFO finfo;
+		const FRESULT res = f_stat(path, &finfo);
+		if (res != FR_OK)
+		{
+			CopyString(out_name, name, out_len);
+			return true;
+		}
+	}
+	return false;
+}
+
+static void ResetSaveState()
+{
+	save_frames_written = 0;
+	save_file_open = false;
+	save_header_written = false;
+	save_channels = 1;
+	save_sr = 48000;
+	save_data_bytes = 0;
+	save_last_error = FR_OK;
+}
+
+static bool BeginSaveRecordedSample()
+{
+	if (!sample_loaded || sample_length == 0 || !waveform_from_recording)
+	{
+		LogLine("Save skipped: no recorded sample");
+		return false;
+	}
+	MountSd();
+	if (!sd_mounted)
+	{
+		LogLine("Save failed: SD not mounted");
+		return false;
+	}
+	if (!BuildNextSaveName(save_filename, sizeof(save_filename)))
+	{
+		LogLine("Save failed: no free filename");
+		return false;
+	}
+	char path[64];
+	BuildFilePath(save_filename, path, sizeof(path));
+
+	const FRESULT open_res = f_open(&save_file, path, FA_WRITE | FA_CREATE_NEW);
+	if (open_res != FR_OK)
+	{
+		LogLine("Save failed: f_open %s (%d)", FresultName(open_res), (int)open_res);
+		return false;
+	}
+	save_file_open = true;
+
+	save_channels = (sample_channels == 0) ? 1 : sample_channels;
+	save_sr = (sample_rate == 0) ? 48000 : sample_rate;
+	save_data_bytes = static_cast<uint32_t>(sample_length * save_channels * sizeof(int16_t));
+
+	WAV_FormatTypeDef header = {};
+	header.ChunkId = kWavFileChunkId;
+	header.FileSize = 36 + save_data_bytes;
+	header.FileFormat = kWavFileWaveId;
+	header.SubChunk1ID = kWavFileSubChunk1Id;
+	header.SubChunk1Size = 16;
+	header.AudioFormat = WAVE_FORMAT_PCM;
+	header.NbrChannels = save_channels;
+	header.SampleRate = save_sr;
+	header.BlockAlign = static_cast<uint16_t>(save_channels * sizeof(int16_t));
+	header.ByteRate = save_sr * header.BlockAlign;
+	header.BitPerSample = 16;
+	header.SubChunk2ID = kWavFileSubChunk2Id;
+	header.SubCHunk2Size = save_data_bytes;
+
+	UINT written = 0;
+	save_last_error = f_write(&save_file, &header, sizeof(header), &written);
+	if (save_last_error != FR_OK || written != sizeof(header))
+	{
+		LogLine("Save failed: header write %s (%d)", FresultName(save_last_error), (int)save_last_error);
+		f_close(&save_file);
+		save_file_open = false;
+		return false;
+	}
+	save_header_written = true;
+	return true;
+}
+
+static bool StepSaveRecordedSample(bool& done)
+{
+	done = false;
+	if (!save_file_open || !save_header_written)
+	{
+		return false;
+	}
+	const uint32_t start_ms = System::GetNow();
+	while (save_frames_written < sample_length)
+	{
+		const size_t frames_left = sample_length - save_frames_written;
+		const size_t frames_this = (frames_left > kSaveChunkFrames) ? kSaveChunkFrames : frames_left;
+		UINT written = 0;
+		if (save_channels == 1)
+		{
+			const int16_t* src = sample_buffer_l + save_frames_written;
+			save_last_error = f_write(&save_file,
+									  src,
+									  static_cast<UINT>(frames_this * sizeof(int16_t)),
+									  &written);
+			if (save_last_error == FR_OK && written != (frames_this * sizeof(int16_t)))
+			{
+				save_last_error = FR_DISK_ERR;
+			}
+		}
+		else
+		{
+			for (size_t i = 0; i < frames_this; ++i)
+			{
+				wav_write[i * 2] = sample_buffer_l[save_frames_written + i];
+				wav_write[i * 2 + 1] = sample_buffer_r[save_frames_written + i];
+			}
+			save_last_error = f_write(&save_file,
+									  wav_write,
+									  static_cast<UINT>(frames_this * save_channels * sizeof(int16_t)),
+									  &written);
+			if (save_last_error == FR_OK && written != (frames_this * save_channels * sizeof(int16_t)))
+			{
+				save_last_error = FR_DISK_ERR;
+			}
+		}
+		if (save_last_error != FR_OK)
+		{
+			LogLine("Save failed: data write %s (%d)", FresultName(save_last_error), (int)save_last_error);
+			f_close(&save_file);
+			save_file_open = false;
+			return false;
+		}
+		save_frames_written += frames_this;
+		if ((System::GetNow() - start_ms) >= kSaveStepBudgetMs)
+		{
+			break;
+		}
+	}
+
+	if (save_frames_written >= sample_length)
+	{
+		save_last_error = f_sync(&save_file);
+		if (save_last_error != FR_OK)
+		{
+			LogLine("Save failed: f_sync %s (%d)", FresultName(save_last_error), (int)save_last_error);
+			f_close(&save_file);
+			save_file_open = false;
+			return false;
+		}
+		f_close(&save_file);
+		save_file_open = false;
+		done = true;
+		LogLine("Save OK: %s (%lu frames)", save_filename, (unsigned long)sample_length);
+		return true;
+	}
+	return true;
+}
+
+static bool ReinitSdNow()
+{
 	if (!BSP_SD_IsDetected())
 	{
-		sd_mounted = false;
-		wav_file_count = 0;
-		load_selected = 0;
-		load_scroll = 0;
-		LogLine("Scan aborted: SD not detected");
-		return;
+		LogLine("SD init (full): no card detected");
+		return false;
 	}
-	if (!sd_mounted)
-	{
-		MountSd();
-	}
-	if (!sd_mounted)
+	f_mount(0, fsi.GetSDPath(), 0);
+	sd_mounted = false;
+	fsi.DeInit();
+	SdmmcHandler::Config sd_cfg;
+	sd_cfg.Defaults();
+	sdcard.Init(sd_cfg);
+	fsi.Init(FatFSInterface::Config::MEDIA_SD);
+	const uint8_t init_res = BSP_SD_Init();
+	LogLine("SD init (full): %u", static_cast<unsigned>(init_res));
+	MountSd();
+	return sd_mounted;
+}
+
+static void ScanSdFiles(bool wav_only)
+{
+	LogLine("Scanning WAV files...");
+	bool detected = BSP_SD_IsDetected();
+	if (!detected)
 	{
 		SdmmcHandler::Config sd_cfg;
 		sd_cfg.Defaults();
 		sdcard.Init(sd_cfg);
 		fsi.Init(FatFSInterface::Config::MEDIA_SD);
 		const uint8_t init_res = BSP_SD_Init();
+		LogLine("SD init (detect): %u", static_cast<unsigned>(init_res));
+		detected = BSP_SD_IsDetected();
+		if (!detected)
+		{
+			sd_mounted = false;
+			sd_need_reinit = true;
+			sd_detected_last = false;
+			wav_file_count = 0;
+			load_selected = 0;
+			load_scroll = 0;
+			LogLine("Scan aborted: SD not detected");
+			return;
+		}
+	}
+	if (BSP_SD_GetCardState() != SD_TRANSFER_OK)
+	{
+		sd_mounted = false;
+		sd_need_reinit = true;
+		wav_file_count = 0;
+		load_selected = 0;
+		load_scroll = 0;
+		LogLine("Scan aborted: SD not ready");
+		return;
+	}
+	if (detected && !sd_detected_last)
+	{
+		sd_need_reinit = true;
+	}
+	sd_detected_last = true;
+
+	if (sd_need_reinit)
+	{
+		f_mount(0, fsi.GetSDPath(), 0);
+		sd_mounted = false;
+		SdmmcHandler::Config sd_cfg;
+		sd_cfg.Defaults();
+		sdcard.Init(sd_cfg);
+		fsi.Init(FatFSInterface::Config::MEDIA_SD);
+		const uint8_t init_res = BSP_SD_Init();
 		LogLine("SD init: %u", static_cast<unsigned>(init_res));
+		MountSd();
+		sd_need_reinit = !sd_mounted;
+	}
+
+	if (!sd_mounted)
+	{
 		MountSd();
 	}
 	if (!sd_mounted)
@@ -724,7 +1038,7 @@ static void ScanWavFiles()
 		{
 			continue;
 		}
-		if (!HasWavExtension(fno.fname))
+		if (wav_only && !HasWavExtension(fno.fname))
 		{
 			continue;
 		}
@@ -737,7 +1051,7 @@ static void ScanWavFiles()
 	}
 	f_closedir(&dir);
 	wav_file_count = count;
-	LogLine("Scan complete: %ld wav files", static_cast<long>(wav_file_count));
+	LogLine("Scan complete: %ld files", static_cast<long>(wav_file_count));
 	if (wav_file_count <= 0)
 	{
 		load_selected = 0;
@@ -752,15 +1066,15 @@ static void ScanWavFiles()
 	{
 		load_scroll = load_selected;
 	}
-	else if (load_selected >= load_scroll + load_lines)
+	else if (load_selected >= load_scroll + LoadVisibleLines())
 	{
-		load_scroll = load_selected - (load_lines - 1);
+		load_scroll = load_selected - (LoadVisibleLines() - 1);
 	}
 	if (load_scroll < 0)
 	{
 		load_scroll = 0;
 	}
-	const int32_t max_top = wav_file_count - load_lines;
+	const int32_t max_top = wav_file_count - LoadVisibleLines();
 	if (max_top < 0)
 	{
 		load_scroll = 0;
@@ -798,22 +1112,19 @@ static void ComputeWaveform()
 	}
 
 	float scale = 28.0f;
-	if (waveform_from_recording)
+	float peak = 0.0f;
+	for (size_t i = 0; i < frames; ++i)
 	{
-		float peak = 0.0f;
-		for (size_t i = 0; i < frames; ++i)
+		const float s = static_cast<float>(sample_buffer_l[i]) * kSampleScale;
+		const float a = (s < 0.0f) ? -s : s;
+		if (a > peak)
 		{
-			const float s = static_cast<float>(sample_buffer_l[i]) * kSampleScale;
-			const float a = (s < 0.0f) ? -s : s;
-			if (a > peak)
-			{
-				peak = a;
-			}
+			peak = a;
 		}
-		if (peak > 0.0001f)
-		{
-			scale = 28.0f / peak;
-		}
+	}
+	if (peak > 0.0001f)
+	{
+		scale = 28.0f / peak;
 	}
 
 	for (size_t col = 0; col < columns; ++col)
@@ -1122,44 +1433,275 @@ static bool LoadSampleAtIndex(int32_t index)
 	return LoadSampleFromPath(path);
 }
 
-static void DrawVerticalLabel(const char* label,
-							  int x,
-							  int y,
-							  FontDef font,
-							  bool on)
+static void StopPreview()
 {
-	for (size_t i = 0; label[i] != '\0'; ++i)
+	preview_active = false;
+	preview_hold = false;
+	preview_index = -1;
+	preview_read_frac = 0.0f;
+	preview_read_index = 0;
+	preview_write_index = 0;
+	if (preview_file_open)
 	{
-		display.SetCursor(x, y + static_cast<int>(i) * font.FontHeight);
-		display.WriteChar(label[i], font, on);
+		f_close(&preview_file);
+		preview_file_open = false;
 	}
 }
+
+static bool BeginPreviewAtIndex(int32_t index)
+{
+	if (!BSP_SD_IsDetected())
+	{
+		LogLine("Preview failed: SD not detected");
+		sd_mounted = false;
+		return false;
+	}
+	MountSd();
+	if (!sd_mounted)
+	{
+		SdmmcHandler::Config sd_cfg;
+		sd_cfg.Defaults();
+		sdcard.Init(sd_cfg);
+		fsi.Init(FatFSInterface::Config::MEDIA_SD);
+		const uint8_t init_res = BSP_SD_Init();
+		LogLine("SD init: %u", static_cast<unsigned>(init_res));
+		MountSd();
+	}
+	if (!sd_mounted)
+	{
+		LogLine("Preview failed: SD not mounted");
+		return false;
+	}
+	if (BSP_SD_GetCardState() != SD_TRANSFER_OK)
+	{
+		LogLine("Preview failed: SD not ready");
+		return false;
+	}
+	if (index < 0 || index >= wav_file_count)
+	{
+		LogLine("Preview failed: invalid index %ld", static_cast<long>(index));
+		return false;
+	}
+	char path[64];
+	BuildFilePath(wav_files[index], path, sizeof(path));
+	LogLine("Preview request: %s", wav_files[index]);
+
+	if (preview_file_open)
+	{
+		f_close(&preview_file);
+		preview_file_open = false;
+	}
+	const FRESULT open_res = f_open(&preview_file, path, FA_READ);
+	if (open_res != FR_OK)
+	{
+		LogLine("Preview failed: f_open %s (%d)", FresultName(open_res), (int)open_res);
+		return false;
+	}
+	preview_file_open = true;
+
+	WavInfo wav;
+	if (!ParseWavHeader(&preview_file, wav))
+	{
+		f_close(&preview_file);
+		preview_file_open = false;
+		return false;
+	}
+	if (wav.bits_per_sample != 16)
+	{
+		LogLine("Preview failed: unsupported bit depth %u", (unsigned)wav.bits_per_sample);
+		f_close(&preview_file);
+		preview_file_open = false;
+		return false;
+	}
+	if (wav.num_channels < 1 || wav.num_channels > 2)
+	{
+		LogLine("Preview failed: unsupported channel count %u", (unsigned)wav.num_channels);
+		f_close(&preview_file);
+		preview_file_open = false;
+		return false;
+	}
+	preview_sample_rate = wav.sample_rate;
+	preview_channels = wav.num_channels;
+	const uint32_t rate = (preview_sample_rate == 0) ? 48000 : preview_sample_rate;
+	preview_rate = static_cast<float>(rate) / hw.AudioSampleRate();
+	preview_data_offset = wav.data_offset;
+	FRESULT seek_res = f_lseek(&preview_file, preview_data_offset);
+	if (seek_res != FR_OK)
+	{
+		LogLine("Preview failed: f_lseek %s (%d)", FresultName(seek_res), (int)seek_res);
+		f_close(&preview_file);
+		preview_file_open = false;
+		return false;
+	}
+
+	preview_read_frac = 0.0f;
+	preview_read_index = 0;
+	preview_write_index = 0;
+	preview_index = index;
+	preview_active = true;
+	return true;
+}
+
+static size_t PreviewAvailableFrames(size_t read_idx, size_t write_idx)
+{
+	if (write_idx >= read_idx)
+	{
+		return write_idx - read_idx;
+	}
+	return (kPreviewBufferFrames - read_idx) + write_idx;
+}
+
+static size_t PreviewFreeFrames(size_t read_idx, size_t write_idx)
+{
+	const size_t used = PreviewAvailableFrames(read_idx, write_idx);
+	if (used >= kPreviewBufferFrames - 1)
+	{
+		return 0;
+	}
+	return (kPreviewBufferFrames - 1) - used;
+}
+
+static void FillPreviewBuffer()
+{
+	if (!preview_active || !preview_file_open)
+	{
+		return;
+	}
+	const uint32_t start_ms = System::GetNow();
+	while (true)
+	{
+		const size_t read_idx = preview_read_index;
+		const size_t write_idx = preview_write_index;
+		const size_t free_frames = PreviewFreeFrames(read_idx, write_idx);
+		if (free_frames == 0)
+		{
+			break;
+		}
+		const size_t frames_to_read = (free_frames > kPreviewReadFrames) ? kPreviewReadFrames : free_frames;
+		const size_t bytes_to_read = frames_to_read * preview_channels * sizeof(int16_t);
+		UINT bytes_read = 0;
+		FRESULT res = f_read(&preview_file, preview_read_buf, bytes_to_read, &bytes_read);
+		if (res != FR_OK)
+		{
+			LogLine("Preview read error %s (%d)", FresultName(res), (int)res);
+			StopPreview();
+			return;
+		}
+		if (bytes_read == 0)
+		{
+			FRESULT seek_res = f_lseek(&preview_file, preview_data_offset);
+			if (seek_res != FR_OK)
+			{
+				LogLine("Preview loop seek failed %s (%d)", FresultName(seek_res), (int)seek_res);
+				StopPreview();
+				return;
+			}
+			continue;
+		}
+		const size_t frames_read = bytes_read / (preview_channels * sizeof(int16_t));
+		size_t w = write_idx;
+		for (size_t i = 0; i < frames_read; ++i)
+		{
+			int32_t mono = 0;
+			if (preview_channels == 1)
+			{
+				mono = preview_read_buf[i];
+			}
+			else
+			{
+				const int16_t l = preview_read_buf[i * 2];
+				const int16_t r = preview_read_buf[i * 2 + 1];
+				mono = (static_cast<int32_t>(l) + static_cast<int32_t>(r)) / 2;
+			}
+			preview_buffer[w] = static_cast<int16_t>(mono);
+			w = (w + 1) % kPreviewBufferFrames;
+		}
+		preview_write_index = w;
+		if ((System::GetNow() - start_ms) >= kPreviewReadBudgetMs)
+		{
+			break;
+		}
+	}
+}
+
+static bool DeleteFileAtIndex(int32_t index)
+{
+	if (!BSP_SD_IsDetected())
+	{
+		LogLine("Delete failed: SD not detected");
+		sd_mounted = false;
+		return false;
+	}
+	MountSd();
+	if (!sd_mounted)
+	{
+		SdmmcHandler::Config sd_cfg;
+		sd_cfg.Defaults();
+		sdcard.Init(sd_cfg);
+		fsi.Init(FatFSInterface::Config::MEDIA_SD);
+		const uint8_t init_res = BSP_SD_Init();
+		LogLine("SD init: %u", static_cast<unsigned>(init_res));
+		MountSd();
+	}
+	if (!sd_mounted)
+	{
+		LogLine("Delete failed: SD not mounted");
+		return false;
+	}
+	if (BSP_SD_GetCardState() != SD_TRANSFER_OK)
+	{
+		LogLine("Delete failed: SD not ready");
+		return false;
+	}
+	if (index < 0 || index >= wav_file_count)
+	{
+		LogLine("Delete failed: invalid index %ld", static_cast<long>(index));
+		return false;
+	}
+	char path[64];
+	BuildFilePath(wav_files[index], path, sizeof(path));
+	LogLine("Delete request: %s", wav_files[index]);
+	const FRESULT res = f_unlink(path);
+	if (res != FR_OK)
+	{
+		LogLine("Delete failed: f_unlink %s (%d)", FresultName(res), (int)res);
+		return false;
+	}
+	LogLine("Delete OK: %s", wav_files[index]);
+	return true;
+}
+
+static void DrawTinyString(const char* str, int x, int y, bool on);
+static int TinyStringWidth(const char* str);
 
 static void DrawMenu(int32_t selected)
 {
 	constexpr int kMarginX = 2;
+	constexpr int kMarginY = 2;
 	constexpr int kGapX = 2;
-	constexpr int kBoxW = 40;
-	constexpr int kBoxY = 2;
-	constexpr int kBoxH = 60;
-	const FontDef font = Font_6x8;
-
+	constexpr int kGapY = 2;
+	constexpr int kBoxW = (kDisplayW - (kMarginX * 2) - kGapX) / 2;
+	constexpr int kBoxH = (kDisplayH - (kMarginY * 2) - kGapY) / 2;
 	display.Fill(false);
 	for (int32_t i = 0; i < kMenuCount; ++i)
 	{
-		const int x = kMarginX + static_cast<int>(i) * (kBoxW + kGapX);
+		const int row = static_cast<int>(i) / 2;
+		const int col = static_cast<int>(i) % 2;
+		const int x = kMarginX + col * (kBoxW + kGapX);
+		const int y = kMarginY + row * (kBoxH + kGapY);
 		const bool is_selected = (i == selected);
 		display.DrawRect(x,
-						 kBoxY,
+						 y,
 						 x + kBoxW - 1,
-						 kBoxY + kBoxH - 1,
+						 y + kBoxH - 1,
 						 true,
 						 is_selected);
-		const size_t label_len = StrLen(kMenuLabels[i]);
-		const int label_height = static_cast<int>(label_len) * font.FontHeight;
-		const int text_x = x + (kBoxW - font.FontWidth) / 2;
-		const int text_y = kBoxY + (kBoxH - label_height) / 2;
-		DrawVerticalLabel(kMenuLabels[i], text_x, text_y, font, !is_selected);
+		const char* label = kMenuLabels[i];
+		const int text_w = TinyStringWidth(label);
+		const int text_h = Font5x7::H;
+		const int text_x = x + (kBoxW - text_w) / 2;
+		const int text_y = y + (kBoxH - text_h) / 2;
+		DrawTinyString(label, text_x, text_y, !is_selected);
 	}
 	display.Update();
 }
@@ -1211,6 +1753,69 @@ static void DrawScaledString(const char* str,
 	}
 }
 
+static void DrawTinyString(const char* str, int x, int y, bool on)
+{
+	const int char_w = Font5x7::W + 1;
+	for (int i = 0; str[i] != '\0'; ++i)
+	{
+		uint8_t rows[Font5x7::H] = {};
+		Font5x7::GetGlyphRows(str[i], rows);
+		for (int yy = 0; yy < Font5x7::H; ++yy)
+		{
+			const uint8_t row = rows[yy];
+			for (int xx = 0; xx < Font5x7::W; ++xx)
+			{
+				if ((row >> (Font5x7::W - 1 - xx)) & 1)
+				{
+					const int px = x + i * char_w + xx;
+					const int py = y + yy;
+					if (px >= 0 && px < kDisplayW && py >= 0 && py < kDisplayH)
+					{
+						display.DrawPixel(px, py, on);
+					}
+				}
+			}
+		}
+	}
+}
+
+static int TinyStringWidth(const char* str)
+{
+	if (str == nullptr || str[0] == '\0')
+	{
+		return 0;
+	}
+	const int char_w = Font5x7::W + 1;
+	int count = 0;
+	for (; str[count] != '\0'; ++count)
+	{
+	}
+	return count * char_w - 1;
+}
+
+static void DrawProgressBar(int x, int y, int w, int h, int32_t percent)
+{
+	if (w <= 2 || h <= 2)
+	{
+		return;
+	}
+	if (percent < 0)
+	{
+		percent = 0;
+	}
+	if (percent > 100)
+	{
+		percent = 100;
+	}
+	display.DrawRect(x, y, x + w - 1, y + h - 1, true, false);
+	const int inner_w = w - 2;
+	const int fill_w = (inner_w * percent) / 100;
+	if (fill_w > 0)
+	{
+		display.DrawRect(x + 1, y + 1, x + fill_w, y + h - 2, true, true);
+	}
+}
+
 static void DrawLoadMessage(const char* line1, const char* line2)
 {
 	const FontDef font = Font_6x8;
@@ -1234,14 +1839,27 @@ static void DrawLoadMenu(int32_t top_index, int32_t selected)
 	const FontDef font = Font_6x8;
 	display.Fill(false);
 
+	if (!BSP_SD_IsDetected() || BSP_SD_GetCardState() != SD_TRANSFER_OK)
+	{
+		sd_mounted = false;
+		DrawLoadMessage("SD NOT", "MOUNTED");
+		return;
+	}
 	if (!sd_mounted)
 	{
 		DrawLoadMessage("SD NOT", "MOUNTED");
 		return;
-	}
+	 }
 	if (wav_file_count == 0)
 	{
-		DrawLoadMessage("NO WAV", "FILES");
+		if (delete_mode)
+		{
+			DrawLoadMessage("NO", "FILES");
+		}
+		else
+		{
+			DrawLoadMessage("NO WAV", "FILES");
+		}
 		return;
 	}
 
@@ -1259,7 +1877,8 @@ static void DrawLoadMenu(int32_t top_index, int32_t selected)
 		top_index = max_top;
 	}
 
-	for (int32_t i = 0; i < load_lines; ++i)
+	const int32_t visible_lines = LoadVisibleLines();
+	for (int32_t i = 0; i < visible_lines; ++i)
 	{
 		const int32_t idx = top_index + i;
 		if (idx >= wav_file_count)
@@ -1649,6 +2268,50 @@ static void DrawRecordReadyScreen()
 	display.Update();
 }
 
+static void DrawDeleteConfirm(const char* name)
+{
+	const FontDef font = Font_6x8;
+	display.Fill(false);
+	display.SetCursor(0, 0);
+	display.WriteString("DELETE?", font, true);
+	if (name != nullptr && name[0] != '\0')
+	{
+		DrawScaledString(name, 0, font.FontHeight + 2, font, kLoadFontScale, true, load_chars_per_line);
+	}
+	display.SetCursor(0, (font.FontHeight + 2) * 3);
+	display.WriteString("R=YES L=NO", font, true);
+	display.Update();
+}
+
+static void DrawRecordSourceScreen()
+{
+	const FontDef font = Font_6x8;
+	display.Fill(false);
+	display.SetCursor(0, 0);
+	display.WriteString("SOURCE:", font, true);
+
+	const char* options[2] = {"LINE IN", "MICROPHONE"};
+	const int line_h = font.FontHeight + 2;
+	const int start_y = line_h + 2;
+	for (int i = 0; i < 2; ++i)
+	{
+		const int y = start_y + i * line_h;
+		const bool is_selected = (i == record_source_index);
+		if (is_selected)
+		{
+			display.DrawRect(0,
+							 y,
+							 display.Width() - 1,
+							 y + line_h - 1,
+							 true,
+							 true);
+		}
+		display.SetCursor(2, y + 1);
+		display.WriteString(options[i], font, !is_selected);
+	}
+	display.Update();
+}
+
 static void DrawRecordArmed()
 {
 	DrawRecordReadyScreen();
@@ -1843,6 +2506,72 @@ static void DrawShiftMenu(int32_t selected)
 		}
 		display.SetCursor(2, y + 1);
 		display.WriteString(kShiftMenuLabels[i], font, !is_selected);
+	}
+	display.Update();
+}
+
+static void DrawSdInitScreen()
+{
+	const FontDef font = Font_6x8;
+	display.Fill(false);
+	if (sd_init_done)
+	{
+		display.SetCursor(0, 0);
+		display.WriteString(sd_init_success ? "SD INIT OK" : "SD INIT FAILED", font, true);
+	}
+	else
+	{
+		display.SetCursor(0, 0);
+		display.WriteString("INITIALIZING SD", font, true);
+
+		const uint32_t now = System::GetNow();
+		const uint32_t phase = (now / 200) % 4;
+		char dots[5] = "....";
+		for (uint32_t i = phase; i < 4; ++i)
+		{
+			dots[i] = ' ';
+		}
+		display.SetCursor(0, font.FontHeight + 2);
+		display.WriteString(dots, font, true);
+		display.SetCursor(0, (font.FontHeight + 2) * 2);
+		char buf[24];
+		snprintf(buf, sizeof(buf), "TRY %ld/%ld",
+				 static_cast<long>(sd_init_attempts + 1),
+				 static_cast<long>(kSdInitAttempts));
+		display.WriteString(buf, font, true);
+	}
+	display.Update();
+}
+
+static void DrawSaveScreen()
+{
+	const FontDef font = Font_6x8;
+	display.Fill(false);
+	if (save_done)
+	{
+		display.SetCursor(0, 0);
+		display.WriteString(save_success ? "SAVE OK" : "SAVE FAILED", font, true);
+		if (save_success)
+		{
+			display.SetCursor(0, font.FontHeight + 2);
+			display.WriteString(save_filename, font, true);
+		}
+	}
+	else
+	{
+		display.SetCursor(0, 0);
+		display.WriteString("SAVING", font, true);
+		const int bar_y = font.FontHeight + 16;
+		const int bar_w = 96;
+		const int bar_h = 6;
+		const int bar_x = (kDisplayW - bar_w) / 2;
+		int32_t percent = 0;
+		if (save_started && sample_length > 0)
+		{
+			percent = static_cast<int32_t>(
+				(save_frames_written * 100U) / sample_length);
+		}
+		DrawProgressBar(bar_x, bar_y, bar_w, bar_h, percent);
 	}
 	display.Update();
 }
@@ -2163,15 +2892,17 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		encoder_r_accum += encoder_r_inc;
 	}
 	const bool encoder_r_pressed = encoder_r.RisingEdge();
+	bool encoder_r_consumed = false;
 	if (encoder_r_pressed)
 	{
 		encoder_r_button_press = true;
 	}
+	const bool ui_blocked = (sd_init_in_progress || save_in_progress);
 	shift_button.Debounce();
-	if (shift_button.RisingEdge())
+	if (!ui_blocked && shift_button.RisingEdge())
 	{
-		if (ui_mode == UiMode::Shift)
-		{
+	if (ui_mode == UiMode::Shift && !ui_blocked)
+	{
 			ui_mode = shift_prev_mode;
 		}
 		else
@@ -2186,7 +2917,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	{
 		button1_press = true;
 	}
-	if (ui_mode == UiMode::Shift)
+	preview_hold = (ui_mode == UiMode::Load && !delete_mode) ? hw.button1.Pressed() : false;
+	if (!sd_init_in_progress && ui_mode == UiMode::Shift)
 	{
 		if (encoder_l_inc != 0)
 		{
@@ -2205,42 +2937,55 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		if (encoder_r_pressed)
 		{
 			LogLine("Shift menu select: %s", kShiftMenuLabels[shift_menu_index]);
-			if (shift_menu_index == 1)
+			if (shift_menu_index == 0)
 			{
-				record_input = RecordInput::LineIn;
-				LogLine("Record input set: LINE IN (L)");
+				save_in_progress = true;
+				save_done = false;
+				save_success = false;
+				save_started = false;
+				save_prev_mode = shift_prev_mode;
+				save_start_ms = System::GetNow();
+				save_result_until_ms = 0;
+				save_draw_next_ms = 0;
+				save_filename[0] = '\0';
+				ResetSaveState();
 			}
-			else if (shift_menu_index == 2)
+			else if (shift_menu_index == 1)
 			{
-				record_input = RecordInput::Mic;
-				LogLine("Record input set: MIC (R)");
+				delete_mode = true;
+				delete_confirm = false;
+				delete_prev_mode = shift_prev_mode;
+				ui_mode = UiMode::Load;
+				load_selected = 0;
+				load_scroll = 0;
+				request_delete_scan = true;
+				request_delete_redraw = true;
 			}
-			ui_mode = shift_prev_mode;
-			request_shift_redraw = true;
+			if (!sd_init_in_progress && shift_menu_index == 0)
+			{
+				ui_mode = shift_prev_mode;
+				request_shift_redraw = true;
+			}
 		}
 		if (encoder_l_pressed)
 		{
-			ui_mode = shift_prev_mode;
-			request_shift_redraw = true;
+			if (!sd_init_in_progress)
+			{
+				ui_mode = shift_prev_mode;
+				request_shift_redraw = true;
+			}
 		}
 	}
-	else if (ui_mode == UiMode::Main)
+	else if (!ui_blocked && ui_mode == UiMode::Main)
 	{
 		if (encoder_l_inc != 0)
 		{
-			int32_t next = menu_index + encoder_l_inc;
-			while (next < 0)
-			{
-				next += kMenuCount;
-			}
-			while (next >= kMenuCount)
-			{
-				next -= kMenuCount;
-			}
-			menu_index = next;
+			menu_index = NextMenuIndex(menu_index, encoder_l_inc);
 		}
 		if (encoder_r_pressed && menu_index == 0)
 		{
+			delete_mode = false;
+			delete_confirm = false;
 			ui_mode = UiMode::Load;
 			load_selected = 0;
 			load_scroll = 0;
@@ -2249,7 +2994,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		else if (encoder_r_pressed && menu_index == 1)
 		{
 			ui_mode = UiMode::Record;
-			record_state = RecordState::Armed;
+			record_source_index = (record_input == RecordInput::Mic) ? 1 : 0;
+			record_state = RecordState::SourceSelect;
 			record_pos = 0;
 			playback_active = false;
 			record_anim_start_ms = NowMs();
@@ -2266,57 +3012,123 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			waveform_dirty = true;
 			request_length_redraw = true;
 		}
-	}
-	else if (ui_mode == UiMode::Load)
-	{
-		if (encoder_l_inc != 0 && wav_file_count > 0)
+		else if (encoder_r_pressed && menu_index == 3)
 		{
-			const int32_t count = wav_file_count;
-			int32_t next = load_selected + encoder_l_inc;
-			if (next < 0)
-			{
-				next = 0;
-			}
-			if (next >= count)
-			{
-				next = count - 1;
-			}
-			load_selected = next;
-			int32_t max_top = count - load_lines;
-			if (max_top < 0)
-			{
-				max_top = 0;
-			}
-			if (load_selected < load_scroll)
-			{
-				load_scroll = load_selected;
-			}
-			else if (load_selected >= load_scroll + load_lines)
-			{
-				load_scroll = load_selected - (load_lines - 1);
-			}
-			if (load_scroll < 0)
-			{
-				load_scroll = 0;
-			}
-			if (load_scroll > max_top)
-			{
-				load_scroll = max_top;
-			}
-		}
-		if (encoder_r_pressed && wav_file_count > 0)
-		{
-			request_load_sample = true;
-			request_load_index = load_selected;
-		}
-		if (encoder_l_pressed)
-		{
-			ui_mode = UiMode::Main;
+			LogLine("Play menu selected (not implemented)");
 		}
 	}
-	else if (ui_mode == UiMode::Record)
+	else if (!ui_blocked && ui_mode == UiMode::Load)
 	{
-		if (encoder_r_pressed)
+		if (delete_mode && delete_confirm)
+		{
+			if (encoder_r_pressed)
+			{
+				request_delete_file = true;
+				request_delete_index = load_selected;
+				delete_confirm = false;
+				request_delete_redraw = true;
+			}
+			if (encoder_l_pressed)
+			{
+				delete_confirm = false;
+				request_delete_redraw = true;
+			}
+		}
+		else
+		{
+			if (encoder_l_inc != 0 && wav_file_count > 0)
+			{
+				const int32_t count = wav_file_count;
+				const int32_t visible_lines = LoadVisibleLines();
+				int32_t next = load_selected + encoder_l_inc;
+				while (next < 0)
+				{
+					next += count;
+			}
+			while (next >= count)
+			{
+				next -= count;
+			}
+				load_selected = next;
+				int32_t max_top = count - visible_lines;
+				if (max_top < 0)
+				{
+					max_top = 0;
+				}
+				if (load_selected < load_scroll)
+				{
+					load_scroll = load_selected;
+				}
+				else if (load_selected >= load_scroll + visible_lines)
+				{
+					load_scroll = load_selected - (visible_lines - 1);
+				}
+				if (load_scroll < 0)
+				{
+					load_scroll = 0;
+				}
+				if (load_scroll > max_top)
+				{
+					load_scroll = max_top;
+				}
+			}
+			if (encoder_r_pressed && wav_file_count > 0)
+			{
+				if (delete_mode)
+				{
+					delete_confirm = true;
+					CopyString(delete_confirm_name, wav_files[load_selected], kMaxWavNameLen);
+					request_delete_redraw = true;
+				}
+				else
+				{
+					request_load_sample = true;
+					request_load_index = load_selected;
+				}
+			}
+			if (encoder_l_pressed)
+			{
+				if (delete_mode)
+				{
+					delete_mode = false;
+					delete_confirm = false;
+					ui_mode = delete_prev_mode;
+				}
+				else
+				{
+					ui_mode = UiMode::Main;
+				}
+			}
+		}
+	}
+	else if (!ui_blocked && ui_mode == UiMode::Record)
+	{
+		if (record_state == RecordState::SourceSelect)
+		{
+			if (encoder_l_inc != 0)
+			{
+				int32_t next = record_source_index + encoder_l_inc;
+				while (next < 0)
+				{
+					next += 2;
+				}
+				while (next >= 2)
+				{
+					next -= 2;
+				}
+				record_source_index = next;
+			}
+			if (encoder_r_pressed)
+			{
+				record_input = (record_source_index == 1) ? RecordInput::Mic : RecordInput::LineIn;
+				LogLine("Record input set: %s",
+						(record_input == RecordInput::Mic) ? "MIC (R)" : "LINE IN (L)");
+				record_state = RecordState::Armed;
+				record_anim_start_ms = -1.0;
+				encoder_r_consumed = true;
+			}
+		}
+		if (encoder_r_pressed && !encoder_r_consumed && record_state != RecordState::SourceSelect)
 		{
 			if (record_state == RecordState::Armed)
 			{
@@ -2361,7 +3173,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		if (encoder_l_pressed)
 		{
 			ui_mode = UiMode::Main;
-			record_state = RecordState::Armed;
+			record_state = RecordState::SourceSelect;
 			playback_active = false;
 			record_anim_start_ms = -1.0;
 		}
@@ -2373,7 +3185,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			}
 		}
 	}
-	else if (ui_mode == UiMode::Tune)
+	else if (!ui_blocked && ui_mode == UiMode::Tune)
 	{
 		if (encoder_l_inc != 0)
 		{
@@ -2437,7 +3249,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			request_length_redraw = true;
 		}
 	}
-	else if (ui_mode == UiMode::Play)
+	else if (!ui_blocked && ui_mode == UiMode::Play)
 	{
 		if (encoder_l_inc != 0 || encoder_r_inc != 0)
 		{
@@ -2505,8 +3317,9 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		float monitor_r = 0.0f;
 		if (monitor_active)
 		{
-			monitor_l = in[0][i];
-			monitor_r = in[1][i];
+			const float monitor_sel = (record_input == RecordInput::Mic) ? in[1][i] : in[0][i];
+			monitor_l = monitor_sel;
+			monitor_r = monitor_sel;
 		}
 		float tune_sig = 0.0f;
 		if (tune_active)
@@ -2623,6 +3436,33 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				}
 			}
 		}
+		if (preview_active)
+		{
+			size_t read_idx = preview_read_index;
+			const size_t write_idx = preview_write_index;
+			size_t available = PreviewAvailableFrames(read_idx, write_idx);
+			if (available >= 2)
+			{
+				const size_t idx0 = read_idx;
+				const size_t idx1 = (idx0 + 1) % kPreviewBufferFrames;
+				const float frac = preview_read_frac;
+				const float s0 = static_cast<float>(preview_buffer[idx0]);
+				const float s1 = static_cast<float>(preview_buffer[idx1]);
+				const float samp = (s0 + (s1 - s0) * frac) * kSampleScale;
+				sig_l += samp;
+				sig_r += samp;
+
+				float next_frac = preview_read_frac + preview_rate;
+				while (next_frac >= 1.0f && available > 0)
+				{
+					next_frac -= 1.0f;
+					read_idx = (read_idx + 1) % kPreviewBufferFrames;
+					available = PreviewAvailableFrames(read_idx, write_idx);
+				}
+				preview_read_frac = next_frac;
+				preview_read_index = read_idx;
+			}
+		}
 		if (monitor_active)
 		{
 			sig_l += monitor_l;
@@ -2686,17 +3526,6 @@ int main(void)
 		{
 			HandleMidiMessage(hw.midi.PopEvent());
 		}
-	if (button1_press && sample_loaded)
-	{
-		button1_press = false;
-		if (UiLogEnabled())
-		{
-			LogLine("Button1: playback request (unpitched)");
-		}
-		StartPlayback(kBaseMidiNote, false);
-		request_playhead_redraw = true;
-	}
-
 		int32_t aux_delta = 0;
 		if (encoder_r_accum != 0)
 		{
@@ -2715,35 +3544,225 @@ int main(void)
 				LogLine("Encoder R button pressed");
 			}
 		}
-
+		const bool ui_blocked = (sd_init_in_progress || save_in_progress);
+		if (button1_press && sample_loaded && ui_mode != UiMode::Load)
+		{
+			button1_press = false;
+			if (UiLogEnabled())
+			{
+				LogLine("Button1: playback request (unpitched)");
+			}
+			StartPlayback(kBaseMidiNote, false);
+			request_playhead_redraw = true;
+		}
 		if (request_load_scan)
 		{
-			request_load_scan = false;
-			LogLine("Load menu: scan requested");
-			ScanWavFiles();
-		}
-	if (request_load_sample)
-	{
-		request_load_sample = false;
-		const int32_t index = request_load_index;
-		request_load_index = -1;
-		LogLine("Load menu: sample request index=%ld", static_cast<long>(index));
-		if (index >= 0 && index < wav_file_count)
-		{
-			LogLine("Load menu: sample name=%s", wav_files[index]);
-		}
-		else
+			if (!ui_blocked)
 			{
-				LogLine("Load menu: sample name unavailable (count=%ld)", static_cast<long>(wav_file_count));
+				request_load_scan = false;
+				LogLine("Load menu: scan requested");
+				ScanSdFiles(true);
 			}
-			if (LoadSampleAtIndex(index))
+		}
+		if (request_delete_scan)
+		{
+			if (!ui_blocked)
 			{
-				LogLine("Load success, entering PLAY menu");
-				ui_mode = UiMode::Play;
+				request_delete_scan = false;
+				LogLine("Delete menu: scan requested");
+				ScanSdFiles(false);
+			}
+		}
+		if (request_load_sample)
+		{
+			if (ui_blocked)
+			{
+				request_load_sample = false;
+				request_load_index = -1;
+				LogLine("Load menu: sample request ignored during UI block");
 			}
 			else
 			{
-				LogLine("Load failed");
+				request_load_sample = false;
+				const int32_t index = request_load_index;
+				request_load_index = -1;
+				LogLine("Load menu: sample request index=%ld", static_cast<long>(index));
+				if (index >= 0 && index < wav_file_count)
+				{
+					LogLine("Load menu: sample name=%s", wav_files[index]);
+				}
+				else
+				{
+					LogLine("Load menu: sample name unavailable (count=%ld)", static_cast<long>(wav_file_count));
+				}
+				if (LoadSampleAtIndex(index))
+				{
+					LogLine("Load success, entering PLAY menu");
+					ui_mode = UiMode::Play;
+				}
+				else
+				{
+					LogLine("Load failed");
+				}
+			}
+		}
+
+		if (!ui_blocked)
+		{
+			const bool preview_allowed = (ui_mode == UiMode::Load && !delete_mode && wav_file_count > 0);
+			if (preview_hold && preview_allowed)
+			{
+				if (!preview_active || preview_index != load_selected)
+				{
+					if (!BeginPreviewAtIndex(load_selected))
+					{
+						StopPreview();
+					}
+				}
+			}
+			else
+			{
+				if (preview_active)
+				{
+					StopPreview();
+				}
+			}
+		}
+		if (preview_active)
+		{
+			FillPreviewBuffer();
+		}
+		if (request_delete_file)
+		{
+			if (ui_blocked)
+			{
+				request_delete_file = false;
+				request_delete_index = -1;
+				LogLine("Delete menu: request ignored during UI block");
+			}
+			else
+			{
+				request_delete_file = false;
+				const int32_t index = request_delete_index;
+				request_delete_index = -1;
+				LogLine("Delete menu: request index=%ld", static_cast<long>(index));
+				if (index >= 0 && index < wav_file_count)
+				{
+					LogLine("Delete menu: file name=%s", wav_files[index]);
+				}
+				else
+				{
+					LogLine("Delete menu: file name unavailable (count=%ld)", static_cast<long>(wav_file_count));
+				}
+				if (DeleteFileAtIndex(index))
+				{
+					LogLine("Delete success");
+					request_delete_scan = true;
+					delete_confirm = false;
+					request_delete_redraw = true;
+				}
+				else
+				{
+					LogLine("Delete failed");
+					delete_confirm = false;
+					request_delete_redraw = true;
+				}
+			}
+		}
+
+		if (sd_init_in_progress)
+		{
+			if (!sd_init_done)
+			{
+				const uint32_t now = System::GetNow();
+				if (sd_init_attempts < kSdInitAttempts && now >= sd_init_next_ms)
+				{
+					sd_init_success = ReinitSdNow();
+					sd_init_attempts++;
+					if (sd_init_success || sd_init_attempts >= kSdInitAttempts)
+					{
+						sd_init_done = true;
+						sd_init_result_until_ms = now + kSdInitResultMs;
+					}
+					else
+					{
+						sd_init_next_ms = now + kSdInitRetryMs;
+					}
+				}
+			}
+			if ((System::GetNow() - sd_init_start_ms) >= kSdInitMinMs && sd_init_done)
+			{
+				if (System::GetNow() >= sd_init_result_until_ms)
+				{
+					sd_init_in_progress = false;
+					if (sd_init_success)
+					{
+						ui_mode = UiMode::Load;
+						request_load_scan = true;
+						last_mode = UiMode::Shift;
+					}
+					else
+					{
+						ui_mode = sd_init_prev_mode;
+						last_mode = UiMode::Shift;
+					}
+					request_shift_redraw = true;
+				}
+			}
+		}
+		if (sd_init_in_progress)
+		{
+			const uint32_t now = System::GetNow();
+			if (now >= sd_init_draw_next_ms)
+			{
+				DrawSdInitScreen();
+				sd_init_draw_next_ms = now + 100;
+			}
+		}
+		if (save_in_progress)
+		{
+			const uint32_t now = System::GetNow();
+			if (!save_done)
+			{
+				if (!save_started)
+				{
+					DrawSaveScreen();
+					save_success = BeginSaveRecordedSample();
+					save_started = true;
+					if (!save_success)
+					{
+						save_done = true;
+						save_result_until_ms = now + kSaveResultMs;
+					}
+				}
+				else
+				{
+					bool step_done = false;
+					DrawSaveScreen();
+					save_success = StepSaveRecordedSample(step_done);
+					if (!save_success)
+					{
+						save_done = true;
+						save_result_until_ms = now + kSaveResultMs;
+					}
+					else if (step_done)
+					{
+						save_done = true;
+						save_result_until_ms = now + kSaveResultMs;
+						request_load_scan = true;
+					}
+				}
+			}
+			if (now >= save_draw_next_ms)
+			{
+				DrawSaveScreen();
+				save_draw_next_ms = now + 100;
+			}
+			if (save_done && now >= save_result_until_ms)
+			{
+				save_in_progress = false;
+				ui_mode = save_prev_mode;
+				last_mode = UiMode::Shift;
 			}
 		}
 
@@ -2763,7 +3782,7 @@ int main(void)
 				}
 			}
 		}
-		if (request_length_redraw)
+		if (!ui_blocked && request_length_redraw)
 		{
 			request_length_redraw = false;
 			if (ui_mode == UiMode::Record && record_state == RecordState::Review)
@@ -2775,12 +3794,12 @@ int main(void)
 				DrawWaveform();
 			}
 		}
-		if (request_tune_redraw && ui_mode == UiMode::Tune)
+		if (!ui_blocked && request_tune_redraw && ui_mode == UiMode::Tune)
 		{
 			request_tune_redraw = false;
 			DrawTuneScreen();
 		}
-		if (request_shift_redraw && ui_mode == UiMode::Shift)
+		if (!ui_blocked && request_shift_redraw && ui_mode == UiMode::Shift)
 		{
 			request_shift_redraw = false;
 			DrawShiftMenu(shift_menu_index);
@@ -2799,18 +3818,33 @@ int main(void)
 				record_anim_start_ms = -1.0;
 			}
 			LogLine("UI mode: %s", UiModeName(mode));
-			if (mode == UiMode::Main)
+			if (sd_init_in_progress)
+			{
+				DrawSdInitScreen();
+			}
+			else if (save_in_progress)
+			{
+				DrawSaveScreen();
+			}
+			else if (mode == UiMode::Main)
 			{
 				DrawMenu(menu_index);
 			}
 			else if (mode == UiMode::Load)
 			{
-				DrawLoadMenu(load_scroll, load_selected);
-				LogLine("Load menu: selected=%ld name=%s",
-						static_cast<long>(load_selected),
-						(load_selected >= 0 && load_selected < wav_file_count)
-							? wav_files[load_selected]
-							: "UNKNOWN");
+				if (delete_mode && delete_confirm)
+				{
+					DrawDeleteConfirm(delete_confirm_name);
+				}
+				else
+				{
+					DrawLoadMenu(load_scroll, load_selected);
+					LogLine("Load menu: selected=%ld name=%s",
+							static_cast<long>(load_selected),
+							(load_selected >= 0 && load_selected < wav_file_count)
+								? wav_files[load_selected]
+								: "UNKNOWN");
+				}
 			}
 			else if (mode == UiMode::Play)
 			{
@@ -2827,7 +3861,11 @@ int main(void)
 			}
 			else
 			{
-				if (record_state == RecordState::Armed)
+				if (record_state == RecordState::SourceSelect)
+				{
+					DrawRecordSourceScreen();
+				}
+				else if (record_state == RecordState::Armed)
 				{
 					DrawRecordArmed();
 				}
@@ -2873,36 +3911,52 @@ int main(void)
 		}
 		else if (mode == UiMode::Shift)
 		{
-			const int32_t current = shift_menu_index;
-			if (current != last_shift_menu)
+			if (!ui_blocked)
 			{
-				DrawShiftMenu(current);
-				last_shift_menu = current;
+				const int32_t current = shift_menu_index;
+				if (current != last_shift_menu)
+				{
+					DrawShiftMenu(current);
+					last_shift_menu = current;
+				}
 			}
 		}
 		else if (mode == UiMode::Load)
 		{
-			const int32_t current_scroll = load_scroll;
-			const int32_t current_count = wav_file_count;
-			const int32_t current_selected = load_selected;
-			if (current_scroll != last_scroll
-				|| current_selected != last_selected
-				|| current_count != last_file_count
-				|| sd_mounted != last_sd_mounted)
+			if (delete_mode && delete_confirm)
 			{
-				DrawLoadMenu(current_scroll, current_selected);
-				if (current_selected != last_selected || current_count != last_file_count)
+				if (request_delete_redraw)
 				{
-					LogLine("Load menu: selected=%ld name=%s",
-							static_cast<long>(current_selected),
-							(current_selected >= 0 && current_selected < current_count)
-								? wav_files[current_selected]
-								: "UNKNOWN");
+					request_delete_redraw = false;
+					DrawDeleteConfirm(delete_confirm_name);
 				}
-				last_scroll = current_scroll;
-				last_selected = current_selected;
-				last_file_count = current_count;
-				last_sd_mounted = sd_mounted;
+			}
+			else
+			{
+				const int32_t current_scroll = load_scroll;
+				const int32_t current_count = wav_file_count;
+				const int32_t current_selected = load_selected;
+				if (request_delete_redraw
+					|| current_scroll != last_scroll
+					|| current_selected != last_selected
+					|| current_count != last_file_count
+					|| sd_mounted != last_sd_mounted)
+				{
+					request_delete_redraw = false;
+					DrawLoadMenu(current_scroll, current_selected);
+					if (current_selected != last_selected || current_count != last_file_count)
+					{
+						LogLine("Load menu: selected=%ld name=%s",
+								static_cast<long>(current_selected),
+								(current_selected >= 0 && current_selected < current_count)
+									? wav_files[current_selected]
+									: "UNKNOWN");
+					}
+					last_scroll = current_scroll;
+					last_selected = current_selected;
+					last_file_count = current_count;
+					last_sd_mounted = sd_mounted;
+				}
 			}
 		}
 		else if (mode == UiMode::Record)
@@ -2910,7 +3964,11 @@ int main(void)
 			const RecordState current_state = record_state;
 			if (current_state != last_record_state)
 			{
-				if (current_state == RecordState::Armed)
+				if (current_state == RecordState::SourceSelect)
+				{
+					DrawRecordSourceScreen();
+				}
+				else if (current_state == RecordState::Armed)
 				{
 					record_anim_start_ms = NowMs();
 					DrawRecordArmed();
@@ -2930,7 +3988,7 @@ int main(void)
 				last_record_state = current_state;
 			}
 		}
-		if (mode == UiMode::Record && record_state == RecordState::Recording)
+		if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::Recording)
 		{
 			if (live_wave_dirty)
 			{
@@ -2938,15 +3996,19 @@ int main(void)
 				DrawRecordRecording();
 			}
 		}
-		else if (mode == UiMode::Record && record_state == RecordState::Armed)
+		else if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::SourceSelect)
+		{
+			DrawRecordSourceScreen();
+		}
+		else if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::Armed)
 		{
 			DrawRecordReadyScreen();
 		}
-		else if (mode == UiMode::Record && record_state == RecordState::Countdown)
+		else if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::Countdown)
 		{
 			DrawRecordCountdown();
 		}
-		if (request_playhead_redraw || (playback_active != last_playback_active))
+		if (!ui_blocked && (request_playhead_redraw || (playback_active != last_playback_active)))
 		{
 			request_playhead_redraw = false;
 			if (mode == UiMode::Play
@@ -2975,7 +4037,8 @@ int main(void)
 			}
 		}
 		if ((ui_mode == UiMode::Record && record_state == RecordState::Review)
-			|| ui_mode == UiMode::Tune)
+			|| ui_mode == UiMode::Tune
+			|| (ui_mode == UiMode::Load && !delete_mode))
 		{
 			led1_phase_ms += 10.0f;
 			if (led1_phase_ms >= kLedBlinkPeriodMs)
