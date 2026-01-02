@@ -1,3 +1,28 @@
+
+### 2/2/26 2:08am
+# Post TUNE/ADSR removal updates
+
+___CREATED A NEW BRANCH TO WORK ON THE BASICS OF THE BAKE FEATURE, MAINLY CREATING MULTIPLE SAMPLES FROM A SINGLE SAMPLE, REPITCHING THEM AND PLACING THEM ON THEIR RELATIVE NOTE #_______
+
+BUGS:
+1.) THERE IS NO BAKE PROGRESS WHEN BAKING, CURRENTLY TAKES AROUND 20 SECONDS AND TRANSPORTS DIRECTLY TO PERFORM SUBMENU
+2.) EVERYTHING FROM A3 AND HIGHER SOUNDS OUT OF TUNE?
+3.) THE ADDED FADE INS / FADE OUTS WHICH CAN BE CONTROLLED WITH THE ENCODERS ON THE PERFORM SUBMENU WILL BE DELETED FOR SOMETHING BETTER
+
+-Removed TUNE and ADSR SELECT screens.
+
+-Added CONFIRM BAKE screen (ENCODER R) with YES/NO boxes from START/END SELECT.
+
+-BAKE now uses only the selected START/END window; PERFORM shows and plays only that window.
+
+-BAKE runs offline once and stores a per-note bank in SDRAM for C2-C4: C3 is the original window, other notes are phase-vocoder pitch-shifted with duration preserved (phase locking + transient handling to reduce artifacts).
+
+-Perform is MIDI-only for baked content: only notes C2-C4 play from the baked bank.
+
+-Added 5-voice polyphony for baked Perform playback.
+
+-Added global attack/release fades in Perform (L/R encoders; Shift = fine). The waveform overlay shows the fade lines moving inward as fades increase.
+
 # 1/1/26 EDGE
 
 
@@ -70,7 +95,6 @@ feature/Record2 Branch
 // **CANNOT ACCESS SINE WAVE AGAIN AFTER BACKING OUT INITIALLY - COULD BE PROBLEMATIC IF NEEDING TO REVIST, THE ONLY WAY TO ACCESS IT AGAIN IS TO RE-RECORD SOMETHING
 // ** SD CARD DOESN'T LOAD IF REMOVED WITHOUT REFLASHING. I tested removing the SD card after initially loading files, but get a "NO WAV FILES" error. Even when reinserting the SD card and pressing LOAD, the error persists. The only way to reload is to flash or reset the seed. (very bad for users).
 //** SD card removal feature revoked. Only have internal SD for saving patches.
-
 
 
 
