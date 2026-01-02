@@ -1,0 +1,59 @@
+Screen List (WaveContV3.cpp)
+
+MAIN MENU
+- 2x2 grid of top-level options: LOAD, RECORD, PERFORM, PLAY.
+
+SHIFT MENU
+- Vertical list of SAVE and DELETE options.
+
+LOAD MENU
+- Scrollable list of WAV files; highlights selected file; used for loading.
+- In delete mode, the same list is used to select a file to delete.
+- Empty/blocked states:
+  - "SD NOT MOUNTED" when SD card is missing or not ready.
+  - "NO WAV FILES" when there are no files (normal load mode).
+  - "NO FILES" when there are no files (delete mode).
+
+LOAD TARGET
+- "LOAD TO?" with boxes for PLAY, BAKE, and PERFORM.
+
+DELETE CONFIRM
+- "DELETE?" plus filename and "R=YES L=NO" prompt.
+
+RECORD SOURCE SELECT
+- "SOURCE:" with LINE IN or MICROPHONE options.
+
+RECORD READY
+- Animated "RECORD LINE IN" or "RECORD MICROPHONE" plus "READY".
+
+RECORD COUNTDOWN
+- Large countdown number with film reel graphic.
+
+RECORDING
+- "RECORDING: 5 SEC MAX" plus live waveform.
+
+RECORD REVIEW
+- Waveform screen titled "RECORDED PLAYBACK".
+
+PERFORM
+- 2x2 grid of rectangles.
+- Vertical labels on the left side of each box: EDIT (top left), AMP (top right), FILT (bottom left), FX (bottom right).
+- FX box shows a horizontal wet/dry bar (encoder R adjusts when FX is selected).
+
+PLAY WAVEFORM
+- Shows loaded sample waveform with trim brackets and title (sample name).
+- If baked performance is active, shows baked view with attack/release lines.
+
+NO SAMPLE LOADED
+- Message: NO SAMPLE LOADED / PLEASE LOAD A / SAMPLE FROM / THE MAIN MENU.
+
+CONFIRM BAKE
+- "Confirm Bake?" with YES/NO options.
+
+SD INIT
+- "INITIALIZING SD" with animated dots and attempt counter.
+- Result state: "SD INIT OK" or "SD INIT FAILED".
+
+SAVE
+- "SAVING" with progress bar.
+- Result state: "SAVE OK" or "SAVE FAILED" (shows filename on success).

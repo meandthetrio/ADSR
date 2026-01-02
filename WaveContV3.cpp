@@ -18,6 +18,9 @@ using PodDisplay = OledDisplay<SSD130xI2c128x64Driver>;
 constexpr bool kLogEnabled = true;
 constexpr int32_t kMenuCount = 4;
 constexpr int32_t kShiftMenuCount = 2;
+constexpr int32_t kLoadTargetCount = 3;
+constexpr int32_t kPerformBoxCount = 4;
+constexpr int32_t kPerformFxIndex = 3;
 constexpr uint32_t kSdInitMinMs = 800;
 constexpr uint32_t kSdInitRetryMs = 300;
 constexpr uint32_t kSdInitResultMs = 1500;
@@ -60,12 +63,17 @@ constexpr int kBakeLastMidi = kBaseMidiNote + 12;
 constexpr int kBakeNoteCount = kBakeLastMidi - kBakeFirstMidi + 1;
 constexpr size_t kBakeBankFramesMax = kMaxSampleSamples * 4;
 constexpr int kPerformVoiceCount = 5;
+constexpr float kReverbFeedback = 0.85f;
+constexpr float kReverbLpFreq = 12000.0f;
+constexpr float kReverbDefaultWet = 0.25f;
+constexpr float kReverbWetStep = 0.02f;
 
 enum class UiMode : int32_t
 {
 	Main,
 	Load,
 	LoadTarget,
+	Perform,
 	Play,
 	Record,
 	ConfirmBake,
@@ -76,6 +84,7 @@ enum class LoadDestination : int32_t
 {
 	Play = 0,
 	Bake = 1,
+	Perform = 2,
 };
 
 enum class RecordState : int32_t
@@ -99,10 +108,12 @@ SdmmcHandler   sdcard;
 FatFSInterface fsi;
 Encoder      encoder_r;
 Switch       shift_button;
+ReverbSc DSY_SDRAM_BSS reverb;
 
 volatile UiMode ui_mode = UiMode::Main;
 volatile int32_t menu_index = 0;
 volatile int32_t shift_menu_index = 0;
+volatile int32_t perform_index = 0;
 volatile UiMode shift_prev_mode = UiMode::Main;
 volatile RecordInput record_input = RecordInput::LineIn;
 volatile int32_t load_selected = 0;
@@ -238,6 +249,7 @@ volatile bool request_playhead_redraw = false;
 volatile bool button1_press = false;
 volatile bool button2_press = false;
 volatile bool request_playback_stop_log = false;
+volatile float reverb_wet = kReverbDefaultWet;
 volatile bool preview_hold = false;
 volatile bool preview_active = false;
 volatile int32_t preview_index = -1;
@@ -261,6 +273,7 @@ static uint8_t record_invert_mask[kDisplayH][kDisplayW];
 static uint8_t record_fb_buf[kDisplayH][kDisplayW];
 static uint8_t record_bold_mask[kDisplayH][kDisplayW];
 static bool request_shift_redraw = false;
+static bool request_perform_redraw = false;
 static float pv_window_long[kPvLongSize];
 static float pv_window_short[kPvShortSize];
 static float pv_fft_re[kPvLongSize];
@@ -495,10 +508,22 @@ static const char* UiModeName(UiMode mode)
 		case UiMode::Main: return "MAIN";
 		case UiMode::Load: return "LOAD";
 		case UiMode::LoadTarget: return "LOAD_TARGET";
+		case UiMode::Perform: return "PERFORM";
 		case UiMode::Play: return "PLAY";
 		case UiMode::Record: return "RECORD";
 		case UiMode::ConfirmBake: return "CONFIRM_BAKE";
 		case UiMode::Shift: return "SHIFT";
+		default: return "UNKNOWN";
+	}
+}
+
+static const char* LoadDestinationName(LoadDestination dest)
+{
+	switch (dest)
+	{
+		case LoadDestination::Play: return "PLAY";
+		case LoadDestination::Bake: return "BAKE";
+		case LoadDestination::Perform: return "PERFORM";
 		default: return "UNKNOWN";
 	}
 }
@@ -2329,6 +2354,67 @@ static void DrawTinyString(const char* str, int x, int y, bool on)
 	}
 }
 
+static void DrawTinyVerticalString(const char* str, int x, int y, int h, bool on)
+{
+	if (str == nullptr || str[0] == '\0')
+	{
+		return;
+	}
+	const int len = static_cast<int>(StrLen(str));
+	constexpr int kLetterSpacing = 1;
+	int glyph_h = Font5x7::H;
+	int total_h = len * glyph_h + (len - 1) * kLetterSpacing;
+	while (total_h > h && glyph_h > 1)
+	{
+		--glyph_h;
+		total_h = len * glyph_h + (len - 1) * kLetterSpacing;
+	}
+	int start_y = y + (h - total_h) / 2;
+	if (start_y < y)
+	{
+		start_y = y;
+	}
+	for (int i = 0; i < len; ++i)
+	{
+		uint8_t rows[Font5x7::H] = {};
+		Font5x7::GetGlyphRows(str[i], rows);
+		const int char_y = start_y + i * (glyph_h + kLetterSpacing);
+		for (int yy = 0; yy < glyph_h; ++yy)
+		{
+			int src_row = 0;
+			if (glyph_h == Font5x7::H)
+			{
+				src_row = yy;
+			}
+			else if (glyph_h == Font5x7::H - 1)
+			{
+				src_row = (yy < 2) ? yy : (yy + 1);
+			}
+			else
+			{
+				src_row = (yy * Font5x7::H) / glyph_h;
+				if (src_row >= Font5x7::H)
+				{
+					src_row = Font5x7::H - 1;
+				}
+			}
+			const uint8_t row = rows[src_row];
+			for (int xx = 0; xx < Font5x7::W; ++xx)
+			{
+				if ((row >> (Font5x7::W - 1 - xx)) & 1)
+				{
+					const int px = x + xx;
+					const int py = char_y + yy;
+					if (px >= 0 && px < kDisplayW && py >= 0 && py < kDisplayH)
+					{
+						display.DrawPixel(px, py, on);
+					}
+				}
+			}
+		}
+	}
+}
+
 static int TinyStringWidth(const char* str)
 {
 	if (str == nullptr || str[0] == '\0')
@@ -2341,6 +2427,93 @@ static int TinyStringWidth(const char* str)
 	{
 	}
 	return count * char_w - 1;
+}
+
+static void DrawPerformScreen(int32_t selected)
+{
+	constexpr int kMarginX = 2;
+	constexpr int kMarginY = 2;
+	constexpr int kGapX = 2;
+	constexpr int kGapY = 2;
+	constexpr int kBoxW = (kDisplayW - (kMarginX * 2) - kGapX) / 2;
+	constexpr int kBoxH = (kDisplayH - (kMarginY * 2) - kGapY) / 2;
+	constexpr int kLabelPadX = 2;
+	constexpr int kLabelPadY = 1;
+	display.Fill(false);
+
+	struct Box
+	{
+		int x;
+		int y;
+		const char* label;
+	};
+
+	const Box boxes[] =
+	{
+		{ kMarginX, kMarginY, "EDIT" },
+		{ kMarginX + kBoxW + kGapX, kMarginY, "AMP" },
+		{ kMarginX, kMarginY + kBoxH + kGapY, "FILT" },
+		{ kMarginX + kBoxW + kGapX, kMarginY + kBoxH + kGapY, "FX" },
+	};
+
+	auto draw_wet_bar = [&](int x, int y, int w, int h, float wet, bool invert)
+	{
+		if (w <= 2 || h <= 2)
+		{
+			return;
+		}
+		int percent = static_cast<int>(wet * 100.0f + 0.5f);
+		if (percent < 0)
+		{
+			percent = 0;
+		}
+		if (percent > 100)
+		{
+			percent = 100;
+		}
+		const bool draw_on = invert ? false : true;
+		display.DrawRect(x, y, x + w - 1, y + h - 1, draw_on, false);
+		const int inner_w = w - 2;
+		const int fill_w = (inner_w * percent) / 100;
+		if (fill_w > 0)
+		{
+			display.DrawRect(x + 1, y + 1, x + fill_w, y + h - 2, draw_on, true);
+		}
+	};
+
+	for (int i = 0; i < kPerformBoxCount; ++i)
+	{
+		const auto& box = boxes[i];
+		const bool is_selected = (i == selected);
+		if (is_selected && kBoxW > 2 && kBoxH > 2)
+		{
+			display.DrawRect(box.x + 1,
+							 box.y + 1,
+							 box.x + kBoxW - 2,
+							 box.y + kBoxH - 2,
+							 true,
+							 true);
+		}
+		display.DrawLine(box.x, box.y, box.x, box.y + kBoxH - 1, true);
+		DrawTinyVerticalString(box.label,
+							   box.x + kLabelPadX,
+							   box.y + kLabelPadY,
+							   kBoxH - (kLabelPadY * 2),
+							   !is_selected);
+		if (i == kPerformFxIndex)
+		{
+			const int bar_h = 6;
+			const int bar_y = box.y + (kBoxH - bar_h) / 2;
+			const int bar_x = box.x + kLabelPadX + Font5x7::W + 2;
+			const int bar_right = box.x + kBoxW - 2;
+			const int bar_w = bar_right - bar_x + 1;
+			if (bar_w > 4)
+			{
+				draw_wet_bar(bar_x, bar_y, bar_w, bar_h, reverb_wet, is_selected);
+			}
+		}
+	}
+	display.Update();
 }
 
 static void DrawProgressBar(int x, int y, int w, int h, int32_t percent)
@@ -2465,28 +2638,32 @@ static void DrawLoadTargetMenu(LoadDestination selected)
 	display.SetCursor(0, 0);
 	display.WriteString("LOAD TO?", font, true);
 
-	const int box_y = font.FontHeight + 4;
-	const int box_h = 40;
+	const int box_y = font.FontHeight + 2;
+	const int box_h = 20;
 	const int box_w = 56;
-	const int gap = 8;
-	const int start_x = (static_cast<int>(display.Width()) - (box_w * 2 + gap)) / 2;
+	const int gap_x = 8;
+	const int gap_y = 4;
+	const int start_x = (static_cast<int>(display.Width()) - (box_w * 2 + gap_x)) / 2;
 
-	auto draw_box = [&](int x, const char* label, bool highlight)
+	auto draw_box = [&](int x, int y, int w, int h, const char* label, bool highlight)
 	{
 		display.DrawRect(x,
-						 box_y,
-						 x + box_w - 1,
-						 box_y + box_h - 1,
+						 y,
+						 x + w - 1,
+						 y + h - 1,
 						 true,
 						 highlight);
-		const int text_x = x + (box_w - static_cast<int>(StrLen(label)) * font.FontWidth) / 2;
-		const int text_y = box_y + (box_h - font.FontHeight) / 2;
+		const int text_x = x + (w - static_cast<int>(StrLen(label)) * font.FontWidth) / 2;
+		const int text_y = y + (h - font.FontHeight) / 2;
 		display.SetCursor(text_x, text_y);
 		display.WriteString(label, font, !highlight);
 	};
 
-	draw_box(start_x, "PLAY", selected == LoadDestination::Play);
-	draw_box(start_x + box_w + gap, "BAKE", selected == LoadDestination::Bake);
+	draw_box(start_x, box_y, box_w, box_h, "PLAY", selected == LoadDestination::Play);
+	draw_box(start_x + box_w + gap_x, box_y, box_w, box_h, "BAKE", selected == LoadDestination::Bake);
+	draw_box(start_x, box_y + box_h + gap_y, (box_w * 2) + gap_x, box_h,
+			 "PERFORM",
+			 selected == LoadDestination::Perform);
 	display.Update();
 }
 
@@ -3747,6 +3924,10 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		}
 		else if (encoder_r_pressed && menu_index == 2)
 		{
+			ui_mode = UiMode::Perform;
+		}
+		else if (encoder_r_pressed && menu_index == 3)
+		{
 			ui_mode = UiMode::Play;
 			if(sample_loaded && sample_length > 0)
 			{
@@ -3754,10 +3935,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			}
 			waveform_dirty = true;
 			request_length_redraw = true;
-		}
-		else if (encoder_r_pressed && menu_index == 3)
-		{
-			LogLine("Play menu selected (not implemented)");
 		}
 	}
 	else if (!ui_blocked && ui_mode == UiMode::Load)
@@ -3852,11 +4029,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			int32_t next = static_cast<int32_t>(load_target_selected) + encoder_l_inc;
 			while (next < 0)
 			{
-				next += 2;
+				next += kLoadTargetCount;
 			}
-			while (next >= 2)
+			while (next >= kLoadTargetCount)
 			{
-				next -= 2;
+				next -= kLoadTargetCount;
 			}
 			load_target_selected = static_cast<LoadDestination>(next);
 		}
@@ -4020,6 +4197,44 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				}
 				AdjustTrimNormalized(dl, dr, shift_button.Pressed());
 			}
+		}
+	}
+	else if (!ui_blocked && ui_mode == UiMode::Perform)
+	{
+		if (encoder_l_inc != 0)
+		{
+			int32_t next = perform_index + encoder_l_inc;
+			while (next < 0)
+			{
+				next += kPerformBoxCount;
+			}
+			while (next >= kPerformBoxCount)
+			{
+				next -= kPerformBoxCount;
+			}
+			perform_index = next;
+		}
+		if (perform_index == kPerformFxIndex && encoder_r_inc != 0)
+		{
+			const float step = shift_button.Pressed() ? (kReverbWetStep * 0.25f) : kReverbWetStep;
+			float next = reverb_wet + (static_cast<float>(encoder_r_inc) * step);
+			if (next < 0.0f)
+			{
+				next = 0.0f;
+			}
+			if (next > 1.0f)
+			{
+				next = 1.0f;
+			}
+			if (next != reverb_wet)
+			{
+				reverb_wet = next;
+				request_perform_redraw = true;
+			}
+		}
+		if (encoder_l_pressed)
+		{
+			ui_mode = UiMode::Main;
 		}
 	}
 	else if (!ui_blocked && ui_mode == UiMode::Play)
@@ -4321,8 +4536,13 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			sig_l += monitor_l;
 			sig_r += monitor_r;
 		}
-		out[0][i] = sig_l;
-		out[1][i] = sig_r;
+		float rev_l = 0.0f;
+		float rev_r = 0.0f;
+		reverb.Process(sig_l, sig_r, &rev_l, &rev_r);
+		const float wet = reverb_wet;
+		const float dry = 1.0f - wet;
+		out[0][i] = (sig_l * dry) + (rev_l * wet);
+		out[1][i] = (sig_r * dry) + (rev_r * wet);
 	}
 	request_playhead_redraw = true;
 }
@@ -4334,6 +4554,10 @@ int main(void)
 	hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 	hw.seed.StartLog(false);
 	LogLine("Logger started");
+
+	reverb.Init(hw.AudioSampleRate());
+	reverb.SetFeedback(kReverbFeedback);
+	reverb.SetLpFreq(kReverbLpFreq);
 
 	encoder_r.Init(seed::D7, seed::D8, seed::D22, hw.AudioSampleRate());
 	shift_button.Init(seed::D9, 1000);
@@ -4361,6 +4585,7 @@ int main(void)
 	UiMode last_mode = UiMode::Main;
 	int32_t last_menu = -1;
 	int32_t last_shift_menu = -1;
+	int32_t last_perform_index = -1;
 	int32_t last_scroll = -1;
 	int32_t last_selected = -1;
 	int32_t last_file_count = -1;
@@ -4447,12 +4672,12 @@ int main(void)
 				const int32_t index = request_load_index;
 				request_load_index = -1;
 				const LoadDestination dest = request_load_destination;
-				LogLine("Load menu: sample request index=%ld target=%s",
-						static_cast<long>(index),
-						(dest == LoadDestination::Bake) ? "BAKE" : "PLAY");
-				if (index >= 0 && index < wav_file_count)
-				{
-					LogLine("Load menu: sample name=%s", wav_files[index]);
+					LogLine("Load menu: sample request index=%ld target=%s",
+							static_cast<long>(index),
+							LoadDestinationName(dest));
+					if (index >= 0 && index < wav_file_count)
+					{
+						LogLine("Load menu: sample name=%s", wav_files[index]);
 				}
 				else
 				{
@@ -4466,15 +4691,24 @@ int main(void)
 						ui_mode = UiMode::Record;
 						record_state = RecordState::Review;
 						request_length_redraw = true;
+						}
+						else
+						{
+							if (dest == LoadDestination::Perform)
+							{
+								LogLine("Load success, entering PERFORM menu");
+								ui_mode = UiMode::Perform;
+								menu_index = 2;
+							}
+							else
+							{
+								LogLine("Load success, entering PLAY menu");
+								ui_mode = UiMode::Play;
+							}
+						}
 					}
 					else
 					{
-						LogLine("Load success, entering PLAY menu");
-						ui_mode = UiMode::Play;
-					}
-				}
-				else
-				{
 					LogLine("Load failed");
 					ui_mode = UiMode::Load;
 				}
@@ -4548,15 +4782,15 @@ int main(void)
 			request_bake_process = false;
 			const bool ok = ProcessBakedBank();
 			bake_in_progress = false;
-			if (ok)
-			{
-				perform_bake_active = true;
-				perform_attack_norm = 0.0f;
-				perform_release_norm = 0.0f;
-				menu_index = 2;
-				ui_mode = UiMode::Play;
-				waveform_dirty = true;
-			}
+				if (ok)
+				{
+					perform_bake_active = true;
+					perform_attack_norm = 0.0f;
+					perform_release_norm = 0.0f;
+					menu_index = 3;
+					ui_mode = UiMode::Play;
+					waveform_dirty = true;
+				}
 			else
 			{
 				baked_ready = false;
@@ -4738,16 +4972,20 @@ int main(void)
 								: "UNKNOWN");
 				}
 			}
-			else if (mode == UiMode::Play)
-			{
-				DrawWaveform();
-			}
-			else if (mode == UiMode::LoadTarget)
-			{
-				DrawLoadTargetMenu(load_target_selected);
-				LogLine("Load target: %s",
-						(load_target_selected == LoadDestination::Bake) ? "BAKE" : "PLAY");
-			}
+				else if (mode == UiMode::Play)
+				{
+					DrawWaveform();
+				}
+				else if (mode == UiMode::Perform)
+				{
+					DrawPerformScreen(perform_index);
+				}
+				else if (mode == UiMode::LoadTarget)
+				{
+					DrawLoadTargetMenu(load_target_selected);
+					LogLine("Load target: %s",
+							LoadDestinationName(load_target_selected));
+				}
 			else if (mode == UiMode::ConfirmBake)
 			{
 				DrawConfirmBakeScreen(confirm_bake_selected);
@@ -4787,31 +5025,42 @@ int main(void)
 					DrawRecordReview();
 				}
 			}
-			last_mode = mode;
-			last_menu = menu_index;
-			last_scroll = load_scroll;
-			last_selected = load_selected;
-			last_file_count = wav_file_count;
-			last_sd_mounted = sd_mounted;
-			last_record_state = record_state;
-			last_load_target = load_target_selected;
-		}
-		else if (mode == UiMode::Main)
-		{
-			const int32_t current = menu_index;
+				last_mode = mode;
+				last_menu = menu_index;
+				last_scroll = load_scroll;
+				last_selected = load_selected;
+				last_file_count = wav_file_count;
+				last_sd_mounted = sd_mounted;
+				last_record_state = record_state;
+				last_load_target = load_target_selected;
+				last_perform_index = perform_index;
+			}
+			else if (mode == UiMode::Main)
+			{
+				const int32_t current = menu_index;
 			if (current != last_menu)
 			{
 				LogLine("Menu highlight: %s (%ld)",
 						MenuLabelForIndex(current),
 						static_cast<long>(current));
 				DrawMenu(current);
-				last_menu = current;
+					last_menu = current;
+				}
 			}
-		}
-		else if (mode == UiMode::Shift)
-		{
-			if (!ui_blocked)
+			else if (mode == UiMode::Perform)
 			{
+				const int32_t current = perform_index;
+				if (request_perform_redraw || current != last_perform_index)
+				{
+					request_perform_redraw = false;
+					DrawPerformScreen(current);
+					last_perform_index = current;
+				}
+			}
+			else if (mode == UiMode::Shift)
+			{
+				if (!ui_blocked)
+				{
 				const int32_t current = shift_menu_index;
 				if (current != last_shift_menu)
 				{
