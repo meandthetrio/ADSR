@@ -1,4 +1,4 @@
-Screen List (WaveContV3.cpp)
+SI just got creen List (WaveContV3.cpp)
 
 MAIN MENU
 - 2x2 grid of top-level options: LOAD, RECORD, PERFORM, PLAY.
@@ -37,8 +37,21 @@ RECORD REVIEW
 
 PERFORM
 - 2x2 grid of rectangles.
-- Vertical labels on the left side of each box: EDIT (top left), AMP (top right), FILT (bottom left), FX (bottom right).
-- FX box shows a horizontal wet/dry bar (encoder R adjusts when FX is selected).
+- Vertical labels on the left side of each box: EDT (top left), AMP (top right), FLT (bottom left), FX (bottom right).
+- When a sample is loaded to PERFORM, playback is 5-voice polyphonic resampling (pitch follows speed).
+- When a sample is baked, PERFORM uses 5-voice multisample playback.
+- AMP box shows four vertical faders labeled A, D, S, R.
+- AMP A/R faders map to 5-1000 ms fades (20 ms steps) at the start/end of the sample.
+- AMP R release starts when a MIDI note-off is received for a voice.
+- FLT box shows two vertical faders labeled C and R.
+- Hold SHIFT while FLT is selected to pick C/R with encoder L; encoder R adjusts the highlighted fader.
+- C controls a per-voice 4-pole low-pass cutoff (exp scaled, max 20kHz). R controls resonance (Q 0-5, starts at 0).
+- FX box shows four vertical wet/dry faders labeled S, C, D, R.
+- S controls tape saturation depth.
+- D is a 300ms ping-pong delay wet/dry fader (~6 repeats).
+- Hold SHIFT while AMP is selected to pick A/D/S/R with encoder L; encoder R adjusts the highlighted fader.
+- Hold SHIFT while FX is selected to pick S/C/D/R with encoder L; encoder R adjusts the highlighted fader.
+- C controls chorus depth (slow rate).
 
 PLAY WAVEFORM
 - Shows loaded sample waveform with trim brackets and title (sample name).

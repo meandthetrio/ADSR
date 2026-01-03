@@ -1,3 +1,30 @@
+### 2/3/26 2:13am
+
+- Load a constant/repeating/solid/loud sample from SD to PERFORM
+- Left Encoder Rotation selects which section is highlighted
+- Hold Shift the Rotate L encoder to highlight a parameter
+- rotate Right encoder to change value of highlighted parameter
+- release shift, move encoder Left rotation to highlight a different section
+
+-AMP
+	Attack = A
+	Release = R
+	
+	decay and sustain not yet working
+
+-FLT
+	C = cutoff
+	R = Resonance
+
+-FX
+	S = Tape saturation
+	C = Chorus
+	D = Ping Pong Delay
+	R = Reverb
+
+
+
+
 
 ### 2/2/26 2:08am
 # Post TUNE/ADSR removal updates
