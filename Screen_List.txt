@@ -15,7 +15,8 @@ LOAD MENU
   - "NO FILES" when there are no files (delete mode).
 
 LOAD TARGET
-- "LOAD TO?" with boxes for PLAY, BAKE, and PERFORM.
+- Three equal rectangles with diagonal labels: PERFORM, PLAY, BAKE.
+- Encoder L selects target; Encoder R confirms.
 
 DELETE CONFIRM
 - "DELETE?" plus filename and "R=YES L=NO" prompt.
@@ -35,9 +36,18 @@ RECORDING
 RECORD REVIEW
 - Waveform screen titled "RECORDED PLAYBACK".
 
+RECORD TARGET SELECT
+- Appears after Record Review for recorded samples.
+- Three equal rectangles with diagonal labels: PERFORM, PLAY, BAKE.
+- Encoder L selects target; Encoder R confirms.
+- PERFORM loads the sample to PERFORM and enters PERFORM mode.
+- PLAY loads the sample to PLAY and enters PLAY mode.
+- BAKE goes to the CONFIRM BAKE screen.
+
 PERFORM
 - 2x2 grid of rectangles.
 - Vertical labels on the left side of each box: EDT (top left), AMP (top right), FLT (bottom left), FX (bottom right).
+- EDT box shows a mini waveform preview of the loaded sample.
 - When a sample is loaded to PERFORM, playback is 5-voice polyphonic resampling (pitch follows speed).
 - When a sample is baked, PERFORM uses 5-voice multisample playback.
 - AMP box shows four vertical faders labeled A, D, S, R.
@@ -52,6 +62,20 @@ PERFORM
 - Hold SHIFT while AMP is selected to pick A/D/S/R with encoder L; encoder R adjusts the highlighted fader.
 - Hold SHIFT while FX is selected to pick S/C/D/R with encoder L; encoder R adjusts the highlighted fader.
 - C controls chorus depth (slow rate).
+
+FX DETAIL SCREENS
+- Accessed by highlighting FX in PERFORM, holding SHIFT, selecting an effect (S, C, D, R), and pressing Encoder R.
+- SATURATION, CHORUS, DELAY, and REVERB screens show their label centered at the top.
+- REVERB shows a left-side stacked set of three rectangles labeled HALL, SPRG, SHMR.
+- REVERB shows four faders to the right labeled Pre, Dmp, Dcy, Wet; Encoder L selects a fader and Encoder R adjusts.
+- Pre is 0-100 ms predelay, Dmp damps reverb highs, Dcy is 10 ms-4 s (~80 ms/step), Wet matches the PERFORM R fader.
+- Press Encoder L to return to PERFORM.
+
+EDT WINDOW
+- Accessed by highlighting EDT in PERFORM and pressing Encoder R.
+- Waveform view with start/end brackets (trim) for the PERFORM playback window; top label shows the sample name without .wav.
+- Encoder L adjusts start; Encoder R adjusts end. Hold SHIFT for fine steps.
+- Shows a vertical playhead line while the sample is playing.
 
 PLAY WAVEFORM
 - Shows loaded sample waveform with trim brackets and title (sample name).

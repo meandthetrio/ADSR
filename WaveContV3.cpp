@@ -19,8 +19,19 @@ constexpr bool kLogEnabled = true;
 constexpr int32_t kMenuCount = 4;
 constexpr int32_t kShiftMenuCount = 2;
 constexpr int32_t kLoadTargetCount = 3;
+constexpr int32_t kRecordTargetCount = 3;
+constexpr int32_t kRecordTargetPerform = 0;
+constexpr int32_t kRecordTargetPlay = 1;
+constexpr int32_t kRecordTargetBake = 2;
 constexpr int32_t kPerformBoxCount = 4;
+constexpr int32_t kPerformEdtIndex = 0;
 constexpr int32_t kPerformFaderCount = 4;
+constexpr int32_t kFxReverbIndex = 3;
+constexpr int32_t kReverbAlgoHall = 0;
+constexpr int32_t kReverbAlgoSpring = 1;
+constexpr int32_t kReverbAlgoShimmer = 2;
+constexpr int32_t kReverbAlgoCount = 3;
+constexpr int32_t kReverbAlgSelectIndex = kPerformFaderCount;
 constexpr int32_t kPerformFltFaderCount = 2;
 constexpr int32_t kPerformAmpIndex = 1;
 constexpr int32_t kPerformFltIndex = 2;
@@ -69,8 +80,37 @@ constexpr size_t kBakeBankFramesMax = kMaxSampleSamples * 4;
 constexpr int kPerformVoiceCount = 5;
 constexpr float kReverbFeedback = 0.85f;
 constexpr float kReverbLpFreq = 12000.0f;
+constexpr float kReverbFeedbackMin = 0.2f;
+constexpr float kReverbFeedbackMax = 0.98f;
+constexpr float kReverbDampMinHz = 4000.0f;
+constexpr float kReverbDampMaxHz = 20000.0f;
+constexpr float kReverbPreDelayMaxMs = 100.0f;
+constexpr float kReverbDecayMinMs = 10.0f;
+constexpr float kReverbDecayMaxMs = 4000.0f;
+constexpr float kReverbParamStep = 0.02f;
+constexpr size_t kReverbPreDelayMaxSamples = 4800;
+constexpr float kReverbDecayDefault =
+	(kReverbFeedback - kReverbFeedbackMin) / (kReverbFeedbackMax - kReverbFeedbackMin);
+constexpr float kReverbDampDefault =
+	(kReverbDampMaxHz - kReverbLpFreq) / (kReverbDampMaxHz - kReverbDampMinHz);
 constexpr float kReverbDefaultWet = 0.0f;
 constexpr float kReverbWetStep = 0.02f;
+constexpr float kShimmerMix = 0.55f;
+constexpr float kShimmerFeedbackScale = 0.35f;
+constexpr float kShimmerShiftSemitones = 12.0f;
+constexpr float kShimmerDelayMs = 50.0f;
+constexpr float kSpringDelay1MsL = 35.0f;
+constexpr float kSpringDelay2MsL = 57.0f;
+constexpr float kSpringDelay1MsR = 41.0f;
+constexpr float kSpringDelay2MsR = 63.0f;
+constexpr float kSpringAllpassMsL = 7.0f;
+constexpr float kSpringAllpassMsR = 9.0f;
+constexpr float kSpringFeedbackMax = 0.95f;
+constexpr float kSpringHpHz = 120.0f;
+constexpr float kSpringDampDefaultHz = 8000.0f;
+constexpr float kSpringAllpassGain = 0.6f;
+constexpr size_t kSpringDelayMaxSamples = 4096;
+constexpr size_t kSpringAllpassMaxSamples = 1024;
 constexpr float kChorusRateHz = 0.25f;
 constexpr float kChorusDelayMs = 8.0f;
 constexpr float kChorusFeedback = 0.1f;
@@ -92,6 +132,8 @@ enum class UiMode : int32_t
 	Load,
 	LoadTarget,
 	Perform,
+	Edt,
+	FxDetail,
 	Play,
 	Record,
 	ConfirmBake,
@@ -112,6 +154,7 @@ enum class RecordState : int32_t
 	Countdown,
 	Recording,
 	Review,
+	TargetSelect,
 };
 
 enum class RecordInput : int32_t
@@ -412,6 +455,145 @@ private:
 	float z2_ = 0.0f;
 };
 
+class SpringReverb
+{
+public:
+	void Init(float sample_rate, float delay1_ms, float delay2_ms, float allpass_ms)
+	{
+		sample_rate_ = sample_rate;
+		delay1_.Init();
+		delay2_.Init();
+		allpass_.Init();
+		SetDelayMs(delay1_, delay1_ms);
+		SetDelayMs(delay2_, delay2_ms);
+		SetDelayMs(allpass_, allpass_ms);
+		lp_.Init(sample_rate_, kSpringDampDefaultHz);
+		hp_.Init(sample_rate_, kSpringHpHz);
+		feedback_ = 0.5f;
+	}
+
+	void SetFeedback(float fb)
+	{
+		feedback_ = Clamp(fb, 0.0f, kSpringFeedbackMax);
+	}
+
+	void SetDamp(float hz)
+	{
+		const float max_hz = sample_rate_ * 0.45f;
+		if (hz > max_hz)
+		{
+			hz = max_hz;
+		}
+		if (hz < 200.0f)
+		{
+			hz = 200.0f;
+		}
+		lp_.SetFreq(sample_rate_, hz);
+	}
+
+	float Process(float in)
+	{
+		const float comb1 = delay1_.Read();
+		const float comb2 = delay2_.Read();
+		const float comb_mix = 0.5f * (comb1 + comb2);
+		const float damped = lp_.Process(comb_mix);
+		delay1_.Write(in + (damped * feedback_));
+		delay2_.Write(in + (damped * feedback_ * 0.7f));
+		const float ap = allpass_.Read();
+		const float ap_out = -damped + ap;
+		allpass_.Write(damped + (ap * kSpringAllpassGain));
+		return hp_.Process(ap_out);
+	}
+
+private:
+	struct OnePoleLp
+	{
+		float a = 0.0f;
+		float y = 0.0f;
+
+		void Init(float sample_rate, float cutoff_hz)
+		{
+			SetFreq(sample_rate, cutoff_hz);
+			y = 0.0f;
+		}
+
+		void SetFreq(float sample_rate, float cutoff_hz)
+		{
+			a = expf(-2.0f * kPi * cutoff_hz / sample_rate);
+		}
+
+		float Process(float x)
+		{
+			y = (1.0f - a) * x + (a * y);
+			return y;
+		}
+	};
+
+	struct OnePoleHp
+	{
+		float a = 0.0f;
+		float y = 0.0f;
+		float x1 = 0.0f;
+
+		void Init(float sample_rate, float cutoff_hz)
+		{
+			SetFreq(sample_rate, cutoff_hz);
+			y = 0.0f;
+			x1 = 0.0f;
+		}
+
+		void SetFreq(float sample_rate, float cutoff_hz)
+		{
+			a = expf(-2.0f * kPi * cutoff_hz / sample_rate);
+		}
+
+		float Process(float x)
+		{
+			const float y0 = a * (y + x - x1);
+			x1 = x;
+			y = y0;
+			return y0;
+		}
+	};
+
+	template <size_t N>
+	void SetDelayMs(DelayLine<float, N>& delay, float ms)
+	{
+		float samples = ms * 0.001f * sample_rate_;
+		if (samples < 1.0f)
+		{
+			samples = 1.0f;
+		}
+		const float max_samples = static_cast<float>(N - 1);
+		if (samples > max_samples)
+		{
+			samples = max_samples;
+		}
+		delay.SetDelay(samples);
+	}
+
+	static float Clamp(float v, float lo, float hi)
+	{
+		if (v < lo)
+		{
+			return lo;
+		}
+		if (v > hi)
+		{
+			return hi;
+		}
+		return v;
+	}
+
+	float sample_rate_ = 48000.0f;
+	float feedback_ = 0.5f;
+	DelayLine<float, kSpringDelayMaxSamples> delay1_;
+	DelayLine<float, kSpringDelayMaxSamples> delay2_;
+	DelayLine<float, kSpringAllpassMaxSamples> allpass_;
+	OnePoleLp lp_;
+	OnePoleHp hp_;
+};
+
 DaisyPod    hw;
 PodDisplay  display;
 SdmmcHandler   sdcard;
@@ -419,8 +601,14 @@ FatFSInterface fsi;
 Encoder      encoder_r;
 Switch       shift_button;
 ReverbSc DSY_SDRAM_BSS reverb;
+SpringReverb DSY_SDRAM_BSS spring_reverb_l;
+SpringReverb DSY_SDRAM_BSS spring_reverb_r;
+PitchShifter DSY_SDRAM_BSS shimmer_shift_l;
+PitchShifter DSY_SDRAM_BSS shimmer_shift_r;
 DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_l;
 DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_r;
+DelayLine<float, kReverbPreDelayMaxSamples> DSY_SDRAM_BSS reverb_predelay_l;
+DelayLine<float, kReverbPreDelayMaxSamples> DSY_SDRAM_BSS reverb_predelay_r;
 ChorusEngine chorus_l;
 ChorusEngine chorus_r;
 TapeSaturator sat_l;
@@ -571,6 +759,7 @@ constexpr size_t kRecordMaxFrames = static_cast<size_t>(kRecordMaxSeconds) * 480
 constexpr uint32_t kRecordCountdownMs = 4000;
 volatile RecordState record_state = RecordState::Armed;
 volatile int32_t record_source_index = 0;
+volatile int32_t record_target_index = kRecordTargetPlay;
 volatile uint32_t record_countdown_start_ms = 0;
 volatile size_t record_pos = 0;
 volatile bool record_waveform_pending = false;
@@ -582,6 +771,12 @@ volatile bool button1_press = false;
 volatile bool button2_press = false;
 volatile bool request_playback_stop_log = false;
 volatile float reverb_wet = kReverbDefaultWet;
+volatile float reverb_pre = 0.0f;
+volatile float reverb_damp = kReverbDampDefault;
+volatile float reverb_decay = kReverbDecayDefault;
+volatile int32_t reverb_algo_index = kReverbAlgoHall;
+static float shimmer_feedback_l = 0.0f;
+static float shimmer_feedback_r = 0.0f;
 volatile float delay_wet = kDelayDefaultWet;
 volatile float fx_s_wet = 0.0f;
 volatile float fx_c_wet = 0.0f;
@@ -589,6 +784,8 @@ volatile float amp_attack = 0.0f;
 volatile float amp_decay = 0.0f;
 volatile float amp_sustain = 0.0f;
 volatile float amp_release = 0.0f;
+volatile int32_t fx_detail_index = 0;
+volatile int32_t fx_detail_param_index = 0;
 volatile float flt_cutoff = 1.0f;
 volatile float flt_res = 0.02f;
 volatile bool preview_hold = false;
@@ -615,6 +812,7 @@ static uint8_t record_fb_buf[kDisplayH][kDisplayW];
 static uint8_t record_bold_mask[kDisplayH][kDisplayW];
 static bool request_shift_redraw = false;
 static bool request_perform_redraw = false;
+static bool request_fx_detail_redraw = false;
 static bool fx_shift_active_prev = false;
 static bool amp_shift_active_prev = false;
 static bool flt_shift_active_prev = false;
@@ -853,6 +1051,8 @@ static const char* UiModeName(UiMode mode)
 		case UiMode::Load: return "LOAD";
 		case UiMode::LoadTarget: return "LOAD_TARGET";
 		case UiMode::Perform: return "PERFORM";
+		case UiMode::Edt: return "EDT";
+		case UiMode::FxDetail: return "FX_DETAIL";
 		case UiMode::Play: return "PLAY";
 		case UiMode::Record: return "RECORD";
 		case UiMode::ConfirmBake: return "CONFIRM_BAKE";
@@ -1122,6 +1322,28 @@ static bool HasWavExtension(const char* name)
 		&& (ext[1] == 'w' || ext[1] == 'W')
 		&& (ext[2] == 'a' || ext[2] == 'A')
 		&& (ext[3] == 'v' || ext[3] == 'V');
+}
+
+static void CopyNameSansWav(char* dst, const char* src, size_t max_len)
+{
+	if (max_len == 0)
+	{
+		return;
+	}
+	size_t len = StrLen(src);
+	if (HasWavExtension(src) && len >= 4)
+	{
+		len -= 4;
+	}
+	if (len >= max_len)
+	{
+		len = max_len - 1;
+	}
+	for (size_t i = 0; i < len; ++i)
+	{
+		dst[i] = src[i];
+	}
+	dst[len] = '\0';
 }
 
 static void BuildFilePath(const char* name, char* out, size_t out_len)
@@ -2981,6 +3203,56 @@ static void DrawPerformScreen(int32_t selected,
 		}
 	};
 
+	auto draw_waveform_preview = [&](const Box& box, bool is_selected)
+	{
+		if (!sample_loaded || sample_length == 0)
+		{
+			return;
+		}
+		const int preview_x0 = box.x + kLabelPadX + Font5x7::W + 4;
+		const int preview_x1 = box.x + kBoxW - 2;
+		const int preview_y0 = box.y + kLabelPadY + 1;
+		const int preview_y1 = box.y + kBoxH - kLabelPadY - 1;
+		if (preview_x1 <= preview_x0 || preview_y1 <= preview_y0)
+		{
+			return;
+		}
+		const int preview_w = preview_x1 - preview_x0 + 1;
+		const int preview_h = preview_y1 - preview_y0 + 1;
+		if (preview_h < 3)
+		{
+			return;
+		}
+		const int mid = preview_y0 + (preview_h / 2);
+		float scale = static_cast<float>((preview_h / 2) - 1) / 28.0f;
+		if (scale <= 0.0f)
+		{
+			scale = 1.0f / 28.0f;
+		}
+		const bool on = !is_selected;
+		for (int x = 0; x < preview_w; ++x)
+		{
+			const int wf_idx = (preview_w > 1) ? ((x * 127) / (preview_w - 1)) : 0;
+			int top = mid + static_cast<int>(static_cast<float>(waveform_min[wf_idx]) * scale);
+			int bottom = mid + static_cast<int>(static_cast<float>(waveform_max[wf_idx]) * scale);
+			if (top > bottom)
+			{
+				const int tmp = top;
+				top = bottom;
+				bottom = tmp;
+			}
+			if (top < preview_y0)
+			{
+				top = preview_y0;
+			}
+			if (bottom > preview_y1)
+			{
+				bottom = preview_y1;
+			}
+			display.DrawLine(preview_x0 + x, top, preview_x0 + x, bottom, on);
+		}
+	};
+
 	for (int i = 0; i < kPerformBoxCount; ++i)
 	{
 		const auto& box = boxes[i];
@@ -2999,6 +3271,10 @@ static void DrawPerformScreen(int32_t selected,
 								   box.y + kLabelPadY,
 								   kBoxH - (kLabelPadY * 2),
 								   !is_selected);
+		if (i == kPerformEdtIndex)
+		{
+			draw_waveform_preview(box, is_selected);
+		}
 		if (i == kPerformAmpIndex)
 		{
 			const char* labels[kPerformFaderCount] = {"A", "D", "S", "R"};
@@ -3156,41 +3432,89 @@ static void DrawLoadMenu(int32_t top_index, int32_t selected)
 	display.Update();
 }
 
-static void DrawLoadTargetMenu(LoadDestination selected)
+static int LoadTargetDisplayIndex(LoadDestination selected)
 {
-	const FontDef font = Font_6x8;
-	display.Fill(false);
-
-	display.SetCursor(0, 0);
-	display.WriteString("LOAD TO?", font, true);
-
-	const int box_y = font.FontHeight + 2;
-	const int box_h = 20;
-	const int box_w = 56;
-	const int gap_x = 8;
-	const int gap_y = 4;
-	const int start_x = (static_cast<int>(display.Width()) - (box_w * 2 + gap_x)) / 2;
-
-	auto draw_box = [&](int x, int y, int w, int h, const char* label, bool highlight)
+	switch (selected)
 	{
-		display.DrawRect(x,
-						 y,
-						 x + w - 1,
-						 y + h - 1,
+		case LoadDestination::Perform: return 0;
+		case LoadDestination::Play: return 1;
+		case LoadDestination::Bake: return 2;
+		default: return 1;
+	}
+}
+
+static LoadDestination LoadTargetFromDisplayIndex(int32_t index)
+{
+	switch (index)
+	{
+		case 0: return LoadDestination::Perform;
+		case 1: return LoadDestination::Play;
+		case 2: return LoadDestination::Bake;
+		default: return LoadDestination::Play;
+	}
+}
+
+static void DrawDiagonalTargetMenu(const char* const* labels, int count, int selected)
+{
+	display.Fill(false);
+	constexpr int kMarginX = 2;
+	constexpr int kMarginY = 2;
+	constexpr int kGap = 2;
+	if (count <= 0)
+	{
+		display.Update();
+		return;
+	}
+	const int box_w = (kDisplayW - (kMarginX * 2) - (kGap * (count - 1))) / count;
+	const int box_h = kDisplayH - (kMarginY * 2);
+	const int box_y = kMarginY;
+
+	for (int i = 0; i < count; ++i)
+	{
+		const int box_x = kMarginX + i * (box_w + kGap);
+		const bool highlight = (i == selected);
+		display.DrawRect(box_x,
+						 box_y,
+						 box_x + box_w - 1,
+						 box_y + box_h - 1,
 						 true,
 						 highlight);
-		const int text_x = x + (w - static_cast<int>(StrLen(label)) * font.FontWidth) / 2;
-		const int text_y = y + (h - font.FontHeight) / 2;
-		display.SetCursor(text_x, text_y);
-		display.WriteString(label, font, !highlight);
-	};
-
-	draw_box(start_x, box_y, box_w, box_h, "PLAY", selected == LoadDestination::Play);
-	draw_box(start_x + box_w + gap_x, box_y, box_w, box_h, "BAKE", selected == LoadDestination::Bake);
-	draw_box(start_x, box_y + box_h + gap_y, (box_w * 2) + gap_x, box_h,
-			 "PERFORM",
-			 selected == LoadDestination::Perform);
+		const char* label = labels[i];
+		const int len = static_cast<int>(StrLen(label));
+		if (len > 0)
+		{
+			const int step_x = Font5x7::W;
+			const int step_y = Font5x7::H;
+			const int text_w = (len - 1) * step_x + Font5x7::W;
+			const int text_h = (len - 1) * step_y + Font5x7::H;
+			int start_x = box_x + (box_w - text_w) / 2;
+			int start_y = box_y + (box_h - text_h) / 2;
+			if (start_x < box_x + 1)
+			{
+				start_x = box_x + 1;
+			}
+			if (start_y < box_y + 1)
+			{
+				start_y = box_y + 1;
+			}
+			for (int c = 0; c < len; ++c)
+			{
+				char buf[2] = {label[c], '\0'};
+				DrawTinyStringBold(buf,
+								   start_x + c * step_x,
+								   start_y + c * step_y,
+								   !highlight);
+			}
+		}
+	}
 	display.Update();
+}
+
+static void DrawLoadTargetMenu(LoadDestination selected)
+{
+	const char* labels[kLoadTargetCount] = {"PERFORM", "PLAY", "BAKE"};
+	const int selected_idx = LoadTargetDisplayIndex(selected);
+	DrawDiagonalTargetMenu(labels, kLoadTargetCount, selected_idx);
 }
 
 static void DrawRecordReadyScreen()
@@ -4153,6 +4477,22 @@ static void DrawWaveform()
 	DrawBracket(start_x, true);
 	DrawBracket(end_x,   false);
 
+	if (ui_mode == UiMode::Edt && playback_active && sample_length > 1)
+	{
+		const float denom = static_cast<float>(sample_length - 1);
+		float norm = playback_phase / denom;
+		if (norm < 0.0f)
+		{
+			norm = 0.0f;
+		}
+		else if (norm > 1.0f)
+		{
+			norm = 1.0f;
+		}
+		const int play_x = ClampI(static_cast<int>(norm * static_cast<float>(W - 1) + 0.5f), 0, W - 1);
+		display.DrawLine(play_x, text_h, play_x, H - 1, true);
+	}
+
 	display.SetCursor(0, 0);
 	display.WriteString(waveform_title ? waveform_title : loaded_sample_name, Font_6x8, true);
 
@@ -4164,6 +4504,255 @@ static void DrawRecordReview()
 	waveform_title = "RECORDED PLAYBACK";
 	DrawWaveform();
 	waveform_title = nullptr;
+}
+
+static void DrawEdtScreen()
+{
+	char title[kMaxWavNameLen];
+	if (sample_loaded && loaded_sample_name[0] != '\0')
+	{
+		CopyNameSansWav(title, loaded_sample_name, sizeof(title));
+	}
+	else
+	{
+		title[0] = '\0';
+	}
+	waveform_title = title;
+	DrawWaveform();
+	waveform_title = nullptr;
+}
+
+static void DrawVerticalFadersInRect(int x,
+									 int y,
+									 int w,
+									 int h,
+									 const char* const* labels,
+									 const float* values,
+									 int count,
+									 bool select_active,
+									 int selected_index,
+									 const int* x_offsets = nullptr)
+{
+	if (w <= 2 || h <= 2 || count <= 0)
+	{
+		return;
+	}
+	const int label_y = y + h - Font5x7::H - 1;
+	int line_top = y + 2;
+	int line_bottom = label_y - 2;
+	if (line_bottom <= line_top)
+	{
+		return;
+	}
+	int fader_left = x + 2;
+	int fader_right = x + w - 3;
+	if (fader_right <= fader_left)
+	{
+		return;
+	}
+	const int span_x = fader_right - fader_left;
+	const int span_y = line_bottom - line_top;
+	for (int f = 0; f < count; ++f)
+	{
+		int line_x = fader_left;
+		if (count > 1 && span_x > 0)
+		{
+			line_x = fader_left + (span_x * f) / (count - 1);
+		}
+		if (x_offsets != nullptr)
+		{
+			line_x += x_offsets[f];
+		}
+		const char* label = labels[f];
+		const int label_w = TinyStringWidth(label);
+		int label_x = line_x - (label_w / 2);
+		if (label_x < x + 1)
+		{
+			label_x = x + 1;
+		}
+		if (label_x + label_w > x + w - 2)
+		{
+			label_x = x + w - 2 - label_w;
+		}
+		line_x = label_x + (label_w / 2);
+		bool line_on = true;
+		if (select_active && f == selected_index)
+		{
+			int rect_x0 = line_x - 4;
+			int rect_x1 = line_x + 4;
+			if (label_x - 1 < rect_x0)
+			{
+				rect_x0 = label_x - 1;
+			}
+			if (label_x + label_w + 1 > rect_x1)
+			{
+				rect_x1 = label_x + label_w + 1;
+			}
+			int rect_y0 = line_top - 1;
+			int rect_y1 = label_y + Font5x7::H + 1;
+			if (rect_x0 < x + 1)
+			{
+				rect_x0 = x + 1;
+			}
+			if (rect_x1 > x + w - 2)
+			{
+				rect_x1 = x + w - 2;
+			}
+			if (rect_y0 < y + 1)
+			{
+				rect_y0 = y + 1;
+			}
+			if (rect_y1 > y + h - 2)
+			{
+				rect_y1 = y + h - 2;
+			}
+			display.DrawRect(rect_x0, rect_y0, rect_x1, rect_y1, true, true);
+			line_on = false;
+		}
+		display.DrawLine(line_x, line_top, line_x, line_bottom, line_on);
+		if (line_x + 1 <= x + w - 2)
+		{
+			display.DrawLine(line_x + 1, line_top, line_x + 1, line_bottom, line_on);
+		}
+		const float value = values[f];
+		int tick_y = line_bottom - static_cast<int>(value * static_cast<float>(span_y) + 0.5f);
+		int tick_x0 = label_x;
+		int tick_x1 = label_x + label_w - 1;
+		if (tick_x0 < x + 1)
+		{
+			tick_x0 = x + 1;
+		}
+		if (tick_x1 > x + w - 2)
+		{
+			tick_x1 = x + w - 2;
+		}
+		display.DrawLine(tick_x0, tick_y, tick_x1, tick_y, line_on);
+		if (tick_y + 1 <= line_bottom)
+		{
+			display.DrawLine(tick_x0, tick_y + 1, tick_x1, tick_y + 1, line_on);
+		}
+		if (label_x + label_w < x + w - 1)
+		{
+			DrawTinyString(label, label_x, label_y, line_on);
+		}
+	}
+}
+
+static void DrawFxDetailScreen(int32_t index)
+{
+	const char* labels[kPerformFaderCount] = {"SATURATION", "CHORUS", "DELAY", "REVERB"};
+	if (index < 0 || index >= kPerformFaderCount)
+	{
+		index = 0;
+	}
+	display.Fill(false);
+	const char* label = labels[index];
+	const int text_w = TinyStringWidth(label);
+	int text_x = (kDisplayW - text_w) / 2;
+	if (text_x < 0)
+	{
+		text_x = 0;
+	}
+	DrawTinyStringBold(label, text_x, 1, true);
+	if (index == kFxReverbIndex)
+	{
+		constexpr int kMargin = 2;
+		constexpr int kGap = 2;
+		const int block_x = kMargin;
+		const int block_w = kDisplayW / 4;
+		const int block_y = Font5x7::H + 4;
+		int block_h = kDisplayH - block_y - kMargin;
+		if (block_h < 3)
+		{
+			block_h = 3;
+		}
+		int rect_h = (block_h - (kGap * 2)) / 3;
+		if (rect_h < Font5x7::H + 2)
+		{
+			rect_h = Font5x7::H + 2;
+		}
+		const char* verb_labels[3] = {"HALL", "SPRG", "SHMR"};
+		int algo_index = reverb_algo_index;
+		if (algo_index < 0 || algo_index >= kReverbAlgoCount)
+		{
+			algo_index = kReverbAlgoHall;
+		}
+		for (int i = 0; i < 3; ++i)
+		{
+			const int rect_y = block_y + i * (rect_h + kGap);
+			const bool algo_selected = (i == algo_index);
+			display.DrawRect(block_x,
+							 rect_y,
+							 block_x + block_w - 1,
+							 rect_y + rect_h - 1,
+							 true,
+							 algo_selected);
+			const int label_w = TinyStringWidth(verb_labels[i]);
+			int label_x = block_x + (block_w - label_w) / 2;
+			if (label_x < block_x + 1)
+			{
+				label_x = block_x + 1;
+			}
+			const int label_y = rect_y + (rect_h - Font5x7::H) / 2;
+			DrawTinyString(verb_labels[i], label_x, label_y, !algo_selected);
+		}
+		if (fx_detail_param_index == kReverbAlgSelectIndex)
+		{
+			int outline_x0 = block_x - 1;
+			int outline_y0 = block_y - 1;
+			int outline_x1 = block_x + block_w;
+			int outline_y1 = block_y + block_h;
+			if (outline_x0 < 0)
+			{
+				outline_x0 = 0;
+			}
+			if (outline_y0 < 0)
+			{
+				outline_y0 = 0;
+			}
+			if (outline_x1 >= kDisplayW)
+			{
+				outline_x1 = kDisplayW - 1;
+			}
+			if (outline_y1 >= kDisplayH)
+			{
+				outline_y1 = kDisplayH - 1;
+			}
+			display.DrawRect(outline_x0, outline_y0, outline_x1, outline_y1, true, false);
+		}
+		const int fader_offset = 8;
+		const int fader_x = block_x + block_w + kGap + fader_offset;
+		const int fader_w = kDisplayW - fader_x - kMargin;
+		if (fader_w > 4)
+		{
+			const char* fader_labels[4] = {"Pre", "Dmp", "Dcy", "Wet"};
+			const float fader_values[4] = {reverb_pre, reverb_damp, reverb_decay, reverb_wet};
+			int param_index = fx_detail_param_index;
+			const bool fader_select_active = (param_index >= 0 && param_index < 4);
+			if (!fader_select_active)
+			{
+				param_index = 0;
+			}
+			const int fader_offsets[4] = {0, 1, -1, 0};
+			DrawVerticalFadersInRect(fader_x,
+									 block_y,
+									 fader_w,
+									 block_h,
+									 fader_labels,
+									 fader_values,
+									 4,
+									 fader_select_active,
+									 param_index,
+									 fader_offsets);
+		}
+	}
+	display.Update();
+}
+
+static void DrawRecordTargetScreen(int32_t selected)
+{
+	const char* labels[kRecordTargetCount] = {"PERFORM", "PLAY", "BAKE"};
+	DrawDiagonalTargetMenu(labels, kRecordTargetCount, selected);
 }
 
 static void StartPlayback(uint8_t note)
@@ -4769,7 +5358,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	{
 		if (encoder_l_inc != 0)
 		{
-			int32_t next = static_cast<int32_t>(load_target_selected) + encoder_l_inc;
+			int32_t next = LoadTargetDisplayIndex(load_target_selected) + encoder_l_inc;
 			while (next < 0)
 			{
 				next += kLoadTargetCount;
@@ -4778,7 +5367,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			{
 				next -= kLoadTargetCount;
 			}
-			load_target_selected = static_cast<LoadDestination>(next);
+			load_target_selected = LoadTargetFromDisplayIndex(next);
 		}
 		if (encoder_r_pressed && load_target_index >= 0 && load_target_index < wav_file_count)
 		{
@@ -4880,6 +5469,22 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				encoder_r_consumed = true;
 			}
 		}
+		else if (record_state == RecordState::TargetSelect)
+		{
+			if (encoder_l_inc != 0)
+			{
+				int32_t next = record_target_index + encoder_l_inc;
+				while (next < 0)
+				{
+					next += kRecordTargetCount;
+				}
+				while (next >= kRecordTargetCount)
+				{
+					next -= kRecordTargetCount;
+				}
+				record_target_index = next;
+			}
+		}
 		if (encoder_r_pressed && !encoder_r_consumed && record_state != RecordState::SourceSelect)
 		{
 			if (record_state == RecordState::Armed)
@@ -4912,18 +5517,58 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			}
 			else if (record_state == RecordState::Review && sample_loaded)
 			{
-				confirm_bake_prev_mode = ui_mode;
-				confirm_bake_selected = 0;
-				ui_mode = UiMode::ConfirmBake;
-				request_confirm_bake_redraw = true;
+				if (waveform_from_recording)
+				{
+					record_state = RecordState::TargetSelect;
+				}
+				else
+				{
+					confirm_bake_prev_mode = ui_mode;
+					confirm_bake_selected = 0;
+					ui_mode = UiMode::ConfirmBake;
+					request_confirm_bake_redraw = true;
+				}
+			}
+			else if (record_state == RecordState::TargetSelect)
+			{
+				if (record_target_index == kRecordTargetPerform)
+				{
+					ui_mode = UiMode::Perform;
+					request_perform_redraw = true;
+				}
+				else if (record_target_index == kRecordTargetPlay)
+				{
+					ui_mode = UiMode::Play;
+					if (sample_loaded && sample_length > 0)
+					{
+						waveform_ready = true;
+					}
+					waveform_dirty = true;
+					request_length_redraw = true;
+				}
+				else
+				{
+					confirm_bake_prev_mode = UiMode::Record;
+					confirm_bake_selected = 0;
+					ui_mode = UiMode::ConfirmBake;
+					request_confirm_bake_redraw = true;
+				}
 			}
 		}
 		if (encoder_l_pressed)
 		{
-			ui_mode = UiMode::Main;
-			record_state = RecordState::SourceSelect;
-			playback_active = false;
-			record_anim_start_ms = -1.0;
+			if (record_state == RecordState::TargetSelect)
+			{
+				record_state = RecordState::Review;
+				waveform_dirty = true;
+			}
+			else
+			{
+				ui_mode = UiMode::Main;
+				record_state = RecordState::SourceSelect;
+				playback_active = false;
+				record_anim_start_ms = -1.0;
+			}
 		}
 		if (record_state == RecordState::Review && sample_loaded)
 		{
@@ -5011,6 +5656,24 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				perform_index = next;
 			}
 		}
+		if (!fx_shift_active && !amp_shift_active && !flt_shift_active
+			&& encoder_r_pressed && perform_index == kPerformEdtIndex)
+		{
+			ui_mode = UiMode::Edt;
+			if (sample_loaded && sample_length > 0)
+			{
+				waveform_ready = true;
+			}
+			waveform_dirty = true;
+			request_length_redraw = true;
+		}
+		if (fx_shift_active && encoder_r_pressed)
+		{
+			fx_detail_index = fx_fader_index;
+			fx_detail_param_index = 0;
+			ui_mode = UiMode::FxDetail;
+			request_fx_detail_redraw = true;
+		}
 		if (fx_shift_active && encoder_r_inc != 0)
 		{
 			const float* steps[kPerformFaderCount]
@@ -5084,6 +5747,104 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		if (encoder_l_pressed)
 		{
 			ui_mode = UiMode::Main;
+		}
+	}
+	else if (!ui_blocked && ui_mode == UiMode::Edt)
+	{
+		if (encoder_l_inc != 0 || encoder_r_inc != 0)
+		{
+			int32_t dl = encoder_l_inc;
+			int32_t dr = encoder_r_inc;
+			if (shift_button.Pressed())
+			{
+				if (dl > 0) dl = 1;
+				else if (dl < 0) dl = -1;
+				if (dr > 0) dr = 1;
+				else if (dr < 0) dr = -1;
+			}
+			AdjustTrimNormalized(dl, dr, shift_button.Pressed());
+		}
+		if (encoder_l_pressed)
+		{
+			ui_mode = UiMode::Perform;
+			request_perform_redraw = true;
+		}
+	}
+	else if (!ui_blocked && ui_mode == UiMode::FxDetail)
+	{
+		if (fx_detail_index == kFxReverbIndex)
+		{
+			if (encoder_l_inc != 0)
+			{
+				const int32_t param_count = kPerformFaderCount + 1;
+				int32_t next = fx_detail_param_index + encoder_l_inc;
+				while (next < 0)
+				{
+					next += param_count;
+				}
+				while (next >= param_count)
+				{
+					next -= param_count;
+				}
+				if (next != fx_detail_param_index)
+				{
+					fx_detail_param_index = next;
+					request_fx_detail_redraw = true;
+				}
+			}
+			if (encoder_r_inc != 0)
+			{
+				if (fx_detail_param_index == kReverbAlgSelectIndex)
+				{
+					int32_t next = reverb_algo_index + encoder_r_inc;
+					while (next < 0)
+					{
+						next += kReverbAlgoCount;
+					}
+					while (next >= kReverbAlgoCount)
+					{
+						next -= kReverbAlgoCount;
+					}
+					if (next != reverb_algo_index)
+					{
+						reverb_algo_index = next;
+						request_fx_detail_redraw = true;
+					}
+				}
+				else
+				{
+					const float steps[4]
+						= {kReverbParamStep, kReverbParamStep, kReverbParamStep, kReverbWetStep};
+					volatile float* targets[4]
+						= {&reverb_pre, &reverb_damp, &reverb_decay, &reverb_wet};
+					const int idx = fx_detail_param_index;
+					if (idx >= 0 && idx < 4)
+					{
+						const float step = steps[idx];
+						volatile float* target = targets[idx];
+						const float current = *target;
+						float next = current + (static_cast<float>(encoder_r_inc) * step);
+						if (next < 0.0f)
+						{
+							next = 0.0f;
+						}
+						if (next > 1.0f)
+						{
+							next = 1.0f;
+						}
+						if (next != current)
+						{
+							*target = next;
+							request_fx_detail_redraw = true;
+						}
+					}
+				}
+			}
+		}
+		if (encoder_l_pressed)
+		{
+			ui_mode = UiMode::Perform;
+			request_perform_redraw = true;
 		}
 	}
 	else if (!ui_blocked && ui_mode == UiMode::Play)
@@ -5178,6 +5939,73 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	chorus_l.SetLfoDepth(chorus_depth * kChorusMaxDepth);
 	chorus_r.SetLfoDepth(chorus_depth * kChorusMaxDepth);
 	const float out_sr = hw.AudioSampleRate();
+	float rev_pre = reverb_pre;
+	float rev_damp = reverb_damp;
+	float rev_decay = reverb_decay;
+	if (rev_pre < 0.0f) rev_pre = 0.0f;
+	if (rev_pre > 1.0f) rev_pre = 1.0f;
+	if (rev_damp < 0.0f) rev_damp = 0.0f;
+	if (rev_damp > 1.0f) rev_damp = 1.0f;
+	if (rev_decay < 0.0f) rev_decay = 0.0f;
+	if (rev_decay > 1.0f) rev_decay = 1.0f;
+	const float rev_decay_ms = kReverbDecayMinMs
+		+ rev_decay * (kReverbDecayMaxMs - kReverbDecayMinMs);
+	const float rev_feedback = kReverbFeedbackMin
+		+ ((rev_decay_ms - kReverbDecayMinMs)
+			* (kReverbFeedbackMax - kReverbFeedbackMin)
+			/ (kReverbDecayMaxMs - kReverbDecayMinMs));
+	float rev_lp = kReverbDampMaxHz - rev_damp * (kReverbDampMaxHz - kReverbDampMinHz);
+	const float rev_lp_max = out_sr * 0.49f;
+	if (rev_lp > rev_lp_max)
+	{
+		rev_lp = rev_lp_max;
+	}
+	if (rev_lp < kReverbDampMinHz)
+	{
+		rev_lp = kReverbDampMinHz;
+	}
+	float rev_predelay_samples = rev_pre * (kReverbPreDelayMaxMs * 0.001f * out_sr);
+	const float rev_predelay_max = static_cast<float>(kReverbPreDelayMaxSamples - 1);
+	if (rev_predelay_samples > rev_predelay_max)
+	{
+		rev_predelay_samples = rev_predelay_max;
+	}
+	static float last_rev_feedback = -1.0f;
+	static float last_rev_lp = -1.0f;
+	static float last_rev_predelay = -1.0f;
+	if (rev_feedback != last_rev_feedback)
+	{
+		reverb.SetFeedback(rev_feedback);
+		spring_reverb_l.SetFeedback(rev_feedback);
+		spring_reverb_r.SetFeedback(rev_feedback);
+		last_rev_feedback = rev_feedback;
+	}
+	if (rev_lp != last_rev_lp)
+	{
+		reverb.SetLpFreq(rev_lp);
+		spring_reverb_l.SetDamp(rev_lp);
+		spring_reverb_r.SetDamp(rev_lp);
+		last_rev_lp = rev_lp;
+	}
+	if (fabsf(rev_predelay_samples - last_rev_predelay) >= 0.5f)
+	{
+		reverb_predelay_l.SetDelay(rev_predelay_samples);
+		reverb_predelay_r.SetDelay(rev_predelay_samples);
+		last_rev_predelay = rev_predelay_samples;
+	}
+	int32_t reverb_algo = reverb_algo_index;
+	if (reverb_algo < 0 || reverb_algo >= kReverbAlgoCount)
+	{
+		reverb_algo = kReverbAlgoHall;
+	}
+	static int32_t last_reverb_algo = -1;
+	if (reverb_algo != last_reverb_algo)
+	{
+		shimmer_feedback_l = 0.0f;
+		shimmer_feedback_r = 0.0f;
+		last_reverb_algo = reverb_algo;
+	}
+	const float shimmer_feedback = kShimmerFeedbackScale * rev_feedback;
 	const bool perform_mode = (ui_mode == UiMode::Perform);
 	const bool amp_env_active = perform_mode;
 	const float amp_attack_ms = AmpEnvMsFromFader(amp_attack);
@@ -5219,7 +6047,9 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		float sig_l = 0.0f;
 		float sig_r = 0.0f;
 		const bool monitor_active =
-			(ui_mode == UiMode::Record && record_state != RecordState::Review);
+			(ui_mode == UiMode::Record
+				&& record_state != RecordState::Review
+				&& record_state != RecordState::TargetSelect);
 		float monitor_l = 0.0f;
 		float monitor_r = 0.0f;
 		if (monitor_active)
@@ -5626,9 +6456,35 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		const float delay_mix_l = (chorus_out_l * (1.0f - delay_wet)) + (delay_out_l * delay_wet);
 		const float delay_mix_r = (chorus_out_r * (1.0f - delay_wet)) + (delay_out_r * delay_wet);
 
+		const float rev_in_l = reverb_predelay_l.Read();
+		const float rev_in_r = reverb_predelay_r.Read();
+		reverb_predelay_l.Write(delay_mix_l);
+		reverb_predelay_r.Write(delay_mix_r);
 		float rev_l = 0.0f;
 		float rev_r = 0.0f;
-		reverb.Process(delay_mix_l, delay_mix_r, &rev_l, &rev_r);
+		if (reverb_algo == kReverbAlgoSpring)
+		{
+			rev_l = spring_reverb_l.Process(rev_in_l);
+			rev_r = spring_reverb_r.Process(rev_in_r);
+		}
+		else if (reverb_algo == kReverbAlgoShimmer)
+		{
+			const float shimmer_in_l = rev_in_l + (shimmer_feedback_l * shimmer_feedback);
+			const float shimmer_in_r = rev_in_r + (shimmer_feedback_r * shimmer_feedback);
+			reverb.Process(shimmer_in_l, shimmer_in_r, &rev_l, &rev_r);
+			float shift_in_l = rev_l;
+			float shift_in_r = rev_r;
+			const float shimmer_l = shimmer_shift_l.Process(shift_in_l);
+			const float shimmer_r = shimmer_shift_r.Process(shift_in_r);
+			shimmer_feedback_l = shimmer_l;
+			shimmer_feedback_r = shimmer_r;
+			rev_l = (rev_l * (1.0f - kShimmerMix)) + (shimmer_l * kShimmerMix);
+			rev_r = (rev_r * (1.0f - kShimmerMix)) + (shimmer_r * kShimmerMix);
+		}
+		else
+		{
+			reverb.Process(rev_in_l, rev_in_r, &rev_l, &rev_r);
+		}
 		const float wet = reverb_wet;
 		const float dry = 1.0f - wet;
 		out[0][i] = (delay_mix_l * dry) + (rev_l * wet);
@@ -5648,6 +6504,34 @@ int main(void)
 	reverb.Init(hw.AudioSampleRate());
 	reverb.SetFeedback(kReverbFeedback);
 	reverb.SetLpFreq(kReverbLpFreq);
+
+	spring_reverb_l.Init(hw.AudioSampleRate(),
+						 kSpringDelay1MsL,
+						 kSpringDelay2MsL,
+						 kSpringAllpassMsL);
+	spring_reverb_r.Init(hw.AudioSampleRate(),
+						 kSpringDelay1MsR,
+						 kSpringDelay2MsR,
+						 kSpringAllpassMsR);
+	spring_reverb_l.SetFeedback(kReverbFeedback);
+	spring_reverb_r.SetFeedback(kReverbFeedback);
+	spring_reverb_l.SetDamp(kReverbLpFreq);
+	spring_reverb_r.SetDamp(kReverbLpFreq);
+
+	shimmer_shift_l.Init(hw.AudioSampleRate());
+	shimmer_shift_r.Init(hw.AudioSampleRate());
+	uint32_t shimmer_delay = static_cast<uint32_t>(
+		kShimmerDelayMs * 0.001f * hw.AudioSampleRate());
+	if (shimmer_delay < 64U)
+	{
+		shimmer_delay = 64U;
+	}
+	shimmer_shift_l.SetDelSize(shimmer_delay);
+	shimmer_shift_r.SetDelSize(shimmer_delay);
+	shimmer_shift_l.SetTransposition(kShimmerShiftSemitones);
+	shimmer_shift_r.SetTransposition(kShimmerShiftSemitones);
+	shimmer_shift_l.SetFun(0.0f);
+	shimmer_shift_r.SetFun(0.0f);
 
 	sat_l.Init(hw.AudioSampleRate());
 	sat_r.Init(hw.AudioSampleRate());
@@ -5684,6 +6568,11 @@ int main(void)
 	delay_line_l.SetDelay(delay_samples);
 	delay_line_r.SetDelay(delay_samples);
 
+	reverb_predelay_l.Init();
+	reverb_predelay_r.Init();
+	reverb_predelay_l.SetDelay(0.0f);
+	reverb_predelay_r.SetDelay(0.0f);
+
 	encoder_r.Init(seed::D7, seed::D8, seed::D22, hw.AudioSampleRate());
 	shift_button.Init(seed::D9, 1000);
 
@@ -5711,6 +6600,8 @@ int main(void)
 	int32_t last_menu = -1;
 	int32_t last_shift_menu = -1;
 	int32_t last_perform_index = -1;
+	int32_t last_fx_detail_index = -1;
+	int32_t last_fx_detail_param_index = -1;
 	int32_t last_scroll = -1;
 	int32_t last_selected = -1;
 	int32_t last_file_count = -1;
@@ -6045,6 +6936,10 @@ int main(void)
 			{
 				DrawRecordReview();
 			}
+			else if (ui_mode == UiMode::Edt)
+			{
+				DrawEdtScreen();
+			}
 			else if (ui_mode == UiMode::Play)
 			{
 				DrawWaveform();
@@ -6097,14 +6992,24 @@ int main(void)
 								: "UNKNOWN");
 				}
 			}
-				else if (mode == UiMode::Play)
-				{
-					DrawWaveform();
-				}
-				else if (mode == UiMode::Perform)
-				{
-					const bool fx_select_active = (perform_index == kPerformFxIndex)
-						&& shift_button.Pressed();
+			else if (mode == UiMode::Play)
+			{
+				DrawWaveform();
+			}
+			else if (mode == UiMode::Edt)
+			{
+				DrawEdtScreen();
+			}
+			else if (mode == UiMode::FxDetail)
+			{
+				DrawFxDetailScreen(fx_detail_index);
+				last_fx_detail_index = fx_detail_index;
+				last_fx_detail_param_index = fx_detail_param_index;
+			}
+			else if (mode == UiMode::Perform)
+			{
+				const bool fx_select_active = (perform_index == kPerformFxIndex)
+					&& shift_button.Pressed();
 					const bool amp_select_active = (perform_index == kPerformAmpIndex)
 						&& shift_button.Pressed();
 					const bool flt_select_active = (perform_index == kPerformFltIndex)
@@ -6206,6 +7111,18 @@ int main(void)
 					last_perform_index = current;
 				}
 			}
+			else if (mode == UiMode::FxDetail)
+			{
+				if (request_fx_detail_redraw
+					|| fx_detail_index != last_fx_detail_index
+					|| fx_detail_param_index != last_fx_detail_param_index)
+				{
+					request_fx_detail_redraw = false;
+					DrawFxDetailScreen(fx_detail_index);
+					last_fx_detail_index = fx_detail_index;
+					last_fx_detail_param_index = fx_detail_param_index;
+				}
+			}
 			else if (mode == UiMode::Shift)
 			{
 				if (!ui_blocked)
@@ -6295,6 +7212,10 @@ int main(void)
 				{
 					DrawRecordRecording();
 				}
+				else if (current_state == RecordState::TargetSelect)
+				{
+					DrawRecordTargetScreen(record_target_index);
+				}
 				else
 				{
 					DrawRecordReview();
@@ -6322,15 +7243,24 @@ int main(void)
 		{
 			DrawRecordCountdown();
 		}
+		else if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::TargetSelect)
+		{
+			DrawRecordTargetScreen(record_target_index);
+		}
 		if (!ui_blocked && (request_playhead_redraw || (playback_active != last_playback_active)))
 		{
 			request_playhead_redraw = false;
 			if (mode == UiMode::Play
+				|| (mode == UiMode::Edt)
 				|| (mode == UiMode::Record && record_state == RecordState::Review))
 			{
 				if (mode == UiMode::Play)
 				{
 					DrawWaveform();
+				}
+				else if (mode == UiMode::Edt)
+				{
+					DrawEdtScreen();
 				}
 				else
 				{
