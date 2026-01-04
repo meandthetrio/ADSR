@@ -31,7 +31,8 @@ constexpr int32_t kReverbAlgoHall = 0;
 constexpr int32_t kReverbAlgoSpring = 1;
 constexpr int32_t kReverbAlgoShimmer = 2;
 constexpr int32_t kReverbAlgoCount = 3;
-constexpr int32_t kReverbAlgSelectIndex = kPerformFaderCount;
+constexpr int32_t kReverbAlgSelectIndex = 0;
+constexpr int32_t kReverbParamOffset = 1;
 constexpr int32_t kPerformFltFaderCount = 2;
 constexpr int32_t kPerformAmpIndex = 1;
 constexpr int32_t kPerformFltIndex = 2;
@@ -95,22 +96,6 @@ constexpr float kReverbDampDefault =
 	(kReverbDampMaxHz - kReverbLpFreq) / (kReverbDampMaxHz - kReverbDampMinHz);
 constexpr float kReverbDefaultWet = 0.0f;
 constexpr float kReverbWetStep = 0.02f;
-constexpr float kShimmerMix = 0.55f;
-constexpr float kShimmerFeedbackScale = 0.35f;
-constexpr float kShimmerShiftSemitones = 12.0f;
-constexpr float kShimmerDelayMs = 50.0f;
-constexpr float kSpringDelay1MsL = 35.0f;
-constexpr float kSpringDelay2MsL = 57.0f;
-constexpr float kSpringDelay1MsR = 41.0f;
-constexpr float kSpringDelay2MsR = 63.0f;
-constexpr float kSpringAllpassMsL = 7.0f;
-constexpr float kSpringAllpassMsR = 9.0f;
-constexpr float kSpringFeedbackMax = 0.95f;
-constexpr float kSpringHpHz = 120.0f;
-constexpr float kSpringDampDefaultHz = 8000.0f;
-constexpr float kSpringAllpassGain = 0.6f;
-constexpr size_t kSpringDelayMaxSamples = 4096;
-constexpr size_t kSpringAllpassMaxSamples = 1024;
 constexpr float kChorusRateHz = 0.25f;
 constexpr float kChorusDelayMs = 8.0f;
 constexpr float kChorusFeedback = 0.1f;
@@ -455,145 +440,6 @@ private:
 	float z2_ = 0.0f;
 };
 
-class SpringReverb
-{
-public:
-	void Init(float sample_rate, float delay1_ms, float delay2_ms, float allpass_ms)
-	{
-		sample_rate_ = sample_rate;
-		delay1_.Init();
-		delay2_.Init();
-		allpass_.Init();
-		SetDelayMs(delay1_, delay1_ms);
-		SetDelayMs(delay2_, delay2_ms);
-		SetDelayMs(allpass_, allpass_ms);
-		lp_.Init(sample_rate_, kSpringDampDefaultHz);
-		hp_.Init(sample_rate_, kSpringHpHz);
-		feedback_ = 0.5f;
-	}
-
-	void SetFeedback(float fb)
-	{
-		feedback_ = Clamp(fb, 0.0f, kSpringFeedbackMax);
-	}
-
-	void SetDamp(float hz)
-	{
-		const float max_hz = sample_rate_ * 0.45f;
-		if (hz > max_hz)
-		{
-			hz = max_hz;
-		}
-		if (hz < 200.0f)
-		{
-			hz = 200.0f;
-		}
-		lp_.SetFreq(sample_rate_, hz);
-	}
-
-	float Process(float in)
-	{
-		const float comb1 = delay1_.Read();
-		const float comb2 = delay2_.Read();
-		const float comb_mix = 0.5f * (comb1 + comb2);
-		const float damped = lp_.Process(comb_mix);
-		delay1_.Write(in + (damped * feedback_));
-		delay2_.Write(in + (damped * feedback_ * 0.7f));
-		const float ap = allpass_.Read();
-		const float ap_out = -damped + ap;
-		allpass_.Write(damped + (ap * kSpringAllpassGain));
-		return hp_.Process(ap_out);
-	}
-
-private:
-	struct OnePoleLp
-	{
-		float a = 0.0f;
-		float y = 0.0f;
-
-		void Init(float sample_rate, float cutoff_hz)
-		{
-			SetFreq(sample_rate, cutoff_hz);
-			y = 0.0f;
-		}
-
-		void SetFreq(float sample_rate, float cutoff_hz)
-		{
-			a = expf(-2.0f * kPi * cutoff_hz / sample_rate);
-		}
-
-		float Process(float x)
-		{
-			y = (1.0f - a) * x + (a * y);
-			return y;
-		}
-	};
-
-	struct OnePoleHp
-	{
-		float a = 0.0f;
-		float y = 0.0f;
-		float x1 = 0.0f;
-
-		void Init(float sample_rate, float cutoff_hz)
-		{
-			SetFreq(sample_rate, cutoff_hz);
-			y = 0.0f;
-			x1 = 0.0f;
-		}
-
-		void SetFreq(float sample_rate, float cutoff_hz)
-		{
-			a = expf(-2.0f * kPi * cutoff_hz / sample_rate);
-		}
-
-		float Process(float x)
-		{
-			const float y0 = a * (y + x - x1);
-			x1 = x;
-			y = y0;
-			return y0;
-		}
-	};
-
-	template <size_t N>
-	void SetDelayMs(DelayLine<float, N>& delay, float ms)
-	{
-		float samples = ms * 0.001f * sample_rate_;
-		if (samples < 1.0f)
-		{
-			samples = 1.0f;
-		}
-		const float max_samples = static_cast<float>(N - 1);
-		if (samples > max_samples)
-		{
-			samples = max_samples;
-		}
-		delay.SetDelay(samples);
-	}
-
-	static float Clamp(float v, float lo, float hi)
-	{
-		if (v < lo)
-		{
-			return lo;
-		}
-		if (v > hi)
-		{
-			return hi;
-		}
-		return v;
-	}
-
-	float sample_rate_ = 48000.0f;
-	float feedback_ = 0.5f;
-	DelayLine<float, kSpringDelayMaxSamples> delay1_;
-	DelayLine<float, kSpringDelayMaxSamples> delay2_;
-	DelayLine<float, kSpringAllpassMaxSamples> allpass_;
-	OnePoleLp lp_;
-	OnePoleHp hp_;
-};
-
 DaisyPod    hw;
 PodDisplay  display;
 SdmmcHandler   sdcard;
@@ -601,10 +447,6 @@ FatFSInterface fsi;
 Encoder      encoder_r;
 Switch       shift_button;
 ReverbSc DSY_SDRAM_BSS reverb;
-SpringReverb DSY_SDRAM_BSS spring_reverb_l;
-SpringReverb DSY_SDRAM_BSS spring_reverb_r;
-PitchShifter DSY_SDRAM_BSS shimmer_shift_l;
-PitchShifter DSY_SDRAM_BSS shimmer_shift_r;
 DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_l;
 DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_r;
 DelayLine<float, kReverbPreDelayMaxSamples> DSY_SDRAM_BSS reverb_predelay_l;
@@ -775,8 +617,6 @@ volatile float reverb_pre = 0.0f;
 volatile float reverb_damp = kReverbDampDefault;
 volatile float reverb_decay = kReverbDecayDefault;
 volatile int32_t reverb_algo_index = kReverbAlgoHall;
-static float shimmer_feedback_l = 0.0f;
-static float shimmer_feedback_r = 0.0f;
 volatile float delay_wet = kDelayDefaultWet;
 volatile float fx_s_wet = 0.0f;
 volatile float fx_c_wet = 0.0f;
@@ -4666,18 +4506,19 @@ static void DrawFxDetailScreen(int32_t index)
 		{
 			block_h = 3;
 		}
-		int rect_h = (block_h - (kGap * 2)) / 3;
+		int rect_h = (block_h - (kGap * (kReverbAlgoCount - 1))) / kReverbAlgoCount;
 		if (rect_h < Font5x7::H + 2)
 		{
 			rect_h = Font5x7::H + 2;
 		}
-		const char* verb_labels[3] = {"HALL", "SPRG", "SHMR"};
+		const char* verb_labels[kReverbAlgoCount] = {"HALL", "SPRG", "SHMR"};
 		int algo_index = reverb_algo_index;
 		if (algo_index < 0 || algo_index >= kReverbAlgoCount)
 		{
 			algo_index = kReverbAlgoHall;
 		}
-		for (int i = 0; i < 3; ++i)
+		const bool algo_focus = (fx_detail_param_index == kReverbAlgSelectIndex);
+		for (int i = 0; i < kReverbAlgoCount; ++i)
 		{
 			const int rect_y = block_y + i * (rect_h + kGap);
 			const bool algo_selected = (i == algo_index);
@@ -4696,7 +4537,7 @@ static void DrawFxDetailScreen(int32_t index)
 			const int label_y = rect_y + (rect_h - Font5x7::H) / 2;
 			DrawTinyString(verb_labels[i], label_x, label_y, !algo_selected);
 		}
-		if (fx_detail_param_index == kReverbAlgSelectIndex)
+		if (algo_focus)
 		{
 			int outline_x0 = block_x - 1;
 			int outline_y0 = block_y - 1;
@@ -4727,8 +4568,9 @@ static void DrawFxDetailScreen(int32_t index)
 		{
 			const char* fader_labels[4] = {"Pre", "Dmp", "Dcy", "Wet"};
 			const float fader_values[4] = {reverb_pre, reverb_damp, reverb_decay, reverb_wet};
-			int param_index = fx_detail_param_index;
-			const bool fader_select_active = (param_index >= 0 && param_index < 4);
+			int param_index = fx_detail_param_index - kReverbParamOffset;
+			const bool fader_select_active
+				= (param_index >= 0 && param_index < kPerformFaderCount);
 			if (!fader_select_active)
 			{
 				param_index = 0;
@@ -5670,7 +5512,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		if (fx_shift_active && encoder_r_pressed)
 		{
 			fx_detail_index = fx_fader_index;
-			fx_detail_param_index = 0;
+			fx_detail_param_index = kReverbParamOffset;
 			ui_mode = UiMode::FxDetail;
 			request_fx_detail_redraw = true;
 		}
@@ -5776,7 +5618,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		{
 			if (encoder_l_inc != 0)
 			{
-				const int32_t param_count = kPerformFaderCount + 1;
+				const int32_t param_count = kReverbParamOffset + kPerformFaderCount;
 				int32_t next = fx_detail_param_index + encoder_l_inc;
 				while (next < 0)
 				{
@@ -5808,8 +5650,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 					if (next != reverb_algo_index)
 					{
 						reverb_algo_index = next;
-						request_fx_detail_redraw = true;
 					}
+					request_fx_detail_redraw = true;
 				}
 				else
 				{
@@ -5817,8 +5659,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 						= {kReverbParamStep, kReverbParamStep, kReverbParamStep, kReverbWetStep};
 					volatile float* targets[4]
 						= {&reverb_pre, &reverb_damp, &reverb_decay, &reverb_wet};
-					const int idx = fx_detail_param_index;
-					if (idx >= 0 && idx < 4)
+					const int idx = fx_detail_param_index - kReverbParamOffset;
+					if (idx >= 0 && idx < kPerformFaderCount)
 					{
 						const float step = steps[idx];
 						volatile float* target = targets[idx];
@@ -5976,15 +5818,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	if (rev_feedback != last_rev_feedback)
 	{
 		reverb.SetFeedback(rev_feedback);
-		spring_reverb_l.SetFeedback(rev_feedback);
-		spring_reverb_r.SetFeedback(rev_feedback);
 		last_rev_feedback = rev_feedback;
 	}
 	if (rev_lp != last_rev_lp)
 	{
 		reverb.SetLpFreq(rev_lp);
-		spring_reverb_l.SetDamp(rev_lp);
-		spring_reverb_r.SetDamp(rev_lp);
 		last_rev_lp = rev_lp;
 	}
 	if (fabsf(rev_predelay_samples - last_rev_predelay) >= 0.5f)
@@ -5993,19 +5831,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		reverb_predelay_r.SetDelay(rev_predelay_samples);
 		last_rev_predelay = rev_predelay_samples;
 	}
-	int32_t reverb_algo = reverb_algo_index;
-	if (reverb_algo < 0 || reverb_algo >= kReverbAlgoCount)
-	{
-		reverb_algo = kReverbAlgoHall;
-	}
-	static int32_t last_reverb_algo = -1;
-	if (reverb_algo != last_reverb_algo)
-	{
-		shimmer_feedback_l = 0.0f;
-		shimmer_feedback_r = 0.0f;
-		last_reverb_algo = reverb_algo;
-	}
-	const float shimmer_feedback = kShimmerFeedbackScale * rev_feedback;
 	const bool perform_mode = (ui_mode == UiMode::Perform);
 	const bool amp_env_active = perform_mode;
 	const float amp_attack_ms = AmpEnvMsFromFader(amp_attack);
@@ -6462,29 +6287,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		reverb_predelay_r.Write(delay_mix_r);
 		float rev_l = 0.0f;
 		float rev_r = 0.0f;
-		if (reverb_algo == kReverbAlgoSpring)
-		{
-			rev_l = spring_reverb_l.Process(rev_in_l);
-			rev_r = spring_reverb_r.Process(rev_in_r);
-		}
-		else if (reverb_algo == kReverbAlgoShimmer)
-		{
-			const float shimmer_in_l = rev_in_l + (shimmer_feedback_l * shimmer_feedback);
-			const float shimmer_in_r = rev_in_r + (shimmer_feedback_r * shimmer_feedback);
-			reverb.Process(shimmer_in_l, shimmer_in_r, &rev_l, &rev_r);
-			float shift_in_l = rev_l;
-			float shift_in_r = rev_r;
-			const float shimmer_l = shimmer_shift_l.Process(shift_in_l);
-			const float shimmer_r = shimmer_shift_r.Process(shift_in_r);
-			shimmer_feedback_l = shimmer_l;
-			shimmer_feedback_r = shimmer_r;
-			rev_l = (rev_l * (1.0f - kShimmerMix)) + (shimmer_l * kShimmerMix);
-			rev_r = (rev_r * (1.0f - kShimmerMix)) + (shimmer_r * kShimmerMix);
-		}
-		else
-		{
-			reverb.Process(rev_in_l, rev_in_r, &rev_l, &rev_r);
-		}
+		reverb.Process(rev_in_l, rev_in_r, &rev_l, &rev_r);
 		const float wet = reverb_wet;
 		const float dry = 1.0f - wet;
 		out[0][i] = (delay_mix_l * dry) + (rev_l * wet);
@@ -6504,34 +6307,6 @@ int main(void)
 	reverb.Init(hw.AudioSampleRate());
 	reverb.SetFeedback(kReverbFeedback);
 	reverb.SetLpFreq(kReverbLpFreq);
-
-	spring_reverb_l.Init(hw.AudioSampleRate(),
-						 kSpringDelay1MsL,
-						 kSpringDelay2MsL,
-						 kSpringAllpassMsL);
-	spring_reverb_r.Init(hw.AudioSampleRate(),
-						 kSpringDelay1MsR,
-						 kSpringDelay2MsR,
-						 kSpringAllpassMsR);
-	spring_reverb_l.SetFeedback(kReverbFeedback);
-	spring_reverb_r.SetFeedback(kReverbFeedback);
-	spring_reverb_l.SetDamp(kReverbLpFreq);
-	spring_reverb_r.SetDamp(kReverbLpFreq);
-
-	shimmer_shift_l.Init(hw.AudioSampleRate());
-	shimmer_shift_r.Init(hw.AudioSampleRate());
-	uint32_t shimmer_delay = static_cast<uint32_t>(
-		kShimmerDelayMs * 0.001f * hw.AudioSampleRate());
-	if (shimmer_delay < 64U)
-	{
-		shimmer_delay = 64U;
-	}
-	shimmer_shift_l.SetDelSize(shimmer_delay);
-	shimmer_shift_r.SetDelSize(shimmer_delay);
-	shimmer_shift_l.SetTransposition(kShimmerShiftSemitones);
-	shimmer_shift_r.SetTransposition(kShimmerShiftSemitones);
-	shimmer_shift_l.SetFun(0.0f);
-	shimmer_shift_r.SetFun(0.0f);
 
 	sat_l.Init(hw.AudioSampleRate());
 	sat_r.Init(hw.AudioSampleRate());
