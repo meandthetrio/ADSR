@@ -5943,12 +5943,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		{
 			rev_feedback = 0.99f;
 		}
-		float damp_curve = cached_reverb_damp * 2.0f;
-		if (cached_reverb_damp > 0.75f)
-		{
-			const float tail = (cached_reverb_damp - 0.75f) * 4.0f;
-			damp_curve += tail * 1.5f;
-		}
+		const float damp_curve = cached_reverb_damp * 1.6f;
 		float rev_lp = kReverbDampMaxHz
 			* powf(kReverbDampMinHz / kReverbDampMaxHz, damp_curve);
 		const float rev_lp_max = out_sr * 0.49f;
