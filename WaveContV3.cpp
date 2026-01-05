@@ -78,13 +78,13 @@ constexpr float kReverbFeedback = 0.85f;
 constexpr float kReverbLpFreq = 12000.0f;
 constexpr float kReverbFeedbackMin = 0.2f;
 constexpr float kReverbFeedbackMax = 0.98f;
-constexpr float kReverbDampMinHz = 4000.0f;
+constexpr float kReverbDampMinHz = 800.0f;
 constexpr float kReverbDampMaxHz = 20000.0f;
-constexpr float kReverbPreDelayMaxMs = 100.0f;
+constexpr float kReverbPreDelayMaxMs = 1000.0f;
 constexpr float kReverbDecayMinMs = 10.0f;
 constexpr float kReverbDecayMaxMs = 4000.0f;
 constexpr float kReverbParamStep = 0.02f;
-constexpr size_t kReverbPreDelayMaxSamples = 4800;
+constexpr size_t kReverbPreDelayMaxSamples = 48000;
 constexpr float kReverbDecayDefault =
 	(kReverbFeedback - kReverbFeedbackMin) / (kReverbFeedbackMax - kReverbFeedbackMin);
 constexpr float kReverbDampDefault =
@@ -93,6 +93,10 @@ constexpr float kReverbDefaultWet = 0.0f;
 constexpr float kReverbWetStep = 0.02f;
 constexpr float kReverbShimmerStep = 0.02f;
 constexpr float kShimmerHpHz = 900.0f;
+constexpr size_t kShimmerBufferSize = 8192;
+constexpr size_t kShimmerDelaySamples = 2048;
+constexpr float kShimmerRateUp = 2.0f;
+constexpr float kShimmerFeedback = 0.6f;
 constexpr float kChorusRateHz = 0.25f;
 constexpr float kChorusDelayMs = 8.0f;
 constexpr float kChorusFeedback = 0.1f;
@@ -482,6 +486,11 @@ Switch       shift_button;
 ReverbSc DSY_SDRAM_BSS reverb;
 OnePoleHp shimmer_hp_l;
 OnePoleHp shimmer_hp_r;
+DSY_SDRAM_BSS float shimmer_buf_l[kShimmerBufferSize];
+DSY_SDRAM_BSS float shimmer_buf_r[kShimmerBufferSize];
+static size_t shimmer_write_idx = 0;
+static float shimmer_read_idx = 0.0f;
+static int shimmer_mode = 0;
 DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_l;
 DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_r;
 DelayLine<float, kReverbPreDelayMaxSamples> DSY_SDRAM_BSS reverb_predelay_l;
@@ -4489,65 +4498,125 @@ static void DrawVerticalFadersInRect(int x,
 			label_x = x + w - 2 - label_w;
 		}
 		line_x = label_x + (label_w / 2);
-		bool line_on = true;
-		if (select_active && f == selected_index)
+		const bool selected = select_active && f == selected_index;
+		const bool line_on = true;
+		// Console-style rail: thin center line with small end caps.
+		int rail_x = line_x;
+		if (rail_x < x + 1)
 		{
-			int rect_x0 = line_x - 4;
-			int rect_x1 = line_x + 4;
-			if (label_x - 1 < rect_x0)
-			{
-				rect_x0 = label_x - 1;
-			}
-			if (label_x + label_w + 1 > rect_x1)
-			{
-				rect_x1 = label_x + label_w + 1;
-			}
-			int rect_y0 = line_top - 1;
-			int rect_y1 = label_y + Font5x7::H + 1;
-			if (rect_x0 < x + 1)
-			{
-				rect_x0 = x + 1;
-			}
-			if (rect_x1 > x + w - 2)
-			{
-				rect_x1 = x + w - 2;
-			}
-			if (rect_y0 < y + 1)
-			{
-				rect_y0 = y + 1;
-			}
-			if (rect_y1 > y + h - 2)
-			{
-				rect_y1 = y + h - 2;
-			}
-			display.DrawRect(rect_x0, rect_y0, rect_x1, rect_y1, true, true);
-			line_on = false;
+			rail_x = x + 1;
 		}
-		display.DrawLine(line_x, line_top, line_x, line_bottom, line_on);
-		if (line_x + 1 <= x + w - 2)
+		if (rail_x > x + w - 2)
 		{
-			display.DrawLine(line_x + 1, line_top, line_x + 1, line_bottom, line_on);
+			rail_x = x + w - 2;
 		}
+		display.DrawLine(rail_x, line_top, rail_x, line_bottom, line_on);
+		display.DrawLine(rail_x - 1, line_top, rail_x + 1, line_top, line_on);
+		display.DrawLine(rail_x - 1, line_bottom, rail_x + 1, line_bottom, line_on);
+
 		const float value = values[f];
 		int tick_y = line_bottom - static_cast<int>(value * static_cast<float>(span_y) + 0.5f);
-		int tick_x0 = label_x;
-		int tick_x1 = label_x + label_w - 1;
-		if (tick_x0 < x + 1)
+		int handle_w = 7;
+		if (handle_w > (x + w - 2) - (x + 1))
 		{
-			tick_x0 = x + 1;
+			handle_w = (x + w - 2) - (x + 1);
 		}
-		if (tick_x1 > x + w - 2)
+		int handle_x0 = line_x - handle_w / 2;
+		int handle_x1 = handle_x0 + handle_w;
+		if (handle_x0 < x + 1)
 		{
-			tick_x1 = x + w - 2;
+			handle_x0 = x + 1;
+			handle_x1 = handle_x0 + handle_w;
 		}
-		display.DrawLine(tick_x0, tick_y, tick_x1, tick_y, line_on);
-		if (tick_y + 1 <= line_bottom)
+		if (handle_x1 > x + w - 2)
 		{
-			display.DrawLine(tick_x0, tick_y + 1, tick_x1, tick_y + 1, line_on);
+			handle_x1 = x + w - 2;
+			handle_x0 = handle_x1 - handle_w;
+		}
+		int handle_y0 = tick_y - 5;
+		int handle_y1 = tick_y + 5;
+		if (handle_y0 < line_top)
+		{
+			handle_y0 = line_top;
+		}
+		if (handle_y1 > line_bottom)
+		{
+			handle_y1 = line_bottom;
+		}
+		// Inverted handle: white outline, black body, white stripes.
+		display.DrawRect(handle_x0, handle_y0, handle_x1, handle_y1, true, false);
+		if (handle_x1 - handle_x0 >= 2 && handle_y1 - handle_y0 >= 2)
+		{
+			display.DrawRect(handle_x0 + 1,
+							 handle_y0 + 1,
+							 handle_x1 - 1,
+							 handle_y1 - 1,
+							 false,
+							 true);
+		}
+		// Slightly round the handle corners by knocking out corner pixels.
+		if ((handle_x1 - handle_x0) >= 4 && (handle_y1 - handle_y0) >= 4)
+		{
+			display.DrawPixel(handle_x0, handle_y0, false);
+			display.DrawPixel(handle_x1, handle_y0, false);
+			display.DrawPixel(handle_x0, handle_y1, false);
+			display.DrawPixel(handle_x1, handle_y1, false);
+		}
+		const int center_y = handle_y0 + ((handle_y1 - handle_y0) / 2);
+		const int inner_x0 = handle_x0 + 1;
+		const int inner_x1 = handle_x1 - 1;
+		if (inner_x1 > inner_x0)
+		{
+			const int mid_pad = 1;
+			display.DrawLine(inner_x0 + mid_pad, center_y, inner_x1 - mid_pad, center_y, true);
+			if (center_y - 2 >= handle_y0 + 1)
+			{
+				display.DrawLine(inner_x0,
+								 center_y - 2,
+								 inner_x1,
+								 center_y - 2,
+								 true);
+			}
+			if (center_y + 2 <= handle_y1 - 1)
+			{
+				display.DrawLine(inner_x0,
+								 center_y + 2,
+								 inner_x1,
+								 center_y + 2,
+								 true);
+			}
 		}
 		if (label_x + label_w < x + w - 1)
 		{
-			DrawTinyString(label, label_x, label_y, line_on);
+			if (selected)
+			{
+				int label_x0 = label_x - 1;
+				int label_x1 = label_x + label_w;
+				int label_y0 = label_y - 1;
+				int label_y1 = label_y + Font5x7::H;
+				if (label_x0 < x + 1)
+				{
+					label_x0 = x + 1;
+				}
+				if (label_x1 > x + w - 2)
+				{
+					label_x1 = x + w - 2;
+				}
+				if (label_y0 < y + 1)
+				{
+					label_y0 = y + 1;
+				}
+				if (label_y1 > y + h - 2)
+				{
+					label_y1 = y + h - 2;
+				}
+				display.DrawRect(label_x0, label_y0, label_x1, label_y1, true, true);
+				DrawTinyString(label, label_x, label_y, false);
+			}
+			else
+			{
+				DrawTinyString(label, label_x, label_y, true);
+			}
 		}
 	}
 }
@@ -5529,6 +5598,15 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		{
 			fx_detail_index = fx_fader_index;
 			fx_detail_param_index = 0;
+			if (fx_detail_index == kFxReverbIndex)
+			{
+				reverb_pre = 0.5f;
+				reverb_damp = 0.5f;
+				reverb_decay = 0.5f;
+				reverb_wet = 0.5f;
+				reverb_shimmer = 0.0f;
+				fx_params_dirty = true;
+			}
 			ui_mode = UiMode::FxDetail;
 			request_fx_detail_redraw = true;
 		}
@@ -5782,6 +5860,9 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	static float cached_reverb_damp = 0.0f;
 	static float cached_reverb_decay = 0.0f;
 	static float cached_reverb_shimmer = 0.0f;
+	static float cached_reverb_gain = 1.0f;
+	static float cached_reverb_release = 1.0f;
+	static float cached_reverb_predelay_samples = 0.0f;
 	static float last_sat_depth = -1.0f;
 	static float last_chorus_depth = -1.0f;
 	static float last_delay_wet = -1.0f;
@@ -5820,6 +5901,23 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		if (cached_reverb_shimmer < 0.0f) cached_reverb_shimmer = 0.0f;
 		if (cached_reverb_shimmer > 1.0f) cached_reverb_shimmer = 1.0f;
 
+		cached_reverb_gain = 1.0f;
+		const float decay_ms = kReverbDecayMinMs
+			+ cached_reverb_decay * cached_reverb_decay * (kReverbDecayMaxMs - kReverbDecayMinMs);
+		const float decay_samples = decay_ms * 0.001f * out_sr;
+		if (cached_reverb_decay >= 0.999f)
+		{
+			cached_reverb_release = 1.0f;
+		}
+		else if (decay_samples > 1.0f)
+		{
+			cached_reverb_release = expf(-1.0f / decay_samples);
+		}
+		else
+		{
+			cached_reverb_release = 0.0f;
+		}
+
 		if (fabsf(cached_sat_depth - last_sat_depth) > kFxParamEpsilon)
 		{
 			sat_l.SetDrive(cached_sat_depth);
@@ -5840,14 +5938,19 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			last_delay_wet = cached_delay_wet;
 		}
 
-		const float rev_decay_ms = kReverbDecayMinMs
-			+ cached_reverb_decay * (kReverbDecayMaxMs - kReverbDecayMinMs);
-		const float rev_feedback = kReverbFeedbackMin
-			+ ((rev_decay_ms - kReverbDecayMinMs)
-				* (kReverbFeedbackMax - kReverbFeedbackMin)
-				/ (kReverbDecayMaxMs - kReverbDecayMinMs));
+		float rev_feedback = kReverbFeedback;
+		if (cached_reverb_decay >= 0.999f)
+		{
+			rev_feedback = 0.99f;
+		}
+		float damp_curve = cached_reverb_damp * 2.0f;
+		if (cached_reverb_damp > 0.75f)
+		{
+			const float tail = (cached_reverb_damp - 0.75f) * 4.0f;
+			damp_curve += tail * 1.5f;
+		}
 		float rev_lp = kReverbDampMaxHz
-			- cached_reverb_damp * (kReverbDampMaxHz - kReverbDampMinHz);
+			* powf(kReverbDampMinHz / kReverbDampMaxHz, damp_curve);
 		const float rev_lp_max = out_sr * 0.49f;
 		if (rev_lp > rev_lp_max)
 		{
@@ -5857,13 +5960,15 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		{
 			rev_lp = kReverbDampMinHz;
 		}
+		const float pre_curve = powf(cached_reverb_pre, 3.0f);
 		float rev_predelay_samples
-			= cached_reverb_pre * (kReverbPreDelayMaxMs * 0.001f * out_sr);
+			= pre_curve * (kReverbPreDelayMaxMs * 0.001f * out_sr);
 		const float rev_predelay_max = static_cast<float>(kReverbPreDelayMaxSamples - 1);
 		if (rev_predelay_samples > rev_predelay_max)
 		{
 			rev_predelay_samples = rev_predelay_max;
 		}
+		cached_reverb_predelay_samples = rev_predelay_samples;
 		if (fabsf(rev_feedback - last_rev_feedback) > kFxParamEpsilon)
 		{
 			reverb.SetFeedback(rev_feedback);
@@ -5925,6 +6030,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	{
 		float sig_l = 0.0f;
 		float sig_r = 0.0f;
+		static float reverb_tail_gain = 0.0f;
 		const bool monitor_active =
 			(ui_mode == UiMode::Record
 				&& record_state != RecordState::Review
@@ -6335,22 +6441,138 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		const float delay_mix_l = (chorus_out_l * (1.0f - delay_mix)) + (delay_out_l * delay_mix);
 		const float delay_mix_r = (chorus_out_r * (1.0f - delay_mix)) + (delay_out_r * delay_mix);
 
-		const float rev_in_l = reverb_predelay_l.Read();
-		const float rev_in_r = reverb_predelay_r.Read();
-		reverb_predelay_l.Write(delay_mix_l);
-		reverb_predelay_r.Write(delay_mix_r);
-		float rev_l = 0.0f;
-		float rev_r = 0.0f;
-		reverb.Process(rev_in_l, rev_in_r, &rev_l, &rev_r);
+		float rev_in_l = 0.0f;
+		float rev_in_r = 0.0f;
+		const bool predelay_active = (cached_reverb_predelay_samples >= 1.0f);
+		if (predelay_active)
+		{
+			rev_in_l = reverb_predelay_l.Read();
+			rev_in_r = reverb_predelay_r.Read();
+			reverb_predelay_l.Write(delay_mix_l);
+			reverb_predelay_r.Write(delay_mix_r);
+		}
+		else
+		{
+			reverb_predelay_l.Write(delay_mix_l);
+			reverb_predelay_r.Write(delay_mix_r);
+			rev_in_l = delay_mix_l;
+			rev_in_r = delay_mix_r;
+		}
+		const float rev_in_level = fabsf(delay_mix_l) + fabsf(delay_mix_r);
+		if (rev_in_level > 1e-4f)
+		{
+			reverb_tail_gain = 1.0f;
+		}
+		else
+		{
+			reverb_tail_gain *= cached_reverb_release;
+		}
+		// Shimmer: pitch-shifted octave layer around midpoint (0.5 = no shimmer).
+		float shimmer_amount = 0.0f;
+		float shimmer_rate = 1.0f;
+		int next_mode = 0;
 		if (rev_shimmer > 0.0f)
 		{
-			rev_l += rev_shimmer * shimmer_hp_l.Process(rev_l);
-			rev_r += rev_shimmer * shimmer_hp_r.Process(rev_r);
+			shimmer_amount = rev_shimmer;
+			if (shimmer_amount > 1.0f)
+			{
+				shimmer_amount = 1.0f;
+			}
+			if (shimmer_amount < 0.25f)
+			{
+				shimmer_amount *= 2.0f;
+			}
+			else
+			{
+				shimmer_amount = 0.5f + (shimmer_amount - 0.25f) * (0.5f / 0.75f);
+			}
+			if (shimmer_amount > 1.0f)
+			{
+				shimmer_amount = 1.0f;
+			}
+			shimmer_rate = kShimmerRateUp;
+			next_mode = 1;
 		}
+		else
+		{
+			shimmer_amount = 0.0f;
+			shimmer_rate = kShimmerRateUp;
+			next_mode = 0;
+		}
+
+		if (next_mode != shimmer_mode)
+		{
+			shimmer_mode = next_mode;
+			shimmer_read_idx = static_cast<float>(
+				(shimmer_write_idx + kShimmerBufferSize - kShimmerDelaySamples)
+				% kShimmerBufferSize);
+		}
+
+		float shimmer_fb_l = 0.0f;
+		float shimmer_fb_r = 0.0f;
+		if (shimmer_amount > 0.0f)
+		{
+			const size_t read_i0 = static_cast<size_t>(shimmer_read_idx) % kShimmerBufferSize;
+			const size_t read_i1 = (read_i0 + 1) % kShimmerBufferSize;
+			const float frac = shimmer_read_idx - static_cast<float>(read_i0);
+			const float sh_l = shimmer_buf_l[read_i0]
+				+ (shimmer_buf_l[read_i1] - shimmer_buf_l[read_i0]) * frac;
+			const float sh_r = shimmer_buf_r[read_i0]
+				+ (shimmer_buf_r[read_i1] - shimmer_buf_r[read_i0]) * frac;
+			shimmer_fb_l = shimmer_amount * kShimmerFeedback * shimmer_hp_l.Process(sh_l);
+			shimmer_fb_r = shimmer_amount * kShimmerFeedback * shimmer_hp_r.Process(sh_r);
+
+			shimmer_read_idx += shimmer_rate;
+			while (shimmer_read_idx >= static_cast<float>(kShimmerBufferSize))
+			{
+				shimmer_read_idx -= static_cast<float>(kShimmerBufferSize);
+			}
+			const size_t read_int = static_cast<size_t>(shimmer_read_idx);
+			size_t dist = (shimmer_write_idx >= read_int)
+				? (shimmer_write_idx - read_int)
+				: (shimmer_write_idx + kShimmerBufferSize - read_int);
+			if (dist < 4)
+			{
+				shimmer_read_idx = static_cast<float>(
+					(shimmer_write_idx + kShimmerBufferSize - kShimmerDelaySamples)
+					% kShimmerBufferSize);
+			}
+		}
+
+		float rev_l = 0.0f;
+		float rev_r = 0.0f;
+		reverb.Process(rev_in_l + shimmer_fb_l, rev_in_r + shimmer_fb_r, &rev_l, &rev_r);
+		rev_l *= cached_reverb_gain * reverb_tail_gain;
+		rev_r *= cached_reverb_gain * reverb_tail_gain;
+
+		shimmer_buf_l[shimmer_write_idx] = rev_l;
+		shimmer_buf_r[shimmer_write_idx] = rev_r;
+		shimmer_write_idx = (shimmer_write_idx + 1) % kShimmerBufferSize;
 		const float wet = cached_reverb_wet;
-		const float dry = 1.0f - wet;
-		out[0][i] = (delay_mix_l * dry) + (rev_l * wet);
-		out[1][i] = (delay_mix_r * dry) + (rev_r * wet);
+		float wet_mix = wet;
+		float dry_mix = 1.0f - wet;
+		if (wet < 0.5f)
+		{
+			wet_mix = 2.0f * wet * wet;
+			dry_mix = 1.0f - wet_mix;
+		}
+		else
+		{
+			dry_mix = 2.0f * (1.0f - wet) * (1.0f - wet);
+			wet_mix = 1.0f - dry_mix;
+		}
+		wet_mix *= 1.12f;
+		if (wet_mix > 1.0f)
+		{
+			wet_mix = 1.0f;
+		}
+		if (wet >= 0.999f)
+		{
+			wet_mix = 1.0f;
+			dry_mix = 0.0f;
+		}
+		out[0][i] = (delay_mix_l * dry_mix) + (rev_l * wet_mix);
+		out[1][i] = (delay_mix_r * dry_mix) + (rev_r * wet_mix);
 	}
 	request_playhead_redraw = true;
 }
@@ -6368,6 +6590,14 @@ int main(void)
 	reverb.SetLpFreq(kReverbLpFreq);
 	shimmer_hp_l.Init(hw.AudioSampleRate(), kShimmerHpHz);
 	shimmer_hp_r.Init(hw.AudioSampleRate(), kShimmerHpHz);
+	for (size_t i = 0; i < kShimmerBufferSize; ++i)
+	{
+		shimmer_buf_l[i] = 0.0f;
+		shimmer_buf_r[i] = 0.0f;
+	}
+	shimmer_write_idx = 0;
+	shimmer_read_idx = static_cast<float>(kShimmerBufferSize - kShimmerDelaySamples);
+	shimmer_mode = 0;
 
 	sat_l.Init(hw.AudioSampleRate());
 	sat_r.Init(hw.AudioSampleRate());
