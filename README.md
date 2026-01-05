@@ -1,3 +1,17 @@
+### 1/5/25 2:57pm
+Cuz revamped entire Reverb Algo
+Added SHM - octave up feedback loop
+WET - goes 100% wet at 100% fader
+DCY - Infinite Freeze at 100%
+DMP - Max HIGHs at 0% - massive HIGH cut on a quick sweep when fader increases.
+PRE - At 0% PRE fader is bypassed, 100% should be 1000m delay (1sec) - at that logic 50% on fader should be 500ms.
+
+*****
+- Edited Drawfader section to give it "mixer" style
+- Updated Green LED blinking logic on some screen where Preview/Play is available
+- Edited "LOAD TO" screen to horizontal triangle view
+- Cleaned up text thickness in the FX engines
+
 ### 2/3/26 2:13am
 
 - Load a constant/repeating/solid/loud sample from SD to PERFORM
