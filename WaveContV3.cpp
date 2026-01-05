@@ -3276,10 +3276,10 @@ static int LoadTargetDisplayIndex(LoadDestination selected)
 {
 	switch (selected)
 	{
-		case LoadDestination::Perform: return 0;
-		case LoadDestination::Play: return 1;
-		case LoadDestination::Bake: return 2;
-		default: return 1;
+		case LoadDestination::Play: return 0;
+		case LoadDestination::Bake: return 1;
+		case LoadDestination::Perform: return 2;
+		default: return 0;
 	}
 }
 
@@ -3287,9 +3287,9 @@ static LoadDestination LoadTargetFromDisplayIndex(int32_t index)
 {
 	switch (index)
 	{
-		case 0: return LoadDestination::Perform;
-		case 1: return LoadDestination::Play;
-		case 2: return LoadDestination::Bake;
+		case 0: return LoadDestination::Play;
+		case 1: return LoadDestination::Bake;
+		case 2: return LoadDestination::Perform;
 		default: return LoadDestination::Play;
 	}
 }
@@ -3352,9 +3352,47 @@ static void DrawDiagonalTargetMenu(const char* const* labels, int count, int sel
 
 static void DrawLoadTargetMenu(LoadDestination selected)
 {
-	const char* labels[kLoadTargetCount] = {"PERFORM", "PLAY", "BAKE"};
 	const int selected_idx = LoadTargetDisplayIndex(selected);
-	DrawDiagonalTargetMenu(labels, kLoadTargetCount, selected_idx);
+	display.Fill(false);
+	constexpr int kMargin = 2;
+	constexpr int kGap = 2;
+	const int top_h = (kDisplayH - (kMargin * 2) - kGap) / 2;
+	const int bottom_h = kDisplayH - (kMargin * 2) - kGap - top_h;
+	const int top_y = kMargin;
+	const int bottom_y = kMargin + top_h + kGap;
+	const int top_w = (kDisplayW - (kMargin * 2) - kGap) / 2;
+	const int left_x = kMargin;
+	const int right_x = kMargin + top_w + kGap;
+	const int bottom_w = kDisplayW - (kMargin * 2);
+
+	auto draw_box = [&](int x, int y, int w, int h, const char* label, bool highlight)
+	{
+		display.DrawRect(x, y, x + w - 1, y + h - 1, true, highlight);
+		const int len = static_cast<int>(StrLen(label));
+		if (len <= 0)
+		{
+			return;
+		}
+		const int char_w = Font5x7::W + 1;
+		const int text_w = (len - 1) * char_w + Font5x7::W;
+		const int text_h = Font5x7::H;
+		int text_x = x + (w - text_w) / 2;
+		int text_y = y + (h - text_h) / 2;
+		if (text_x < x + 1)
+		{
+			text_x = x + 1;
+		}
+		if (text_y < y + 1)
+		{
+			text_y = y + 1;
+		}
+		DrawTinyStringBold(label, text_x, text_y, !highlight);
+	};
+
+	draw_box(left_x, top_y, top_w, top_h, "PLAY", selected_idx == 0);
+	draw_box(right_x, top_y, top_w, top_h, "BAKE", selected_idx == 1);
+	draw_box(kMargin, bottom_y, bottom_w, bottom_h, "PERFORM", selected_idx == 2);
+	display.Update();
 }
 
 static void DrawRecordReadyScreen()
