@@ -27,12 +27,7 @@ constexpr int32_t kPerformBoxCount = 4;
 constexpr int32_t kPerformEdtIndex = 0;
 constexpr int32_t kPerformFaderCount = 4;
 constexpr int32_t kFxReverbIndex = 3;
-constexpr int32_t kReverbAlgoHall = 0;
-constexpr int32_t kReverbAlgoSpring = 1;
-constexpr int32_t kReverbAlgoShimmer = 2;
-constexpr int32_t kReverbAlgoCount = 3;
-constexpr int32_t kReverbAlgSelectIndex = 0;
-constexpr int32_t kReverbParamOffset = 1;
+constexpr int32_t kReverbFaderCount = 5;
 constexpr int32_t kPerformFltFaderCount = 2;
 constexpr int32_t kPerformAmpIndex = 1;
 constexpr int32_t kPerformFltIndex = 2;
@@ -96,6 +91,8 @@ constexpr float kReverbDampDefault =
 	(kReverbDampMaxHz - kReverbLpFreq) / (kReverbDampMaxHz - kReverbDampMinHz);
 constexpr float kReverbDefaultWet = 0.0f;
 constexpr float kReverbWetStep = 0.02f;
+constexpr float kReverbShimmerStep = 0.02f;
+constexpr float kShimmerHpHz = 900.0f;
 constexpr float kChorusRateHz = 0.25f;
 constexpr float kChorusDelayMs = 8.0f;
 constexpr float kChorusFeedback = 0.1f;
@@ -105,6 +102,7 @@ constexpr float kDelayTimeSec = 0.3f;
 constexpr float kDelayFeedback = 0.55f;
 constexpr float kDelayDefaultWet = 0.0f;
 constexpr float kDelayWetStep = 0.02f;
+constexpr float kFxParamEpsilon = 1e-5f;
 constexpr float kAmpEnvStep = 0.02f;
 constexpr float kFltParamStep = 0.02f;
 constexpr float kAmpEnvMinMs = 5.0f;
@@ -440,6 +438,41 @@ private:
 	float z2_ = 0.0f;
 };
 
+class OnePoleHp
+{
+public:
+	void Init(float sample_rate, float cutoff_hz)
+	{
+		SetFreq(sample_rate, cutoff_hz);
+		y_ = 0.0f;
+		x1_ = 0.0f;
+	}
+
+	void SetFreq(float sample_rate, float cutoff_hz)
+	{
+		a_ = expf(-2.0f * kPi * cutoff_hz / sample_rate);
+	}
+
+	float Process(float x)
+	{
+		const float y = a_ * (y_ + x - x1_);
+		x1_ = x;
+		y_ = y;
+		return y;
+	}
+
+	void Reset()
+	{
+		y_ = 0.0f;
+		x1_ = 0.0f;
+	}
+
+private:
+	float a_ = 0.0f;
+	float y_ = 0.0f;
+	float x1_ = 0.0f;
+};
+
 DaisyPod    hw;
 PodDisplay  display;
 SdmmcHandler   sdcard;
@@ -447,6 +480,8 @@ FatFSInterface fsi;
 Encoder      encoder_r;
 Switch       shift_button;
 ReverbSc DSY_SDRAM_BSS reverb;
+OnePoleHp shimmer_hp_l;
+OnePoleHp shimmer_hp_r;
 DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_l;
 DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_r;
 DelayLine<float, kReverbPreDelayMaxSamples> DSY_SDRAM_BSS reverb_predelay_l;
@@ -616,10 +651,11 @@ volatile float reverb_wet = kReverbDefaultWet;
 volatile float reverb_pre = 0.0f;
 volatile float reverb_damp = kReverbDampDefault;
 volatile float reverb_decay = kReverbDecayDefault;
-volatile int32_t reverb_algo_index = kReverbAlgoHall;
+volatile float reverb_shimmer = 0.0f;
 volatile float delay_wet = kDelayDefaultWet;
 volatile float fx_s_wet = 0.0f;
 volatile float fx_c_wet = 0.0f;
+volatile bool fx_params_dirty = true;
 volatile float amp_attack = 0.0f;
 volatile float amp_decay = 0.0f;
 volatile float amp_sustain = 0.0f;
@@ -3386,7 +3422,7 @@ static void DrawLoadTargetMenu(LoadDestination selected)
 		{
 			text_y = y + 1;
 		}
-		DrawTinyStringBold(label, text_x, text_y, !highlight);
+		DrawTinyString(label, text_x, text_y, !highlight);
 	};
 
 	draw_box(left_x, top_y, top_w, top_h, "PLAY", selected_idx == 0);
@@ -4531,96 +4567,38 @@ static void DrawFxDetailScreen(int32_t index)
 	{
 		text_x = 0;
 	}
-	DrawTinyStringBold(label, text_x, 1, true);
+	DrawTinyString(label, text_x, 1, true);
 	if (index == kFxReverbIndex)
 	{
 		constexpr int kMargin = 2;
-		constexpr int kGap = 2;
-		const int block_x = kMargin;
-		const int block_w = kDisplayW / 4;
 		const int block_y = Font5x7::H + 4;
 		int block_h = kDisplayH - block_y - kMargin;
 		if (block_h < 3)
 		{
 			block_h = 3;
 		}
-		int rect_h = (block_h - (kGap * (kReverbAlgoCount - 1))) / kReverbAlgoCount;
-		if (rect_h < Font5x7::H + 2)
-		{
-			rect_h = Font5x7::H + 2;
-		}
-		const char* verb_labels[kReverbAlgoCount] = {"HALL", "SPRG", "SHMR"};
-		int algo_index = reverb_algo_index;
-		if (algo_index < 0 || algo_index >= kReverbAlgoCount)
-		{
-			algo_index = kReverbAlgoHall;
-		}
-		const bool algo_focus = (fx_detail_param_index == kReverbAlgSelectIndex);
-		for (int i = 0; i < kReverbAlgoCount; ++i)
-		{
-			const int rect_y = block_y + i * (rect_h + kGap);
-			const bool algo_selected = (i == algo_index);
-			display.DrawRect(block_x,
-							 rect_y,
-							 block_x + block_w - 1,
-							 rect_y + rect_h - 1,
-							 true,
-							 algo_selected);
-			const int label_w = TinyStringWidth(verb_labels[i]);
-			int label_x = block_x + (block_w - label_w) / 2;
-			if (label_x < block_x + 1)
-			{
-				label_x = block_x + 1;
-			}
-			const int label_y = rect_y + (rect_h - Font5x7::H) / 2;
-			DrawTinyString(verb_labels[i], label_x, label_y, !algo_selected);
-		}
-		if (algo_focus)
-		{
-			int outline_x0 = block_x - 1;
-			int outline_y0 = block_y - 1;
-			int outline_x1 = block_x + block_w;
-			int outline_y1 = block_y + block_h;
-			if (outline_x0 < 0)
-			{
-				outline_x0 = 0;
-			}
-			if (outline_y0 < 0)
-			{
-				outline_y0 = 0;
-			}
-			if (outline_x1 >= kDisplayW)
-			{
-				outline_x1 = kDisplayW - 1;
-			}
-			if (outline_y1 >= kDisplayH)
-			{
-				outline_y1 = kDisplayH - 1;
-			}
-			display.DrawRect(outline_x0, outline_y0, outline_x1, outline_y1, true, false);
-		}
-		const int fader_offset = 8;
-		const int fader_x = block_x + block_w + kGap + fader_offset;
-		const int fader_w = kDisplayW - fader_x - kMargin;
+		const int fader_x = kMargin;
+		const int fader_w = kDisplayW - (kMargin * 2);
 		if (fader_w > 4)
 		{
-			const char* fader_labels[4] = {"Pre", "Dmp", "Dcy", "Wet"};
-			const float fader_values[4] = {reverb_pre, reverb_damp, reverb_decay, reverb_wet};
-			int param_index = fx_detail_param_index - kReverbParamOffset;
+			const char* fader_labels[kReverbFaderCount] = {"Pre", "Dmp", "Dcy", "Wet", "Shm"};
+			const float fader_values[kReverbFaderCount]
+				= {reverb_pre, reverb_damp, reverb_decay, reverb_wet, reverb_shimmer};
+			int param_index = fx_detail_param_index;
 			const bool fader_select_active
-				= (param_index >= 0 && param_index < kPerformFaderCount);
+				= (param_index >= 0 && param_index < kReverbFaderCount);
 			if (!fader_select_active)
 			{
 				param_index = 0;
 			}
-			const int fader_offsets[4] = {0, 1, -1, 0};
+			const int fader_offsets[kReverbFaderCount] = {0, 1, -1, 0, 0};
 			DrawVerticalFadersInRect(fader_x,
 									 block_y,
 									 fader_w,
 									 block_h,
 									 fader_labels,
 									 fader_values,
-									 4,
+									 kReverbFaderCount,
 									 fader_select_active,
 									 param_index,
 									 fader_offsets);
@@ -5550,7 +5528,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		if (fx_shift_active && encoder_r_pressed)
 		{
 			fx_detail_index = fx_fader_index;
-			fx_detail_param_index = kReverbParamOffset;
+			fx_detail_param_index = 0;
 			ui_mode = UiMode::FxDetail;
 			request_fx_detail_redraw = true;
 		}
@@ -5577,6 +5555,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			{
 				*target = next;
 				request_perform_redraw = true;
+				fx_params_dirty = true;
 			}
 		}
 		else if (amp_shift_active && encoder_r_inc != 0)
@@ -5656,7 +5635,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		{
 			if (encoder_l_inc != 0)
 			{
-				const int32_t param_count = kReverbParamOffset + kPerformFaderCount;
+				const int32_t param_count = kReverbFaderCount;
 				int32_t next = fx_detail_param_index + encoder_l_inc;
 				while (next < 0)
 				{
@@ -5674,49 +5653,34 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			}
 			if (encoder_r_inc != 0)
 			{
-				if (fx_detail_param_index == kReverbAlgSelectIndex)
+				const float steps[kReverbFaderCount]
+					= {kReverbParamStep,
+					   kReverbParamStep,
+					   kReverbParamStep,
+					   kReverbWetStep,
+					   kReverbShimmerStep};
+				volatile float* targets[kReverbFaderCount]
+					= {&reverb_pre, &reverb_damp, &reverb_decay, &reverb_wet, &reverb_shimmer};
+				const int idx = fx_detail_param_index;
+				if (idx >= 0 && idx < kReverbFaderCount)
 				{
-					int32_t next = reverb_algo_index + encoder_r_inc;
-					while (next < 0)
+					const float step = steps[idx];
+					volatile float* target = targets[idx];
+					const float current = *target;
+					float next = current + (static_cast<float>(encoder_r_inc) * step);
+					if (next < 0.0f)
 					{
-						next += kReverbAlgoCount;
+						next = 0.0f;
 					}
-					while (next >= kReverbAlgoCount)
+					if (next > 1.0f)
 					{
-						next -= kReverbAlgoCount;
+						next = 1.0f;
 					}
-					if (next != reverb_algo_index)
+					if (next != current)
 					{
-						reverb_algo_index = next;
-					}
-					request_fx_detail_redraw = true;
-				}
-				else
-				{
-					const float steps[4]
-						= {kReverbParamStep, kReverbParamStep, kReverbParamStep, kReverbWetStep};
-					volatile float* targets[4]
-						= {&reverb_pre, &reverb_damp, &reverb_decay, &reverb_wet};
-					const int idx = fx_detail_param_index - kReverbParamOffset;
-					if (idx >= 0 && idx < kPerformFaderCount)
-					{
-						const float step = steps[idx];
-						volatile float* target = targets[idx];
-						const float current = *target;
-						float next = current + (static_cast<float>(encoder_r_inc) * step);
-						if (next < 0.0f)
-						{
-							next = 0.0f;
-						}
-						if (next > 1.0f)
-						{
-							next = 1.0f;
-						}
-						if (next != current)
-						{
-							*target = next;
-							request_fx_detail_redraw = true;
-						}
+						*target = next;
+						request_fx_detail_redraw = true;
+						fx_params_dirty = true;
 					}
 				}
 			}
@@ -5810,65 +5774,117 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			voice.active = false;
 		}
 	}
-	const float chorus_depth = fx_c_wet;
-	const float sat_depth = fx_s_wet;
-	sat_l.SetDrive(sat_depth);
-	sat_r.SetDrive(sat_depth);
-	sat_l.SetMix(sat_depth);
-	sat_r.SetMix(sat_depth);
-	chorus_l.SetLfoDepth(chorus_depth * kChorusMaxDepth);
-	chorus_r.SetLfoDepth(chorus_depth * kChorusMaxDepth);
-	const float out_sr = hw.AudioSampleRate();
-	float rev_pre = reverb_pre;
-	float rev_damp = reverb_damp;
-	float rev_decay = reverb_decay;
-	if (rev_pre < 0.0f) rev_pre = 0.0f;
-	if (rev_pre > 1.0f) rev_pre = 1.0f;
-	if (rev_damp < 0.0f) rev_damp = 0.0f;
-	if (rev_damp > 1.0f) rev_damp = 1.0f;
-	if (rev_decay < 0.0f) rev_decay = 0.0f;
-	if (rev_decay > 1.0f) rev_decay = 1.0f;
-	const float rev_decay_ms = kReverbDecayMinMs
-		+ rev_decay * (kReverbDecayMaxMs - kReverbDecayMinMs);
-	const float rev_feedback = kReverbFeedbackMin
-		+ ((rev_decay_ms - kReverbDecayMinMs)
-			* (kReverbFeedbackMax - kReverbFeedbackMin)
-			/ (kReverbDecayMaxMs - kReverbDecayMinMs));
-	float rev_lp = kReverbDampMaxHz - rev_damp * (kReverbDampMaxHz - kReverbDampMinHz);
-	const float rev_lp_max = out_sr * 0.49f;
-	if (rev_lp > rev_lp_max)
-	{
-		rev_lp = rev_lp_max;
-	}
-	if (rev_lp < kReverbDampMinHz)
-	{
-		rev_lp = kReverbDampMinHz;
-	}
-	float rev_predelay_samples = rev_pre * (kReverbPreDelayMaxMs * 0.001f * out_sr);
-	const float rev_predelay_max = static_cast<float>(kReverbPreDelayMaxSamples - 1);
-	if (rev_predelay_samples > rev_predelay_max)
-	{
-		rev_predelay_samples = rev_predelay_max;
-	}
+	static float cached_sat_depth = 0.0f;
+	static float cached_chorus_depth = 0.0f;
+	static float cached_delay_wet = 0.0f;
+	static float cached_reverb_wet = 0.0f;
+	static float cached_reverb_pre = 0.0f;
+	static float cached_reverb_damp = 0.0f;
+	static float cached_reverb_decay = 0.0f;
+	static float cached_reverb_shimmer = 0.0f;
+	static float last_sat_depth = -1.0f;
+	static float last_chorus_depth = -1.0f;
+	static float last_delay_wet = -1.0f;
 	static float last_rev_feedback = -1.0f;
 	static float last_rev_lp = -1.0f;
 	static float last_rev_predelay = -1.0f;
-	if (rev_feedback != last_rev_feedback)
+	const float out_sr = hw.AudioSampleRate();
+
+	if (fx_params_dirty)
 	{
-		reverb.SetFeedback(rev_feedback);
-		last_rev_feedback = rev_feedback;
+		fx_params_dirty = false;
+
+		cached_sat_depth = fx_s_wet;
+		cached_chorus_depth = fx_c_wet;
+		cached_delay_wet = delay_wet;
+		cached_reverb_wet = reverb_wet;
+		cached_reverb_pre = reverb_pre;
+		cached_reverb_damp = reverb_damp;
+		cached_reverb_decay = reverb_decay;
+		cached_reverb_shimmer = reverb_shimmer;
+
+		if (cached_sat_depth < 0.0f) cached_sat_depth = 0.0f;
+		if (cached_sat_depth > 1.0f) cached_sat_depth = 1.0f;
+		if (cached_chorus_depth < 0.0f) cached_chorus_depth = 0.0f;
+		if (cached_chorus_depth > 1.0f) cached_chorus_depth = 1.0f;
+		if (cached_delay_wet < 0.0f) cached_delay_wet = 0.0f;
+		if (cached_delay_wet > 1.0f) cached_delay_wet = 1.0f;
+		if (cached_reverb_wet < 0.0f) cached_reverb_wet = 0.0f;
+		if (cached_reverb_wet > 1.0f) cached_reverb_wet = 1.0f;
+		if (cached_reverb_pre < 0.0f) cached_reverb_pre = 0.0f;
+		if (cached_reverb_pre > 1.0f) cached_reverb_pre = 1.0f;
+		if (cached_reverb_damp < 0.0f) cached_reverb_damp = 0.0f;
+		if (cached_reverb_damp > 1.0f) cached_reverb_damp = 1.0f;
+		if (cached_reverb_decay < 0.0f) cached_reverb_decay = 0.0f;
+		if (cached_reverb_decay > 1.0f) cached_reverb_decay = 1.0f;
+		if (cached_reverb_shimmer < 0.0f) cached_reverb_shimmer = 0.0f;
+		if (cached_reverb_shimmer > 1.0f) cached_reverb_shimmer = 1.0f;
+
+		if (fabsf(cached_sat_depth - last_sat_depth) > kFxParamEpsilon)
+		{
+			sat_l.SetDrive(cached_sat_depth);
+			sat_r.SetDrive(cached_sat_depth);
+			sat_l.SetMix(cached_sat_depth);
+			sat_r.SetMix(cached_sat_depth);
+			last_sat_depth = cached_sat_depth;
+		}
+		if (fabsf(cached_chorus_depth - last_chorus_depth) > kFxParamEpsilon)
+		{
+			const float depth = cached_chorus_depth * kChorusMaxDepth;
+			chorus_l.SetLfoDepth(depth);
+			chorus_r.SetLfoDepth(depth);
+			last_chorus_depth = cached_chorus_depth;
+		}
+		if (fabsf(cached_delay_wet - last_delay_wet) > kFxParamEpsilon)
+		{
+			last_delay_wet = cached_delay_wet;
+		}
+
+		const float rev_decay_ms = kReverbDecayMinMs
+			+ cached_reverb_decay * (kReverbDecayMaxMs - kReverbDecayMinMs);
+		const float rev_feedback = kReverbFeedbackMin
+			+ ((rev_decay_ms - kReverbDecayMinMs)
+				* (kReverbFeedbackMax - kReverbFeedbackMin)
+				/ (kReverbDecayMaxMs - kReverbDecayMinMs));
+		float rev_lp = kReverbDampMaxHz
+			- cached_reverb_damp * (kReverbDampMaxHz - kReverbDampMinHz);
+		const float rev_lp_max = out_sr * 0.49f;
+		if (rev_lp > rev_lp_max)
+		{
+			rev_lp = rev_lp_max;
+		}
+		if (rev_lp < kReverbDampMinHz)
+		{
+			rev_lp = kReverbDampMinHz;
+		}
+		float rev_predelay_samples
+			= cached_reverb_pre * (kReverbPreDelayMaxMs * 0.001f * out_sr);
+		const float rev_predelay_max = static_cast<float>(kReverbPreDelayMaxSamples - 1);
+		if (rev_predelay_samples > rev_predelay_max)
+		{
+			rev_predelay_samples = rev_predelay_max;
+		}
+		if (fabsf(rev_feedback - last_rev_feedback) > kFxParamEpsilon)
+		{
+			reverb.SetFeedback(rev_feedback);
+			last_rev_feedback = rev_feedback;
+		}
+		if (fabsf(rev_lp - last_rev_lp) > kFxParamEpsilon)
+		{
+			reverb.SetLpFreq(rev_lp);
+			last_rev_lp = rev_lp;
+		}
+		if (fabsf(rev_predelay_samples - last_rev_predelay) >= 0.5f)
+		{
+			reverb_predelay_l.SetDelay(rev_predelay_samples);
+			reverb_predelay_r.SetDelay(rev_predelay_samples);
+			last_rev_predelay = rev_predelay_samples;
+		}
 	}
-	if (rev_lp != last_rev_lp)
-	{
-		reverb.SetLpFreq(rev_lp);
-		last_rev_lp = rev_lp;
-	}
-	if (fabsf(rev_predelay_samples - last_rev_predelay) >= 0.5f)
-	{
-		reverb_predelay_l.SetDelay(rev_predelay_samples);
-		reverb_predelay_r.SetDelay(rev_predelay_samples);
-		last_rev_predelay = rev_predelay_samples;
-	}
+
+	const float chorus_depth = cached_chorus_depth;
+	const float delay_mix = cached_delay_wet;
+	const float rev_shimmer = cached_reverb_shimmer;
 	const bool perform_mode = (ui_mode == UiMode::Perform);
 	const bool amp_env_active = perform_mode;
 	const float amp_attack_ms = AmpEnvMsFromFader(amp_attack);
@@ -6316,8 +6332,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		// Ping-pong delay: mono input with cross-feedback for left/right bounce.
 		delay_line_l.Write(delay_in + (delay_out_r * kDelayFeedback));
 		delay_line_r.Write(delay_out_l * kDelayFeedback);
-		const float delay_mix_l = (chorus_out_l * (1.0f - delay_wet)) + (delay_out_l * delay_wet);
-		const float delay_mix_r = (chorus_out_r * (1.0f - delay_wet)) + (delay_out_r * delay_wet);
+		const float delay_mix_l = (chorus_out_l * (1.0f - delay_mix)) + (delay_out_l * delay_mix);
+		const float delay_mix_r = (chorus_out_r * (1.0f - delay_mix)) + (delay_out_r * delay_mix);
 
 		const float rev_in_l = reverb_predelay_l.Read();
 		const float rev_in_r = reverb_predelay_r.Read();
@@ -6326,7 +6342,12 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		float rev_l = 0.0f;
 		float rev_r = 0.0f;
 		reverb.Process(rev_in_l, rev_in_r, &rev_l, &rev_r);
-		const float wet = reverb_wet;
+		if (rev_shimmer > 0.0f)
+		{
+			rev_l += rev_shimmer * shimmer_hp_l.Process(rev_l);
+			rev_r += rev_shimmer * shimmer_hp_r.Process(rev_r);
+		}
+		const float wet = cached_reverb_wet;
 		const float dry = 1.0f - wet;
 		out[0][i] = (delay_mix_l * dry) + (rev_l * wet);
 		out[1][i] = (delay_mix_r * dry) + (rev_r * wet);
@@ -6345,6 +6366,8 @@ int main(void)
 	reverb.Init(hw.AudioSampleRate());
 	reverb.SetFeedback(kReverbFeedback);
 	reverb.SetLpFreq(kReverbLpFreq);
+	shimmer_hp_l.Init(hw.AudioSampleRate(), kShimmerHpHz);
+	shimmer_hp_r.Init(hw.AudioSampleRate(), kShimmerHpHz);
 
 	sat_l.Init(hw.AudioSampleRate());
 	sat_r.Init(hw.AudioSampleRate());
@@ -7094,7 +7117,9 @@ int main(void)
 			}
 		}
 		if ((ui_mode == UiMode::Record && record_state == RecordState::Review)
-			|| (ui_mode == UiMode::Load && !delete_mode))
+			|| (ui_mode == UiMode::Load && !delete_mode)
+			|| (ui_mode == UiMode::Perform && sample_loaded)
+			|| (ui_mode == UiMode::FxDetail && sample_loaded))
 		{
 			led1_phase_ms += 10.0f;
 			if (led1_phase_ms >= kLedBlinkPeriodMs)
