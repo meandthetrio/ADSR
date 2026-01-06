@@ -1468,6 +1468,7 @@ static bool StepSaveRecordedSample(bool& done)
 		save_file_open = false;
 		done = true;
 		LogLine("Save OK: %s (%lu frames)", save_filename, (unsigned long)sample_length);
+		CopyString(loaded_sample_name, save_filename, kMaxWavNameLen);
 		return true;
 	}
 	return true;
