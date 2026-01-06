@@ -4599,34 +4599,57 @@ static void DrawFxDetailScreen(int32_t index)
 		{
 			block_h = 3;
 		}
-		const int box_h = (block_h - kGap) / 2;
 		const bool chorus_selected = (chorus_mode == 0);
 		const bool tape_selected = (chorus_mode == 1);
-		display.DrawRect(block_x,
-						 block_y,
-						 block_x + block_w - 1,
-						 block_y + box_h - 1,
-						 true,
-						 chorus_selected);
-		display.DrawRect(block_x,
-						 block_y + box_h + kGap,
-						 block_x + block_w - 1,
-						 block_y + (box_h * 2) + kGap - 1,
-						 true,
-						 tape_selected);
+		const bool algo_selected = (fx_detail_param_index == 2);
+		const int algo_x0 = block_x;
+		const int algo_y0 = block_y;
+		const int algo_x1 = block_x + block_w - 1;
+		const int algo_y1 = block_y + block_h - 1;
+		const int algo_pad = 2;
+		const int algo_gap = 2;
+		const int inner_x0 = algo_x0 + algo_pad;
+		const int inner_y0 = algo_y0 + algo_pad;
+		const int inner_x1 = algo_x1 - algo_pad;
+		const int inner_y1 = algo_y1 - algo_pad;
+		const int inner_h = inner_y1 - inner_y0 + 1;
+		const int box_h = (inner_h - algo_gap) / 2;
+		const int box1_y0 = inner_y0;
+		const int box1_y1 = box1_y0 + box_h - 1;
+		const int box2_y0 = box1_y1 + algo_gap + 1;
+		const int box2_y1 = box2_y0 + box_h - 1;
+		if (algo_selected)
+		{
+			display.DrawRect(algo_x0, algo_y0, algo_x1, algo_y1, true, false);
+			if (algo_x1 - algo_x0 > 2 && algo_y1 - algo_y0 > 2)
+			{
+				display.DrawRect(algo_x0 + 1, algo_y0 + 1, algo_x1 - 1, algo_y1 - 1, true, false);
+			}
+		}
+		display.DrawRect(inner_x0, box1_y0, inner_x1, box1_y1, true, chorus_selected);
+		display.DrawRect(inner_x0, box2_y0, inner_x1, box2_y1, true, tape_selected);
 		const int label_w1 = TinyStringWidth("CHRS");
 		const int label_w2 = TinyStringWidth("TAPE");
-		const int label_y1 = block_y + (box_h - Font5x7::H) / 2;
-		const int label_y2 = block_y + box_h + kGap + (box_h - Font5x7::H) / 2;
-		int label_x1 = block_x + (block_w - label_w1) / 2;
-		int label_x2 = block_x + (block_w - label_w2) / 2;
-		if (label_x1 < block_x + 1)
+		const int label_y1 = box1_y0 + (box_h - Font5x7::H) / 2;
+		const int label_y2 = box2_y0 + (box_h - Font5x7::H) / 2;
+		const int inner_w = inner_x1 - inner_x0 + 1;
+		int label_x1 = inner_x0 + (inner_w - label_w1) / 2;
+		int label_x2 = inner_x0 + (inner_w - label_w2) / 2;
+		if (label_x1 < inner_x0 + 1)
 		{
-			label_x1 = block_x + 1;
+			label_x1 = inner_x0 + 1;
 		}
-		if (label_x2 < block_x + 1)
+		if (label_x1 + label_w1 > inner_x1 - 1)
 		{
-			label_x2 = block_x + 1;
+			label_x1 = inner_x1 - 1 - label_w1;
+		}
+		if (label_x2 < inner_x0 + 1)
+		{
+			label_x2 = inner_x0 + 1;
+		}
+		if (label_x2 + label_w2 > inner_x1 - 1)
+		{
+			label_x2 = inner_x1 - 1 - label_w2;
 		}
 		DrawTinyString("CHRS", label_x1, label_y1, !chorus_selected);
 		DrawTinyString("TAPE", label_x2, label_y2, !tape_selected);
@@ -5798,7 +5821,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			}
 			if (encoder_l_inc != 0)
 			{
-				const int32_t param_count = 2;
+				const int32_t param_count = 3;
 				int32_t next = fx_detail_param_index + encoder_l_inc;
 				while (next < 0)
 				{
@@ -5816,32 +5839,53 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			}
 			if (encoder_r_inc != 0)
 			{
-				const float steps[2]
-					= {(chorus_mode == 1) ? kChorusRateStep : kReverbWetStep,
-					   kChorusRateStep};
-				volatile float* targets[2]
-					= {(chorus_mode == 1) ? &chorus_wow : &fx_c_wet,
-					   (chorus_mode == 1) ? &tape_rate : &chorus_rate};
-				const int idx = fx_detail_param_index;
-				if (idx >= 0 && idx < 2)
+				if (fx_detail_param_index == 2)
 				{
-					const float step = steps[idx];
-					volatile float* target = targets[idx];
-					const float current = *target;
-					float next = current + (static_cast<float>(encoder_r_inc) * step);
-					if (next < 0.0f)
+					int32_t next = chorus_mode + encoder_r_inc;
+					while (next < 0)
 					{
-						next = 0.0f;
+						next += 2;
 					}
-					if (next > 1.0f)
+					while (next >= 2)
 					{
-						next = 1.0f;
+						next -= 2;
 					}
-					if (next != current)
+					if (next != chorus_mode)
 					{
-						*target = next;
+						chorus_mode = next;
 						request_fx_detail_redraw = true;
 						fx_params_dirty = true;
+					}
+				}
+				else
+				{
+					const float steps[2]
+						= {(chorus_mode == 1) ? kChorusRateStep : kReverbWetStep,
+						   kChorusRateStep};
+					volatile float* targets[2]
+						= {(chorus_mode == 1) ? &chorus_wow : &fx_c_wet,
+						   (chorus_mode == 1) ? &tape_rate : &chorus_rate};
+					const int idx = fx_detail_param_index;
+					if (idx >= 0 && idx < 2)
+					{
+						const float step = steps[idx];
+						volatile float* target = targets[idx];
+						const float current = *target;
+						float next = current + (static_cast<float>(encoder_r_inc) * step);
+						if (next < 0.0f)
+						{
+							next = 0.0f;
+						}
+						if (next > 1.0f)
+						{
+							next = 1.0f;
+						}
+						if (next != current)
+						{
+							*target = next;
+							request_fx_detail_redraw = true;
+							fx_params_dirty = true;
+						}
 					}
 				}
 			}
