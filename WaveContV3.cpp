@@ -56,6 +56,9 @@ constexpr float kPi = 3.14159265f;
 constexpr float kTwoPi = 6.2831853f;
 constexpr int kDisplayW = 128;
 constexpr int kDisplayH = 64;
+constexpr int kPlayBpm = 120;
+constexpr int kPlayStepCount = 16;
+constexpr uint32_t kPlayStepMs = 60000U / (kPlayBpm * 4);
 constexpr uint32_t kPreviewReadBudgetMs = 2;
 constexpr size_t kPreviewBufferFrames = 4096;
 constexpr size_t kPreviewReadFrames = 256;
@@ -657,6 +660,10 @@ volatile bool record_waveform_pending = false;
 volatile int32_t encoder_r_accum = 0;
 volatile bool encoder_r_button_press = false;
 volatile bool request_length_redraw = false;
+static bool play_screen_dirty = true;
+static bool playhead_running = false;
+static int32_t playhead_step = 0;
+static uint32_t playhead_last_step_ms = 0;
 volatile bool request_playhead_redraw = false;
 volatile bool button1_press = false;
 volatile bool button2_press = false;
@@ -4177,6 +4184,281 @@ static float FltQFromFader(float value)
 	return q;
 }
 
+static constexpr int kPlayTinyW = 3;
+static constexpr int kPlayTinyH = 5;
+static constexpr int kPlayTinySpacing = 1;
+
+static void GetPlayTinyGlyph(char c, uint8_t out_rows[kPlayTinyH])
+{
+	for (int i = 0; i < kPlayTinyH; ++i)
+	{
+		out_rows[i] = 0;
+	}
+
+	auto set = [&](uint8_t r0, uint8_t r1, uint8_t r2, uint8_t r3, uint8_t r4)
+	{
+		out_rows[0] = r0;
+		out_rows[1] = r1;
+		out_rows[2] = r2;
+		out_rows[3] = r3;
+		out_rows[4] = r4;
+	};
+
+	switch (c)
+	{
+		case '0': set(0b111,0b101,0b101,0b101,0b111); return;
+		case '1': set(0b010,0b110,0b010,0b010,0b111); return;
+		case '2': set(0b111,0b001,0b111,0b100,0b111); return;
+		case '3': set(0b111,0b001,0b111,0b001,0b111); return;
+		case '4': set(0b101,0b101,0b111,0b001,0b001); return;
+		case '5': set(0b111,0b100,0b111,0b001,0b111); return;
+		case '6': set(0b111,0b100,0b111,0b101,0b111); return;
+		case '7': set(0b111,0b001,0b001,0b001,0b001); return;
+		case '8': set(0b111,0b101,0b111,0b101,0b111); return;
+		case '9': set(0b111,0b101,0b111,0b001,0b111); return;
+		case 'b': set(0b100,0b100,0b110,0b101,0b110); return;
+		case 'p': set(0b110,0b101,0b110,0b100,0b100); return;
+		case 'm': set(0b000,0b110,0b101,0b101,0b101); return;
+		case 'B': set(0b110,0b101,0b110,0b101,0b110); return;
+		case 'P': set(0b110,0b101,0b110,0b100,0b100); return;
+		case 'M': set(0b101,0b111,0b111,0b101,0b101); return;
+		case ' ': set(0b000,0b000,0b000,0b000,0b000); return;
+		default: break;
+	}
+}
+
+static void DrawPlayTinyChar(int x, int y, char c, bool on)
+{
+	uint8_t rows[kPlayTinyH] = {};
+	GetPlayTinyGlyph(c, rows);
+	for (int yy = 0; yy < kPlayTinyH; ++yy)
+	{
+		const uint8_t row = rows[yy];
+		for (int xx = 0; xx < kPlayTinyW; ++xx)
+		{
+			if ((row >> (kPlayTinyW - 1 - xx)) & 1)
+			{
+				const int px = x + xx;
+				const int py = y + yy;
+				if (px >= 0 && px < kDisplayW && py >= 0 && py < kDisplayH)
+				{
+					display.DrawPixel(px, py, on);
+				}
+			}
+		}
+	}
+}
+
+static void DrawPlayTinyText(int x, int y, const char* s, bool on)
+{
+	int cx = x;
+	for (const char* p = s; *p; ++p)
+	{
+		DrawPlayTinyChar(cx, y, *p, on);
+		cx += kPlayTinyW + kPlayTinySpacing;
+	}
+}
+
+static void DrawPlayScreen()
+{
+	if (!play_screen_dirty)
+	{
+		return;
+	}
+	play_screen_dirty = false;
+
+	display.Fill(false);
+
+	char label[12];
+	snprintf(label, sizeof(label), "%d bpM", kPlayBpm);
+	const int label_x = 1;
+	const int label_y = 2;
+	DrawPlayTinyText(label_x, label_y, label, true);
+
+	const int line_y2 = label_y + kPlayTinyH + 2;
+	if (line_y2 < kDisplayH)
+	{
+		display.DrawLine(0, line_y2, kDisplayW - 1, line_y2, true);
+	}
+	const int line_y3 = line_y2 - 1;
+	if (line_y3 >= 0 && line_y3 < kDisplayH)
+	{
+		display.DrawLine(0, line_y3, kDisplayW - 1, line_y3, true);
+	}
+
+	const int label_box_w = kPlayTinyW + 3;
+	const int divider_w = 2;
+	const int sequencer_x = label_box_w + divider_w;
+	const int sequencer_w = kDisplayW - sequencer_x;
+	if (line_y3 + 1 < kDisplayH && label_box_w < kDisplayW)
+	{
+		int x0 = label_box_w;
+		int x1 = label_box_w + divider_w - 1;
+		if (x1 >= kDisplayW)
+		{
+			x1 = kDisplayW - 1;
+		}
+		if (x0 <= x1)
+		{
+			display.DrawRect(x0, line_y3 + 1, x1, kDisplayH - 1, true, true);
+		}
+	}
+
+	const int sections_start_y = line_y2 + 1;
+	if (sections_start_y < kDisplayH)
+	{
+		const int sections_h = kDisplayH - sections_start_y;
+		const int section_h = sections_h / 4;
+		if (section_h > 0)
+		{
+			int section_lines[3] = {-1, -1, -1};
+			for (int i = 0; i < 4; ++i)
+			{
+				const int y = sections_start_y + i * section_h + (section_h - kPlayTinyH) / 2;
+				if (y >= sections_start_y && (y + kPlayTinyH) <= kDisplayH)
+				{
+					char label_num[2] = {static_cast<char>('1' + i), '\0'};
+					DrawPlayTinyText(2, y, label_num, true);
+				}
+			}
+			for (int i = 1; i < 4; ++i)
+			{
+				const int y = sections_start_y + i * section_h - 1;
+				section_lines[i - 1] = y;
+				if (y >= sections_start_y && y < kDisplayH)
+				{
+					display.DrawLine(0, y, kDisplayW - 1, y, true);
+				}
+			}
+
+			for (int i = 0; i < 4; ++i)
+			{
+				const int y = sections_start_y + i * section_h + (section_h / 2);
+				if (y < sections_start_y || y >= kDisplayH)
+				{
+					continue;
+				}
+				for (int px = sequencer_x; px < kDisplayW; px += 2)
+				{
+					display.DrawPixel(px, y, true);
+				}
+			}
+
+			if (sequencer_w > 0)
+			{
+				const int bottom_line_y = sections_start_y + 4 * section_h - 1;
+				if (bottom_line_y >= sections_start_y && bottom_line_y < kDisplayH)
+				{
+					display.DrawLine(0, bottom_line_y, kDisplayW - 1, bottom_line_y, true);
+				}
+				const int bottom_line_y2 = bottom_line_y + 1;
+				if (bottom_line_y2 >= sections_start_y && bottom_line_y2 < kDisplayH)
+				{
+					display.DrawLine(0, bottom_line_y2, kDisplayW - 1, bottom_line_y2, true);
+				}
+				display.DrawLine(0, kDisplayH - 1, kDisplayW - 1, kDisplayH - 1, true);
+
+				for (int step = 1; step < kPlayStepCount; ++step)
+				{
+					const int x = sequencer_x + (step * sequencer_w) / kPlayStepCount;
+					if (x <= sequencer_x || x >= kDisplayW)
+					{
+						continue;
+					}
+					int hash_lines[5] = {line_y2,
+										 section_lines[0],
+										 section_lines[1],
+										 section_lines[2],
+										 bottom_line_y};
+					for (int i = 0; i < 5; ++i)
+					{
+						const int y = hash_lines[i];
+						if (y < 0 || y >= kDisplayH)
+						{
+							continue;
+						}
+						int y0 = y - 1;
+						int h = 3;
+						if (y0 < 0)
+						{
+							h += y0;
+							y0 = 0;
+						}
+						if (y0 + h > kDisplayH)
+						{
+							h = kDisplayH - y0;
+						}
+						if (h > 0)
+						{
+							display.DrawRect(x, y0, x, y0 + h - 1, true, true);
+						}
+					}
+				}
+				if (playhead_running)
+				{
+					int step = playhead_step;
+					if (step < 0)
+					{
+						step = 0;
+					}
+					if (step >= kPlayStepCount)
+					{
+						step = kPlayStepCount - 1;
+					}
+					const int step_left = sequencer_x + (step * sequencer_w) / kPlayStepCount;
+					const int step_right = sequencer_x + ((step + 1) * sequencer_w) / kPlayStepCount;
+					int step_x = (step_left + step_right) / 2;
+					if (step_x < sequencer_x)
+					{
+						step_x = sequencer_x;
+					}
+					if (step_x >= kDisplayW)
+					{
+						step_x = kDisplayW - 1;
+					}
+
+					auto draw_px = [&](int px, int py)
+					{
+						if (px >= 0 && px < kDisplayW && py >= 0 && py < kDisplayH)
+						{
+							display.DrawPixel(px, py, true);
+						}
+					};
+
+					auto draw_line_triangle = [&](int cx, int line_y, int dir)
+					{
+						if (line_y < 0 || line_y >= kDisplayH)
+						{
+							return;
+						}
+						const int y1 = line_y + dir;
+						const int y2 = line_y + (dir * 2);
+						for (int dx = -2; dx <= 2; ++dx)
+						{
+							draw_px(cx + dx, line_y);
+						}
+						for (int dx = -1; dx <= 1; ++dx)
+						{
+							draw_px(cx + dx, y1);
+						}
+						draw_px(cx, y2);
+					};
+
+					for (int i = 0; i < 4; ++i)
+					{
+						const int top_line = (i == 0) ? line_y2 : section_lines[i - 1];
+						const int bottom_line = (i == 3) ? bottom_line_y : section_lines[i];
+						draw_line_triangle(step_x, top_line, 1);
+						draw_line_triangle(step_x, bottom_line, -1);
+					}
+				}
+			}
+		}
+	}
+
+	display.Update();
+}
+
 static void DrawWaveform()
 {
 	if(!sample_loaded || sample_length == 0)
@@ -6960,15 +7242,59 @@ int main(void)
 			request_shift_redraw = true;
 		}
 	}
-	if (button1_press && sample_loaded && ui_mode != UiMode::Load && ui_mode != UiMode::LoadTarget)
+	if (button1_press)
 	{
 		button1_press = false;
-		if (UiLogEnabled())
+		if (!ui_blocked && ui_mode == UiMode::Play)
 		{
-			LogLine("Button1: playback request (unpitched)");
+			if (!playhead_running)
+			{
+				playhead_running = true;
+				playhead_step = 0;
+				playhead_last_step_ms = System::GetNow();
+				play_screen_dirty = true;
+				request_playhead_redraw = true;
+			}
+			else
+			{
+				playhead_running = false;
+				playhead_last_step_ms = 0;
+				play_screen_dirty = true;
+				request_playhead_redraw = true;
+			}
 		}
-		StartPlayback(kBaseMidiNote, false);
-		request_playhead_redraw = true;
+	else if (ui_mode != UiMode::Play
+				 && sample_loaded
+				 && ui_mode != UiMode::Load
+				 && ui_mode != UiMode::LoadTarget)
+		{
+			if (UiLogEnabled())
+			{
+				LogLine("Button1: playback request (unpitched)");
+			}
+			StartPlayback(kBaseMidiNote, false);
+			request_playhead_redraw = true;
+		}
+	}
+	if (!ui_blocked && ui_mode == UiMode::Play && playhead_running)
+	{
+		const uint32_t now = System::GetNow();
+		if (playhead_last_step_ms == 0)
+		{
+			playhead_last_step_ms = now;
+		}
+		if (kPlayStepMs > 0)
+		{
+			const uint32_t elapsed = now - playhead_last_step_ms;
+			if (elapsed >= kPlayStepMs)
+			{
+				const uint32_t steps = elapsed / kPlayStepMs;
+				playhead_last_step_ms += steps * kPlayStepMs;
+				playhead_step = (playhead_step + static_cast<int32_t>(steps)) % kPlayStepCount;
+				play_screen_dirty = true;
+				request_playhead_redraw = true;
+			}
+		}
 	}
 		if (request_load_scan)
 		{
@@ -7256,7 +7582,8 @@ int main(void)
 			}
 			else if (ui_mode == UiMode::Play)
 			{
-				DrawWaveform();
+				play_screen_dirty = true;
+				DrawPlayScreen();
 			}
 		}
 		if (!ui_blocked && request_shift_redraw && ui_mode == UiMode::Shift)
@@ -7269,6 +7596,13 @@ int main(void)
 		const UiMode mode = ui_mode;
 		if (mode != last_mode)
 		{
+			if (last_mode == UiMode::Play && mode != UiMode::Play)
+			{
+				playhead_running = false;
+				playhead_step = 0;
+				playhead_last_step_ms = 0;
+				play_screen_dirty = true;
+			}
 			if (mode == UiMode::Record)
 			{
 				record_anim_start_ms = NowMs();
@@ -7308,7 +7642,8 @@ int main(void)
 			}
 			else if (mode == UiMode::Play)
 			{
-				DrawWaveform();
+				play_screen_dirty = true;
+				DrawPlayScreen();
 			}
 			else if (mode == UiMode::Edt)
 			{
@@ -7570,7 +7905,7 @@ int main(void)
 			{
 				if (mode == UiMode::Play)
 				{
-					DrawWaveform();
+					DrawPlayScreen();
 				}
 				else if (mode == UiMode::Edt)
 				{
@@ -7594,25 +7929,41 @@ int main(void)
 						static_cast<double>(playback_phase));
 			}
 		}
-		if ((ui_mode == UiMode::Record && record_state == RecordState::Review)
-			|| (ui_mode == UiMode::Load && !delete_mode)
-			|| (ui_mode == UiMode::Perform && sample_loaded)
-			|| (ui_mode == UiMode::FxDetail && sample_loaded))
-		{
-			led1_phase_ms += 10.0f;
-			if (led1_phase_ms >= kLedBlinkPeriodMs)
-			{
-				led1_phase_ms -= kLedBlinkPeriodMs;
-			}
-			const float on_time = kLedBlinkDuty * kLedBlinkPeriodMs;
-			led1_level = (led1_phase_ms < on_time) ? 1.0f : 0.0f;
-		}
-		else
+		if (ui_mode == UiMode::Play)
 		{
 			led1_phase_ms = 0.0f;
 			led1_level = 0.0f;
+			if (playhead_running)
+			{
+				hw.led1.Set(1.0f, 0.0f, 0.0f);
+			}
+			else
+			{
+				hw.led1.Set(0.0f, 1.0f, 0.0f);
+			}
 		}
-		hw.led1.Set(0.0f, led1_level, 0.0f);
+		else
+		{
+			if ((ui_mode == UiMode::Record && record_state == RecordState::Review)
+				|| (ui_mode == UiMode::Load && !delete_mode)
+				|| (ui_mode == UiMode::Perform && sample_loaded)
+				|| (ui_mode == UiMode::FxDetail && sample_loaded))
+			{
+				led1_phase_ms += 10.0f;
+				if (led1_phase_ms >= kLedBlinkPeriodMs)
+				{
+					led1_phase_ms -= kLedBlinkPeriodMs;
+				}
+				const float on_time = kLedBlinkDuty * kLedBlinkPeriodMs;
+				led1_level = (led1_phase_ms < on_time) ? 1.0f : 0.0f;
+			}
+			else
+			{
+				led1_phase_ms = 0.0f;
+				led1_level = 0.0f;
+			}
+			hw.led1.Set(0.0f, led1_level, 0.0f);
+		}
 		hw.UpdateLeds();
 		hw.DelayMs(10);
 	}
