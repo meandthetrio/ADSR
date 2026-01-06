@@ -691,9 +691,10 @@ volatile float reverb_damp = kReverbDampDefault;
 volatile float reverb_decay = kReverbDecayDefault;
 volatile float reverb_shimmer = 0.0f;
 volatile float delay_wet = kDelayDefaultWet;
-	volatile float fx_s_wet = 0.0f;
-	volatile float sat_tape_bump = 0.0f;
-	volatile float sat_bit_smpl = 0.0f;
+volatile float fx_s_wet = 0.0f;
+volatile float sat_tape_bump = 0.0f;
+volatile float sat_bit_reso = 0.0f;
+volatile float sat_bit_smpl = 0.0f;
 volatile float fx_c_wet = 0.0f;
 volatile float chorus_rate = 0.0f;
 volatile int32_t sat_mode = 0;
@@ -4682,6 +4683,16 @@ static void DrawFxDetailScreen(int32_t index)
 		const int box_h = (block_h - kGap) / 2;
 		const bool tape_selected = (sat_mode == 0);
 		const bool bit_selected = (sat_mode == 1);
+		const bool mode_select_active = (fx_detail_param_index == 2);
+		if (mode_select_active)
+		{
+			display.DrawRect(block_x - 1,
+							 block_y - 1,
+							 block_x + block_w,
+							 block_y + block_h,
+							 true,
+							 false);
+		}
 		display.DrawRect(block_x,
 						 block_y,
 						 block_x + block_w - 1,
@@ -4720,10 +4731,11 @@ static void DrawFxDetailScreen(int32_t index)
 				= {(sat_mode == 1) ? "RESO" : "SAT",
 				   (sat_mode == 1) ? "SMPL" : "BUMP"};
 			const float fader_values[2]
-				= {fx_s_wet, (sat_mode == 1) ? sat_bit_smpl : sat_tape_bump};
+				= {(sat_mode == 1) ? sat_bit_reso : fx_s_wet,
+				   (sat_mode == 1) ? sat_bit_smpl : sat_tape_bump};
 			int param_index = fx_detail_param_index;
 			const bool fader_select_active = (param_index >= 0 && param_index < 2);
-			if (!fader_select_active)
+			if (!fader_select_active && !mode_select_active)
 			{
 				param_index = 0;
 			}
@@ -4772,7 +4784,7 @@ static void DrawFxDetailScreen(int32_t index)
 					}
 					line_x = label_x + (label_w / 2);
 
-					const int cur_idx = BitResoIndexFromValue(fx_s_wet);
+					const int cur_idx = BitResoIndexFromValue(sat_bit_reso);
 					const int label_top = line_top + 1;
 					const int label_gap = 3;
 					int label_y0 = label_top;
@@ -5913,6 +5925,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				{
 					fx_s_wet = 0.0f;
 					sat_tape_bump = 0.0f;
+					sat_bit_reso = 0.0f;
 					sat_bit_smpl = 0.0f;
 					sat_mode = 0;
 					sat_params_initialized = true;
@@ -6049,15 +6062,9 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	{
 		if (fx_detail_index == kFxSatIndex)
 		{
-			if (encoder_r_pressed)
-			{
-				sat_mode = (sat_mode == 0) ? 1 : 0;
-				request_fx_detail_redraw = true;
-				fx_params_dirty = true;
-			}
 			if (encoder_l_inc != 0)
 			{
-				const int32_t param_count = 2;
+				const int32_t param_count = 3;
 				int32_t next = fx_detail_param_index + encoder_l_inc;
 				while (next < 0)
 				{
@@ -6077,8 +6084,15 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			{
 				const float steps[2] = {kReverbWetStep, kReverbWetStep};
 				volatile float* targets[2]
-					= {&fx_s_wet, (sat_mode == 1) ? &sat_bit_smpl : &sat_tape_bump};
+					= {(sat_mode == 1) ? &sat_bit_reso : &fx_s_wet,
+					   (sat_mode == 1) ? &sat_bit_smpl : &sat_tape_bump};
 				const int idx = fx_detail_param_index;
+				if (idx == 2)
+				{
+					sat_mode = (sat_mode == 0) ? 1 : 0;
+					request_fx_detail_redraw = true;
+					fx_params_dirty = true;
+				}
 				if (idx >= 0 && idx < 2)
 				{
 					volatile float* target = targets[idx];
@@ -6337,6 +6351,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	static float cached_sat_depth = 0.0f;
 	static float cached_sat_bump = 0.0f;
 	static float cached_sat_smpl = 0.0f;
+	static float cached_sat_reso = 0.0f;
 	static int32_t cached_sat_mode = 0;
 	static float cached_chorus_depth = 0.0f;
 	static float cached_chorus_rate = 0.0f;
@@ -6371,6 +6386,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		cached_sat_depth = fx_s_wet;
 		cached_sat_bump = sat_tape_bump;
 		cached_sat_smpl = sat_bit_smpl;
+		cached_sat_reso = sat_bit_reso;
 		cached_sat_mode = sat_mode;
 		cached_chorus_depth = fx_c_wet;
 		cached_chorus_rate = chorus_rate;
@@ -6390,6 +6406,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		if (cached_sat_bump > 1.0f) cached_sat_bump = 1.0f;
 		if (cached_sat_smpl < 0.0f) cached_sat_smpl = 0.0f;
 		if (cached_sat_smpl > 1.0f) cached_sat_smpl = 1.0f;
+		if (cached_sat_reso < 0.0f) cached_sat_reso = 0.0f;
+		if (cached_sat_reso > 1.0f) cached_sat_reso = 1.0f;
 		if (cached_chorus_depth < 0.0f) cached_chorus_depth = 0.0f;
 		if (cached_chorus_depth > 1.0f) cached_chorus_depth = 1.0f;
 		if (cached_chorus_rate < 0.0f) cached_chorus_rate = 0.0f;
@@ -6972,7 +6990,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			sig_r += monitor_r;
 		}
 		const int32_t sat_mode_local = cached_sat_mode;
-		const float bit_reso = cached_sat_depth;
+		const float bit_reso = cached_sat_reso;
 		const float bit_smpl = cached_sat_smpl;
 		if (sat_mode_local == 0)
 		{
