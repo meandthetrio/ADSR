@@ -7,6 +7,10 @@ Cuz revamped "CHORUS" section and changed it to Modulation section since added a
 - It seems like if modulation is active and switch to TAPE - CHORUS settings remain and both can be used.
 - If Tape settings are set first, and switch to CHORUS, Chorus seems like the only active effect. (not sure if we should fix this or just leave it)
 
+Revamped SATURATION setting
+- Tape = SAT and BUMP. Sat is Edge's original setting and BUMP mimics a transformer being pushed at the output stage.
+- BIT = RESOULTION and SAMPLERATE. RESO has three different bit modes called CRUSH, STATIC, and HISS for more/less subtle changes.
+
 ### 1/5/25 2:57pm
 Cuz revamped entire Reverb Algo
 - Added SHM - octave up feedback loop
