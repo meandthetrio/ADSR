@@ -1,10 +1,19 @@
+### 1/6/25 10:57am
+Cuz revamped "CHORUS" section and changed it to Modulation section since added a TAPE setting.
+- Modulation section = CHORUS and TAPE
+- CHORUS = DEPTH & SPEED
+- TAPE = DROPOUTS & RATE
+- encoder_r toggles between the two settings
+- It seems like if modulation is active and switch to TAPE - CHORUS settings remain and both can be used.
+- If Tape settings are set first, and switch to CHORUS, Chorus seems like the only active effect. (not sure if we should fix this or just leave it)
+
 ### 1/5/25 2:57pm
 Cuz revamped entire Reverb Algo
 - Added SHM - octave up feedback loop
 - WET - goes 100% wet at 100% fader
 - DCY - Infinite Freeze at 100%
 - DMP - Max HIGHs at 0% - massive HIGH cut on a quick sweep when fader increases.
-- PRE - At 0% PRE fader is bypassed, 100% should be 1000m delay (1sec) - at that logic 50% on fader should be 500ms.
+- \\PRE - At 0% PRE fader is bypassed, 100% should be 1000m delay (1sec) - at that logic 50% on fader should be 500ms.
 
 *****
 - Edited Drawfader section to give it "mixer" style
