@@ -77,9 +77,11 @@ EDT WINDOW
 - Encoder L adjusts start; Encoder R adjusts end. Hold SHIFT for fine steps.
 - Shows a vertical playhead line while the sample is playing.
 
-PLAY WAVEFORM
-- Shows loaded sample waveform with trim brackets and title (sample name).
-- If baked performance is active, shows baked view with attack/release lines.
+PLAY SEQUENCER
+- Tiny BPM label at top left ("120 bpM") with a double horizontal divider underneath.
+- Left column shows track numbers 1-4 with a vertical divider.
+- Four horizontal sections with dotted midlines and 16-step vertical hash marks across the sequencer area.
+- When running, a 16-step playhead draws small triangles on the solid track lines, pointing toward each dotted midline; Button 1 toggles run, LED1 green idle/red running, leaving PLAY stops it.
 
 NO SAMPLE LOADED
 - Message: NO SAMPLE LOADED / PLEASE LOAD A / SAMPLE FROM / THE MAIN MENU.
