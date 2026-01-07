@@ -28,12 +28,15 @@ constexpr int32_t kPerformEdtIndex = 0;
 constexpr int32_t kPerformFaderCount = 4;
 constexpr int32_t kFxSatIndex = 0;
 constexpr int32_t kFxChorusIndex = 1;
+constexpr int32_t kFxDelayIndex = 2;
 constexpr int32_t kFxReverbIndex = 3;
 constexpr int32_t kReverbFaderCount = 5;
 constexpr int32_t kPerformFltFaderCount = 2;
 constexpr int32_t kPerformAmpIndex = 1;
 constexpr int32_t kPerformFltIndex = 2;
 constexpr int32_t kPerformFxIndex = 3;
+constexpr uint32_t kFxChainIdleMs = 300;
+constexpr float kFxChainFadeMs = 20.0f;
 constexpr uint32_t kSdInitMinMs = 800;
 constexpr uint32_t kSdInitRetryMs = 300;
 constexpr uint32_t kSdInitResultMs = 1500;
@@ -543,6 +546,11 @@ volatile int32_t perform_index = 0;
 volatile int32_t amp_fader_index = 0;
 volatile int32_t flt_fader_index = 0;
 volatile int32_t fx_fader_index = 0;
+volatile int32_t fx_chain_order[kPerformFaderCount]
+	= {kFxSatIndex, kFxChorusIndex, kFxDelayIndex, kFxReverbIndex};
+volatile bool fx_window_active = false;
+volatile bool amp_window_active = false;
+volatile bool flt_window_active = false;
 volatile UiMode shift_prev_mode = UiMode::Main;
 volatile RecordInput record_input = RecordInput::LineIn;
 volatile int32_t load_selected = 0;
@@ -745,9 +753,6 @@ static uint8_t record_bold_mask[kDisplayH][kDisplayW];
 static bool request_shift_redraw = false;
 static bool request_perform_redraw = false;
 static bool request_fx_detail_redraw = false;
-static bool fx_shift_active_prev = false;
-static bool amp_shift_active_prev = false;
-static bool flt_shift_active_prev = false;
 static float pv_window_long[kPvLongSize];
 static float pv_window_short[kPvShortSize];
 static float pv_fft_re[kPvLongSize];
@@ -2983,6 +2988,54 @@ static int TinyStringWidth(const char* str)
 	return count * char_w - 1;
 }
 
+static const char* FxShortLabel(int32_t fx_index)
+{
+	switch (fx_index)
+	{
+		case kFxSatIndex: return "S";
+		case kFxChorusIndex: return "M";
+		case kFxDelayIndex: return "D";
+		case kFxReverbIndex: return "R";
+		default: return "?";
+	}
+}
+
+static float FxWetValue(int32_t fx_index)
+{
+	switch (fx_index)
+	{
+		case kFxSatIndex: return fx_s_wet;
+		case kFxChorusIndex: return fx_c_wet;
+		case kFxDelayIndex: return delay_wet;
+		case kFxReverbIndex: return reverb_wet;
+		default: return 0.0f;
+	}
+}
+
+static float FxWetStep(int32_t fx_index)
+{
+	switch (fx_index)
+	{
+		case kFxReverbIndex: return kReverbWetStep;
+		case kFxSatIndex:
+		case kFxChorusIndex:
+		case kFxDelayIndex:
+		default: return kDelayWetStep;
+	}
+}
+
+static volatile float* FxWetTarget(int32_t fx_index)
+{
+	switch (fx_index)
+	{
+		case kFxSatIndex: return &fx_s_wet;
+		case kFxChorusIndex: return &fx_c_wet;
+		case kFxDelayIndex: return &delay_wet;
+		case kFxReverbIndex: return &reverb_wet;
+		default: return &fx_s_wet;
+	}
+}
+
 static void DrawPerformScreen(int32_t selected,
 							  bool fx_select_active,
 							  int32_t fx_selected,
@@ -3230,8 +3283,21 @@ static void DrawPerformScreen(int32_t selected,
 		}
 		if (i == kPerformFxIndex)
 		{
-			const char* labels[kPerformFaderCount] = {"S", "M", "D", "R"};
-			const float values[kPerformFaderCount] = {fx_s_wet, fx_c_wet, delay_wet, reverb_wet};
+			int32_t order[kPerformFaderCount];
+			for (int f = 0; f < kPerformFaderCount; ++f)
+			{
+				order[f] = fx_chain_order[f];
+			}
+			const char* labels[kPerformFaderCount] =
+				{FxShortLabel(order[0]),
+				 FxShortLabel(order[1]),
+				 FxShortLabel(order[2]),
+				 FxShortLabel(order[3])};
+			const float values[kPerformFaderCount] =
+				{FxWetValue(order[0]),
+				 FxWetValue(order[1]),
+				 FxWetValue(order[2]),
+				 FxWetValue(order[3])};
 			draw_faders(box,
 						is_selected,
 						labels,
@@ -5396,7 +5462,6 @@ static void StartPlayback(uint8_t note, bool apply_pitch)
 				static_cast<double>(playback_rate),
 				static_cast<int>(apply_pitch));
 	}
-	request_playhead_redraw = true;
 }
 
 static void StopPlayback(uint8_t note)
@@ -5652,45 +5717,26 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	{
 		encoder_r_button_press = true;
 	}
+	static float fx_chain_fade_gain = 1.0f;
+	static float fx_chain_fade_target = 1.0f;
+	static int32_t fx_chain_fade_samples_left = 0;
+	static bool fx_chain_pause_pending = false;
+	static bool fx_chain_paused = false;
+	static uint32_t fx_chain_last_move_ms = 0;
+	const float out_sr = hw.AudioSampleRate();
+	const uint32_t now_ms = System::GetNow();
 	const bool ui_blocked = (sd_init_in_progress || save_in_progress || bake_in_progress);
 	shift_button.Debounce();
 	const bool shift_pressed = shift_button.Pressed();
-	const bool fx_shift_active = (ui_mode == UiMode::Perform
-		&& perform_index == kPerformFxIndex
-		&& shift_pressed);
-	const bool amp_shift_active = (ui_mode == UiMode::Perform
-		&& perform_index == kPerformAmpIndex
-		&& shift_pressed);
-	const bool flt_shift_active = (ui_mode == UiMode::Perform
-		&& perform_index == kPerformFltIndex
-		&& shift_pressed);
-	if (fx_shift_active && !fx_shift_active_prev)
+	if (ui_mode != UiMode::Perform && ui_mode != UiMode::FxDetail)
 	{
-		request_perform_redraw = true;
+		fx_window_active = false;
 	}
-	if (!fx_shift_active && fx_shift_active_prev)
+	if (ui_mode != UiMode::Perform)
 	{
-		request_perform_redraw = true;
+		amp_window_active = false;
+		flt_window_active = false;
 	}
-	fx_shift_active_prev = fx_shift_active;
-	if (amp_shift_active && !amp_shift_active_prev)
-	{
-		request_perform_redraw = true;
-	}
-	if (!amp_shift_active && amp_shift_active_prev)
-	{
-		request_perform_redraw = true;
-	}
-	amp_shift_active_prev = amp_shift_active;
-	if (flt_shift_active && !flt_shift_active_prev)
-	{
-		request_perform_redraw = true;
-	}
-	if (!flt_shift_active && flt_shift_active_prev)
-	{
-		request_perform_redraw = true;
-	}
-	flt_shift_active_prev = flt_shift_active;
 	if (hw.button1.RisingEdge())
 	{
 		button1_press = true;
@@ -6119,9 +6165,13 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	}
 	else if (!ui_blocked && ui_mode == UiMode::Perform)
 	{
+		const bool fx_select_active = (perform_index == kPerformFxIndex && fx_window_active);
+		const bool amp_select_active = (perform_index == kPerformAmpIndex && amp_window_active);
+		const bool flt_select_active = (perform_index == kPerformFltIndex && flt_window_active);
+		const bool fx_reorder_active = fx_select_active && shift_pressed;
 		if (encoder_l_inc != 0)
 		{
-			if (fx_shift_active)
+			if (fx_select_active)
 			{
 				int32_t next = fx_fader_index + encoder_l_inc;
 				while (next < 0)
@@ -6138,7 +6188,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 					request_perform_redraw = true;
 				}
 			}
-			else if (amp_shift_active)
+			else if (amp_select_active)
 			{
 				int32_t next = amp_fader_index + encoder_l_inc;
 				while (next < 0)
@@ -6155,7 +6205,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 					request_perform_redraw = true;
 				}
 			}
-			else if (flt_shift_active)
+			else if (flt_select_active)
 			{
 				int32_t next = flt_fader_index + encoder_l_inc;
 				while (next < 0)
@@ -6186,72 +6236,133 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				perform_index = next;
 			}
 		}
-		if (!fx_shift_active && !amp_shift_active && !flt_shift_active
-			&& encoder_r_pressed && perform_index == kPerformEdtIndex)
+		if (encoder_r_pressed)
 		{
-			ui_mode = UiMode::Edt;
-			if (sample_loaded && sample_length > 0)
+			if (perform_index == kPerformFxIndex)
 			{
-				waveform_ready = true;
+				if (!fx_window_active)
+				{
+					fx_window_active = true;
+					amp_window_active = false;
+					flt_window_active = false;
+					request_perform_redraw = true;
+				}
+				else
+				{
+					fx_detail_index = fx_chain_order[fx_fader_index];
+					fx_detail_param_index = 0;
+					if (fx_detail_index == kFxSatIndex)
+					{
+						if (!sat_params_initialized)
+						{
+							fx_s_wet = 0.0f;
+							sat_tape_bump = 0.0f;
+							sat_bit_reso = 0.0f;
+							sat_bit_smpl = 0.0f;
+							sat_mode = 0;
+							sat_params_initialized = true;
+							fx_params_dirty = true;
+						}
+					}
+					else if (fx_detail_index == kFxReverbIndex)
+					{
+						if (!reverb_params_initialized)
+						{
+							reverb_pre = 0.0f;
+							reverb_damp = 0.0f;
+							reverb_decay = 0.0f;
+							reverb_wet = 0.0f;
+							reverb_shimmer = 0.0f;
+							reverb_params_initialized = true;
+							fx_params_dirty = true;
+						}
+					}
+					else if (fx_detail_index == kFxChorusIndex)
+					{
+						if (!mod_params_initialized)
+						{
+							fx_c_wet = 0.0f;
+							chorus_rate = 0.0f;
+							chorus_wow = 0.0f;
+							tape_rate = 0.0f;
+							chorus_mode = 0;
+							mod_params_initialized = true;
+							fx_params_dirty = true;
+						}
+					}
+					ui_mode = UiMode::FxDetail;
+					request_fx_detail_redraw = true;
+				}
 			}
-			waveform_dirty = true;
-			request_length_redraw = true;
+			else if (perform_index == kPerformAmpIndex)
+			{
+				if (!amp_window_active)
+				{
+					amp_window_active = true;
+					fx_window_active = false;
+					flt_window_active = false;
+					request_perform_redraw = true;
+				}
+			}
+			else if (perform_index == kPerformFltIndex)
+			{
+				if (!flt_window_active)
+				{
+					flt_window_active = true;
+					fx_window_active = false;
+					amp_window_active = false;
+					request_perform_redraw = true;
+				}
+			}
+			else if (!fx_select_active && !amp_select_active && !flt_select_active
+				&& perform_index == kPerformEdtIndex)
+			{
+				ui_mode = UiMode::Edt;
+				if (sample_loaded && sample_length > 0)
+				{
+					waveform_ready = true;
+				}
+				waveform_dirty = true;
+				request_length_redraw = true;
+			}
 		}
-		if (fx_shift_active && encoder_r_pressed)
+		if (fx_reorder_active && encoder_r_inc != 0)
 		{
-			fx_detail_index = fx_fader_index;
-			fx_detail_param_index = 0;
-			if (fx_detail_index == kFxSatIndex)
+			const int32_t dir = (encoder_r_inc > 0) ? 1 : -1;
+			int32_t steps = (encoder_r_inc > 0) ? encoder_r_inc : -encoder_r_inc;
+			for (int32_t s = 0; s < steps; ++s)
 			{
-				if (!sat_params_initialized)
+				const int32_t from = fx_fader_index;
+				int32_t to = from + dir;
+				if (to < 0)
 				{
-					fx_s_wet = 0.0f;
-					sat_tape_bump = 0.0f;
-					sat_bit_reso = 0.0f;
-					sat_bit_smpl = 0.0f;
-					sat_mode = 0;
-					sat_params_initialized = true;
-					fx_params_dirty = true;
+					to = kPerformFaderCount - 1;
 				}
+				else if (to >= kPerformFaderCount)
+				{
+					to = 0;
+				}
+				const int32_t temp = fx_chain_order[from];
+				fx_chain_order[from] = fx_chain_order[to];
+				fx_chain_order[to] = temp;
+				fx_fader_index = to;
 			}
-			else if (fx_detail_index == kFxReverbIndex)
+			request_perform_redraw = true;
+			fx_chain_last_move_ms = now_ms;
+			if (!fx_chain_paused)
 			{
-				if (!reverb_params_initialized)
-				{
-					reverb_pre = 0.0f;
-					reverb_damp = 0.0f;
-					reverb_decay = 0.0f;
-					reverb_wet = 0.0f;
-					reverb_shimmer = 0.0f;
-					reverb_params_initialized = true;
-					fx_params_dirty = true;
-				}
+				const int32_t fade_samples
+					= static_cast<int32_t>((out_sr * (kFxChainFadeMs * 0.001f)) + 0.5f);
+				fx_chain_fade_target = 0.0f;
+				fx_chain_fade_samples_left = (fade_samples > 0) ? fade_samples : 1;
+				fx_chain_pause_pending = true;
 			}
-			else if (fx_detail_index == kFxChorusIndex)
-			{
-				if (!mod_params_initialized)
-				{
-					fx_c_wet = 0.0f;
-					chorus_rate = 0.0f;
-					chorus_wow = 0.0f;
-					tape_rate = 0.0f;
-					chorus_mode = 0;
-					mod_params_initialized = true;
-					fx_params_dirty = true;
-				}
-			}
-			ui_mode = UiMode::FxDetail;
-			request_fx_detail_redraw = true;
 		}
-		if (fx_shift_active && encoder_r_inc != 0)
+		else if (fx_select_active && encoder_r_inc != 0)
 		{
-			const float* steps[kPerformFaderCount]
-				= {&kDelayWetStep, &kDelayWetStep, &kDelayWetStep, &kReverbWetStep};
-			volatile float* targets[kPerformFaderCount]
-				= {&fx_s_wet, &fx_c_wet, &delay_wet, &reverb_wet};
-			const int idx = fx_fader_index;
-			const float step = *steps[idx];
-			volatile float* target = targets[idx];
+			const int32_t fx_id = fx_chain_order[fx_fader_index];
+			const float step = FxWetStep(fx_id);
+			volatile float* target = FxWetTarget(fx_id);
 			const float current = *target;
 			float next = current + (static_cast<float>(encoder_r_inc) * step);
 			if (next < 0.0f)
@@ -6269,7 +6380,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				fx_params_dirty = true;
 			}
 		}
-		else if (amp_shift_active && encoder_r_inc != 0)
+		else if (amp_select_active && encoder_r_inc != 0)
 		{
 			const float step = kAmpEnvStep;
 			volatile float* targets[kPerformFaderCount]
@@ -6292,7 +6403,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				request_perform_redraw = true;
 			}
 		}
-		else if (flt_shift_active && encoder_r_inc != 0)
+		else if (flt_select_active && encoder_r_inc != 0)
 		{
 			const float step = kFltParamStep;
 			volatile float* targets[kPerformFltFaderCount] = {&flt_cutoff, &flt_res};
@@ -6316,7 +6427,17 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		}
 		if (encoder_l_pressed)
 		{
-			ui_mode = UiMode::Main;
+			if (fx_select_active || amp_select_active || flt_select_active)
+			{
+				fx_window_active = false;
+				amp_window_active = false;
+				flt_window_active = false;
+				request_perform_redraw = true;
+			}
+			else
+			{
+				ui_mode = UiMode::Main;
+			}
 		}
 	}
 	else if (!ui_blocked && ui_mode == UiMode::Edt)
@@ -6589,6 +6710,20 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		}
 	}
 
+	if (fx_chain_paused)
+	{
+		if (fx_chain_last_move_ms != 0
+			&& (now_ms - fx_chain_last_move_ms) >= kFxChainIdleMs)
+		{
+			const int32_t fade_samples
+				= static_cast<int32_t>((out_sr * (kFxChainFadeMs * 0.001f)) + 0.5f);
+			fx_chain_paused = false;
+			fx_chain_fade_target = 1.0f;
+			fx_chain_fade_samples_left = (fade_samples > 0) ? fade_samples : 1;
+			fx_chain_fade_gain = 0.0f;
+		}
+	}
+
 	if (record_state == RecordState::Countdown)
 	{
 		if ((System::GetNow() - record_countdown_start_ms) >= kRecordCountdownMs)
@@ -6659,7 +6794,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	static float last_rev_feedback = -1.0f;
 	static float last_rev_lp = -1.0f;
 	static float last_rev_predelay = -1.0f;
-	const float out_sr = hw.AudioSampleRate();
 
 	if (fx_params_dirty)
 	{
@@ -6833,7 +6967,12 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	static int bit_hold = 0;
 	static float bit_hold_l = 0.0f;
 	static float bit_hold_r = 0.0f;
+	static float reverb_tail_gain = 0.0f;
 
+	const int32_t sat_mode_local = cached_sat_mode;
+	const float bit_reso = cached_sat_reso;
+	const float bit_smpl = cached_sat_smpl;
+	const int32_t chorus_mode_local = cached_chorus_mode;
 	const float chorus_depth = cached_chorus_depth;
 	const float delay_mix = cached_delay_wet;
 	const float rev_shimmer = cached_reverb_shimmer;
@@ -6873,11 +7012,291 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		? perform_release * static_cast<float>(baked_length - 1)
 		: 0.0f;
 
+	int32_t fx_order[kPerformFaderCount];
+	for (int i = 0; i < kPerformFaderCount; ++i)
+	{
+		fx_order[i] = fx_chain_order[i];
+	}
+
+	auto apply_saturation = [&](float &l, float &r)
+	{
+		if (sat_mode_local == 0)
+		{
+			l = sat_l.Process(l);
+			r = sat_r.Process(r);
+		}
+		else
+		{
+			int hold_samples = 1 + static_cast<int>(bit_smpl * static_cast<float>(kBitcrushMaxHold - 1));
+			if (hold_samples < 1)
+			{
+				hold_samples = 1;
+			}
+			if (bit_hold <= 0)
+			{
+				bit_hold = hold_samples;
+				bit_hold_l = l;
+				bit_hold_r = r;
+			}
+			else
+			{
+				--bit_hold;
+			}
+			const int bits_idx = BitResoIndexFromValue(bit_reso);
+			const int bits = kBitResoSteps[bits_idx];
+			const float step = 1.0f / powf(2.0f, static_cast<float>(bits - 1));
+			float crush_l = roundf(bit_hold_l / step) * step;
+			float crush_r = roundf(bit_hold_r / step) * step;
+			if (crush_l > 1.0f) crush_l = 1.0f;
+			if (crush_l < -1.0f) crush_l = -1.0f;
+			if (crush_r > 1.0f) crush_r = 1.0f;
+			if (crush_r < -1.0f) crush_r = -1.0f;
+			l = crush_l;
+			r = crush_r;
+		}
+	};
+
+	auto apply_chorus = [&](float &l, float &r)
+	{
+		float chorus_proc_l = chorus_l.Process(l);
+		float chorus_proc_r = chorus_r.Process(r);
+		float chorus_mix = (chorus_mode_local == 1) ? 1.0f : chorus_depth;
+		float tape_drop = 1.0f;
+		if (chorus_mode_local == 1)
+		{
+			const float drop_amt = cached_chorus_wow;
+			if (drop_amt > 0.0f)
+			{
+				const float drop_amt_mapped = powf(drop_amt, 0.6f);
+				const float drop_curve = drop_amt_mapped * drop_amt_mapped;
+				const float rate_curve = cached_tape_rate * cached_tape_rate;
+				const float rate_scale = 0.2f + (rate_curve * 6.0f);
+				const float drop_rate = (0.2f + (drop_curve * 12.0f)) * rate_scale;
+				const float drop_step = drop_rate / out_sr;
+				drop_phase += drop_step;
+				bool new_step = false;
+				if (drop_phase >= 1.0f)
+				{
+					drop_phase -= 1.0f;
+					new_step = true;
+				}
+				drop_rng = (drop_rng * 1664525u) + 1013904223u;
+				const float r = static_cast<float>((drop_rng >> 8) & 0xFFFF) / 65535.0f;
+				if (drop_hold > 0)
+				{
+					drop_hold--;
+					drop_target = 0.0f;
+				}
+				else if (new_step)
+				{
+					const float drop_prob = 0.05f + (drop_curve * 0.9f);
+					if (r < drop_prob)
+					{
+						const float hold_scale = 1.0f / (0.5f + rate_curve * 2.0f);
+						drop_hold = 10 + static_cast<int>(r * 1200.0f * drop_curve * hold_scale);
+						drop_target = 0.0f;
+					}
+					else
+					{
+						drop_target = 1.0f - (drop_curve * 0.9f) + (r * drop_curve * 0.9f);
+					}
+				}
+				const float drop_slew = 0.08f + (drop_curve * 0.8f);
+				drop_gain += (drop_target - drop_gain) * drop_slew;
+				trem_phase += (1.0f + drop_curve * 20.0f) * rate_scale / out_sr;
+				if (trem_phase >= 1.0f)
+				{
+					trem_phase -= 1.0f;
+				}
+				const float trem = 0.5f * (1.0f + sinf(trem_phase * kTwoPi));
+				const float trem_depth = drop_curve * 0.85f;
+				tape_drop = drop_gain * (1.0f - trem_depth + (trem_depth * trem));
+			}
+		}
+		float chorus_out_l = ((l * (1.0f - chorus_mix)) + (chorus_proc_l * chorus_mix))
+			* tape_drop;
+		float chorus_out_r = ((r * (1.0f - chorus_mix)) + (chorus_proc_r * chorus_mix))
+			* tape_drop;
+		if (chorus_mode_local == 0)
+		{
+			float width = 1.0f + (cached_chorus_depth * (kChorusWidthMax - 1.0f));
+			if (width < 1.0f)
+			{
+				width = 1.0f;
+			}
+			if (width > kChorusWidthMax)
+			{
+				width = kChorusWidthMax;
+			}
+			const float mid = 0.5f * (chorus_out_l + chorus_out_r);
+			const float side = 0.5f * (chorus_out_l - chorus_out_r);
+			chorus_out_l = mid + (side * width);
+			chorus_out_r = mid - (side * width);
+		}
+		l = chorus_out_l;
+		r = chorus_out_r;
+	};
+
+	auto apply_delay = [&](float &l, float &r)
+	{
+		const float delay_in = 0.5f * (l + r);
+		const float delay_out_l = delay_line_l.Read();
+		const float delay_out_r = delay_line_r.Read();
+		// Ping-pong delay: mono input with cross-feedback for left/right bounce.
+		delay_line_l.Write(delay_in + (delay_out_r * kDelayFeedback));
+		delay_line_r.Write(delay_out_l * kDelayFeedback);
+		const float delay_mix_l = (l * (1.0f - delay_mix)) + (delay_out_l * delay_mix);
+		const float delay_mix_r = (r * (1.0f - delay_mix)) + (delay_out_r * delay_mix);
+		l = delay_mix_l;
+		r = delay_mix_r;
+	};
+
+	auto apply_reverb = [&](float &l, float &r)
+	{
+		float rev_in_l = 0.0f;
+		float rev_in_r = 0.0f;
+		const bool predelay_active = (cached_reverb_predelay_samples >= 1.0f);
+		if (predelay_active)
+		{
+			rev_in_l = reverb_predelay_l.Read();
+			rev_in_r = reverb_predelay_r.Read();
+			reverb_predelay_l.Write(l);
+			reverb_predelay_r.Write(r);
+		}
+		else
+		{
+			reverb_predelay_l.Write(l);
+			reverb_predelay_r.Write(r);
+			rev_in_l = l;
+			rev_in_r = r;
+		}
+		const float rev_in_level = fabsf(l) + fabsf(r);
+		if (rev_in_level > 1e-4f)
+		{
+			reverb_tail_gain = 1.0f;
+		}
+		else
+		{
+			reverb_tail_gain *= cached_reverb_release;
+		}
+		// Shimmer: pitch-shifted octave layer around midpoint (0.5 = no shimmer).
+		float shimmer_amount = 0.0f;
+		float shimmer_rate = 1.0f;
+		int next_mode = 0;
+		if (rev_shimmer > 0.0f)
+		{
+			shimmer_amount = rev_shimmer;
+			if (shimmer_amount > 1.0f)
+			{
+				shimmer_amount = 1.0f;
+			}
+			if (shimmer_amount < 0.25f)
+			{
+				shimmer_amount *= 2.0f;
+			}
+			else
+			{
+				shimmer_amount = 0.5f + (shimmer_amount - 0.25f) * (0.5f / 0.75f);
+			}
+			if (shimmer_amount > 1.0f)
+			{
+				shimmer_amount = 1.0f;
+			}
+			shimmer_rate = kShimmerRateUp;
+			next_mode = 1;
+		}
+		else
+		{
+			shimmer_amount = 0.0f;
+			shimmer_rate = kShimmerRateUp;
+			next_mode = 0;
+		}
+
+		if (next_mode != shimmer_mode)
+		{
+			shimmer_mode = next_mode;
+			shimmer_read_idx = static_cast<float>(
+				(shimmer_write_idx + kShimmerBufferSize - kShimmerDelaySamples)
+				% kShimmerBufferSize);
+		}
+
+		float shimmer_fb_l = 0.0f;
+		float shimmer_fb_r = 0.0f;
+		if (shimmer_amount > 0.0f)
+		{
+			const size_t read_i0 = static_cast<size_t>(shimmer_read_idx) % kShimmerBufferSize;
+			const size_t read_i1 = (read_i0 + 1) % kShimmerBufferSize;
+			const float frac = shimmer_read_idx - static_cast<float>(read_i0);
+			const float sh_l = shimmer_buf_l[read_i0]
+				+ (shimmer_buf_l[read_i1] - shimmer_buf_l[read_i0]) * frac;
+			const float sh_r = shimmer_buf_r[read_i0]
+				+ (shimmer_buf_r[read_i1] - shimmer_buf_r[read_i0]) * frac;
+			shimmer_fb_l = shimmer_amount * kShimmerFeedback * shimmer_hp_l.Process(sh_l);
+			shimmer_fb_r = shimmer_amount * kShimmerFeedback * shimmer_hp_r.Process(sh_r);
+
+			shimmer_read_idx += shimmer_rate;
+			while (shimmer_read_idx >= static_cast<float>(kShimmerBufferSize))
+			{
+				shimmer_read_idx -= static_cast<float>(kShimmerBufferSize);
+			}
+			const size_t read_int = static_cast<size_t>(shimmer_read_idx);
+			size_t dist = (shimmer_write_idx >= read_int)
+				? (shimmer_write_idx - read_int)
+				: (shimmer_write_idx + kShimmerBufferSize - read_int);
+			if (dist < 4)
+			{
+				shimmer_read_idx = static_cast<float>(
+					(shimmer_write_idx + kShimmerBufferSize - kShimmerDelaySamples)
+					% kShimmerBufferSize);
+			}
+		}
+
+		float rev_l = 0.0f;
+		float rev_r = 0.0f;
+		reverb.Process(rev_in_l + shimmer_fb_l, rev_in_r + shimmer_fb_r, &rev_l, &rev_r);
+		rev_l *= cached_reverb_gain * reverb_tail_gain;
+		rev_r *= cached_reverb_gain * reverb_tail_gain;
+
+		shimmer_buf_l[shimmer_write_idx] = rev_l;
+		shimmer_buf_r[shimmer_write_idx] = rev_r;
+		shimmer_write_idx = (shimmer_write_idx + 1) % kShimmerBufferSize;
+		const float wet = cached_reverb_wet;
+		float wet_mix = wet;
+		float dry_mix = 1.0f - wet;
+		if (wet < 0.5f)
+		{
+			wet_mix = 2.0f * wet * wet;
+			dry_mix = 1.0f - wet_mix;
+		}
+		else
+		{
+			dry_mix = 2.0f * (1.0f - wet) * (1.0f - wet);
+			wet_mix = 1.0f - dry_mix;
+		}
+		wet_mix *= 1.12f;
+		if (wet_mix > 1.0f)
+		{
+			wet_mix = 1.0f;
+		}
+		if (wet >= 0.999f)
+		{
+			wet_mix = 1.0f;
+			dry_mix = 0.0f;
+		}
+		l = (l * dry_mix) + (rev_l * wet_mix);
+		r = (r * dry_mix) + (rev_r * wet_mix);
+	};
+
+	float fx_gain = fx_chain_fade_gain;
+	int32_t fade_samples_left = fx_chain_fade_samples_left;
+	const float fade_step = (fade_samples_left > 0)
+		? (fx_chain_fade_target - fx_gain) / static_cast<float>(fade_samples_left)
+		: 0.0f;
+
 	for (size_t i = 0; i < size; i++)
 	{
 		float sig_l = 0.0f;
 		float sig_r = 0.0f;
-		static float reverb_tail_gain = 0.0f;
 		const bool monitor_active =
 			(ui_mode == UiMode::Record
 				&& record_state != RecordState::Review
@@ -7271,261 +7690,46 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			sig_l += monitor_l;
 			sig_r += monitor_r;
 		}
-		const int32_t sat_mode_local = cached_sat_mode;
-		const float bit_reso = cached_sat_reso;
-		const float bit_smpl = cached_sat_smpl;
-		if (sat_mode_local == 0)
+		if (fade_samples_left > 0)
 		{
-			sig_l = sat_l.Process(sig_l);
-			sig_r = sat_r.Process(sig_r);
-		}
-		else
-		{
-			int hold_samples = 1 + static_cast<int>(bit_smpl * static_cast<float>(kBitcrushMaxHold - 1));
-			if (hold_samples < 1)
+			fx_gain += fade_step;
+			--fade_samples_left;
+			if (fade_samples_left == 0)
 			{
-				hold_samples = 1;
-			}
-			if (bit_hold <= 0)
-			{
-				bit_hold = hold_samples;
-				bit_hold_l = sig_l;
-				bit_hold_r = sig_r;
-			}
-			else
-			{
-				--bit_hold;
-			}
-			const int bits_idx = BitResoIndexFromValue(bit_reso);
-			const int bits = kBitResoSteps[bits_idx];
-			const float step = 1.0f / powf(2.0f, static_cast<float>(bits - 1));
-			float crush_l = roundf(bit_hold_l / step) * step;
-			float crush_r = roundf(bit_hold_r / step) * step;
-			if (crush_l > 1.0f) crush_l = 1.0f;
-			if (crush_l < -1.0f) crush_l = -1.0f;
-			if (crush_r > 1.0f) crush_r = 1.0f;
-			if (crush_r < -1.0f) crush_r = -1.0f;
-			sig_l = crush_l;
-			sig_r = crush_r;
-		}
-		const int32_t chorus_mode_local = cached_chorus_mode;
-		float chorus_proc_l = chorus_l.Process(sig_l);
-		float chorus_proc_r = chorus_r.Process(sig_r);
-		float chorus_mix = (chorus_mode_local == 1) ? 1.0f : chorus_depth;
-		float tape_drop = 1.0f;
-		if (chorus_mode_local == 1)
-		{
-			const float drop_amt = cached_chorus_wow;
-			if (drop_amt > 0.0f)
-			{
-				const float drop_amt_mapped = powf(drop_amt, 0.6f);
-				const float drop_curve = drop_amt_mapped * drop_amt_mapped;
-				const float rate_curve = cached_tape_rate * cached_tape_rate;
-				const float rate_scale = 0.2f + (rate_curve * 6.0f);
-				const float drop_rate = (0.2f + (drop_curve * 12.0f)) * rate_scale;
-				const float drop_step = drop_rate / out_sr;
-				drop_phase += drop_step;
-				bool new_step = false;
-				if (drop_phase >= 1.0f)
-				{
-					drop_phase -= 1.0f;
-					new_step = true;
-				}
-				drop_rng = (drop_rng * 1664525u) + 1013904223u;
-				const float r = static_cast<float>((drop_rng >> 8) & 0xFFFF) / 65535.0f;
-				if (drop_hold > 0)
-				{
-					drop_hold--;
-					drop_target = 0.0f;
-				}
-				else if (new_step)
-				{
-					const float drop_prob = 0.05f + (drop_curve * 0.9f);
-					if (r < drop_prob)
-					{
-						const float hold_scale = 1.0f / (0.5f + rate_curve * 2.0f);
-						drop_hold = 10 + static_cast<int>(r * 1200.0f * drop_curve * hold_scale);
-						drop_target = 0.0f;
-					}
-					else
-					{
-						drop_target = 1.0f - (drop_curve * 0.9f) + (r * drop_curve * 0.9f);
-					}
-				}
-				const float drop_slew = 0.08f + (drop_curve * 0.8f);
-				drop_gain += (drop_target - drop_gain) * drop_slew;
-				trem_phase += (1.0f + drop_curve * 20.0f) * rate_scale / out_sr;
-				if (trem_phase >= 1.0f)
-				{
-					trem_phase -= 1.0f;
-				}
-				const float trem = 0.5f * (1.0f + sinf(trem_phase * kTwoPi));
-				const float trem_depth = drop_curve * 0.85f;
-				tape_drop = drop_gain * (1.0f - trem_depth + (trem_depth * trem));
+				fx_gain = fx_chain_fade_target;
 			}
 		}
-		float chorus_out_l = ((sig_l * (1.0f - chorus_mix)) + (chorus_proc_l * chorus_mix))
-			* tape_drop;
-		float chorus_out_r = ((sig_r * (1.0f - chorus_mix)) + (chorus_proc_r * chorus_mix))
-			* tape_drop;
-		if (chorus_mode_local == 0)
+		if (fx_chain_paused)
 		{
-			float width = 1.0f + (cached_chorus_depth * (kChorusWidthMax - 1.0f));
-			if (width < 1.0f)
-			{
-				width = 1.0f;
-			}
-			if (width > kChorusWidthMax)
-			{
-				width = kChorusWidthMax;
-			}
-			const float mid = 0.5f * (chorus_out_l + chorus_out_r);
-			const float side = 0.5f * (chorus_out_l - chorus_out_r);
-			chorus_out_l = mid + (side * width);
-			chorus_out_r = mid - (side * width);
+			out[0][i] = 0.0f;
+			out[1][i] = 0.0f;
+			continue;
 		}
-
-		const float delay_in = 0.5f * (chorus_out_l + chorus_out_r);
-		const float delay_out_l = delay_line_l.Read();
-		const float delay_out_r = delay_line_r.Read();
-		// Ping-pong delay: mono input with cross-feedback for left/right bounce.
-		delay_line_l.Write(delay_in + (delay_out_r * kDelayFeedback));
-		delay_line_r.Write(delay_out_l * kDelayFeedback);
-		const float delay_mix_l = (chorus_out_l * (1.0f - delay_mix)) + (delay_out_l * delay_mix);
-		const float delay_mix_r = (chorus_out_r * (1.0f - delay_mix)) + (delay_out_r * delay_mix);
-
-		float rev_in_l = 0.0f;
-		float rev_in_r = 0.0f;
-		const bool predelay_active = (cached_reverb_predelay_samples >= 1.0f);
-		if (predelay_active)
+		float fx_l = sig_l;
+		float fx_r = sig_r;
+		for (int stage = 0; stage < kPerformFaderCount; ++stage)
 		{
-			rev_in_l = reverb_predelay_l.Read();
-			rev_in_r = reverb_predelay_r.Read();
-			reverb_predelay_l.Write(delay_mix_l);
-			reverb_predelay_r.Write(delay_mix_r);
-		}
-		else
-		{
-			reverb_predelay_l.Write(delay_mix_l);
-			reverb_predelay_r.Write(delay_mix_r);
-			rev_in_l = delay_mix_l;
-			rev_in_r = delay_mix_r;
-		}
-		const float rev_in_level = fabsf(delay_mix_l) + fabsf(delay_mix_r);
-		if (rev_in_level > 1e-4f)
-		{
-			reverb_tail_gain = 1.0f;
-		}
-		else
-		{
-			reverb_tail_gain *= cached_reverb_release;
-		}
-		// Shimmer: pitch-shifted octave layer around midpoint (0.5 = no shimmer).
-		float shimmer_amount = 0.0f;
-		float shimmer_rate = 1.0f;
-		int next_mode = 0;
-		if (rev_shimmer > 0.0f)
-		{
-			shimmer_amount = rev_shimmer;
-			if (shimmer_amount > 1.0f)
+			switch (fx_order[stage])
 			{
-				shimmer_amount = 1.0f;
-			}
-			if (shimmer_amount < 0.25f)
-			{
-				shimmer_amount *= 2.0f;
-			}
-			else
-			{
-				shimmer_amount = 0.5f + (shimmer_amount - 0.25f) * (0.5f / 0.75f);
-			}
-			if (shimmer_amount > 1.0f)
-			{
-				shimmer_amount = 1.0f;
-			}
-			shimmer_rate = kShimmerRateUp;
-			next_mode = 1;
-		}
-		else
-		{
-			shimmer_amount = 0.0f;
-			shimmer_rate = kShimmerRateUp;
-			next_mode = 0;
-		}
-
-		if (next_mode != shimmer_mode)
-		{
-			shimmer_mode = next_mode;
-			shimmer_read_idx = static_cast<float>(
-				(shimmer_write_idx + kShimmerBufferSize - kShimmerDelaySamples)
-				% kShimmerBufferSize);
-		}
-
-		float shimmer_fb_l = 0.0f;
-		float shimmer_fb_r = 0.0f;
-		if (shimmer_amount > 0.0f)
-		{
-			const size_t read_i0 = static_cast<size_t>(shimmer_read_idx) % kShimmerBufferSize;
-			const size_t read_i1 = (read_i0 + 1) % kShimmerBufferSize;
-			const float frac = shimmer_read_idx - static_cast<float>(read_i0);
-			const float sh_l = shimmer_buf_l[read_i0]
-				+ (shimmer_buf_l[read_i1] - shimmer_buf_l[read_i0]) * frac;
-			const float sh_r = shimmer_buf_r[read_i0]
-				+ (shimmer_buf_r[read_i1] - shimmer_buf_r[read_i0]) * frac;
-			shimmer_fb_l = shimmer_amount * kShimmerFeedback * shimmer_hp_l.Process(sh_l);
-			shimmer_fb_r = shimmer_amount * kShimmerFeedback * shimmer_hp_r.Process(sh_r);
-
-			shimmer_read_idx += shimmer_rate;
-			while (shimmer_read_idx >= static_cast<float>(kShimmerBufferSize))
-			{
-				shimmer_read_idx -= static_cast<float>(kShimmerBufferSize);
-			}
-			const size_t read_int = static_cast<size_t>(shimmer_read_idx);
-			size_t dist = (shimmer_write_idx >= read_int)
-				? (shimmer_write_idx - read_int)
-				: (shimmer_write_idx + kShimmerBufferSize - read_int);
-			if (dist < 4)
-			{
-				shimmer_read_idx = static_cast<float>(
-					(shimmer_write_idx + kShimmerBufferSize - kShimmerDelaySamples)
-					% kShimmerBufferSize);
+				case kFxSatIndex: apply_saturation(fx_l, fx_r); break;
+				case kFxChorusIndex: apply_chorus(fx_l, fx_r); break;
+				case kFxDelayIndex: apply_delay(fx_l, fx_r); break;
+				case kFxReverbIndex: apply_reverb(fx_l, fx_r); break;
+				default: break;
 			}
 		}
-
-		float rev_l = 0.0f;
-		float rev_r = 0.0f;
-		reverb.Process(rev_in_l + shimmer_fb_l, rev_in_r + shimmer_fb_r, &rev_l, &rev_r);
-		rev_l *= cached_reverb_gain * reverb_tail_gain;
-		rev_r *= cached_reverb_gain * reverb_tail_gain;
-
-		shimmer_buf_l[shimmer_write_idx] = rev_l;
-		shimmer_buf_r[shimmer_write_idx] = rev_r;
-		shimmer_write_idx = (shimmer_write_idx + 1) % kShimmerBufferSize;
-		const float wet = cached_reverb_wet;
-		float wet_mix = wet;
-		float dry_mix = 1.0f - wet;
-		if (wet < 0.5f)
-		{
-			wet_mix = 2.0f * wet * wet;
-			dry_mix = 1.0f - wet_mix;
-		}
-		else
-		{
-			dry_mix = 2.0f * (1.0f - wet) * (1.0f - wet);
-			wet_mix = 1.0f - dry_mix;
-		}
-		wet_mix *= 1.12f;
-		if (wet_mix > 1.0f)
-		{
-			wet_mix = 1.0f;
-		}
-		if (wet >= 0.999f)
-		{
-			wet_mix = 1.0f;
-			dry_mix = 0.0f;
-		}
-		out[0][i] = (delay_mix_l * dry_mix) + (rev_l * wet_mix);
-		out[1][i] = (delay_mix_r * dry_mix) + (rev_r * wet_mix);
+		out[0][i] = fx_l * fx_gain;
+		out[1][i] = fx_r * fx_gain;
+	}
+	fx_chain_fade_gain = fx_gain;
+	fx_chain_fade_samples_left = fade_samples_left;
+	if (fx_chain_pause_pending
+		&& fx_chain_fade_samples_left == 0
+		&& fx_chain_fade_target <= 0.0f)
+	{
+		fx_chain_paused = true;
+		fx_chain_pause_pending = false;
+		fx_chain_fade_gain = 0.0f;
 	}
 	request_playhead_redraw = true;
 }
@@ -8095,19 +8299,19 @@ int main(void)
 			else if (mode == UiMode::Perform)
 			{
 				const bool fx_select_active = (perform_index == kPerformFxIndex)
-					&& shift_button.Pressed();
-					const bool amp_select_active = (perform_index == kPerformAmpIndex)
-						&& shift_button.Pressed();
-					const bool flt_select_active = (perform_index == kPerformFltIndex)
-						&& shift_button.Pressed();
-					DrawPerformScreen(perform_index,
-									  fx_select_active,
-									  fx_fader_index,
-									  amp_select_active,
-									  amp_fader_index,
-									  flt_select_active,
-									  flt_fader_index);
-				}
+					&& fx_window_active;
+				const bool amp_select_active = (perform_index == kPerformAmpIndex)
+					&& amp_window_active;
+				const bool flt_select_active = (perform_index == kPerformFltIndex)
+					&& flt_window_active;
+				DrawPerformScreen(perform_index,
+								  fx_select_active,
+								  fx_fader_index,
+								  amp_select_active,
+								  amp_fader_index,
+								  flt_select_active,
+								  flt_fader_index);
+			}
 				else if (mode == UiMode::LoadTarget)
 				{
 					DrawLoadTargetMenu(load_target_selected);
@@ -8182,11 +8386,11 @@ int main(void)
 				{
 					request_perform_redraw = false;
 					const bool fx_select_active = (current == kPerformFxIndex)
-						&& shift_button.Pressed();
+						&& fx_window_active;
 					const bool amp_select_active = (current == kPerformAmpIndex)
-						&& shift_button.Pressed();
+						&& amp_window_active;
 					const bool flt_select_active = (current == kPerformFltIndex)
-						&& shift_button.Pressed();
+						&& flt_window_active;
 					DrawPerformScreen(current,
 									  fx_select_active,
 									  fx_fader_index,
