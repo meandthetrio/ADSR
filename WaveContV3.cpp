@@ -31,6 +31,7 @@ constexpr int32_t kFxChorusIndex = 1;
 constexpr int32_t kFxDelayIndex = 2;
 constexpr int32_t kFxReverbIndex = 3;
 constexpr int32_t kReverbFaderCount = 5;
+constexpr int32_t kDelayFaderCount = 5;
 constexpr int32_t kPerformFltFaderCount = 2;
 constexpr int32_t kPerformAmpIndex = 1;
 constexpr int32_t kPerformFltIndex = 2;
@@ -113,11 +114,13 @@ constexpr float kChorusDelayMs = 9.0f;
 constexpr float kChorusFeedback = 0.18f;
 constexpr float kChorusMaxDepth = 3.0f;
 constexpr float kChorusWidthMax = 2.2f;
-constexpr size_t kDelayMaxSamples = 48000;
-constexpr float kDelayTimeSec = 0.3f;
-constexpr float kDelayFeedback = 0.55f;
+constexpr size_t kDelayMaxSamples = 96000;
+constexpr float kDelayTimeMinMs = 50.0f;
+constexpr float kDelayTimeMaxMs = 2000.0f;
+constexpr float kDelayFeedbackMax = 0.98f;
 constexpr float kDelayDefaultWet = 0.0f;
 constexpr float kDelayWetStep = 0.02f;
+constexpr float kDelayParamStep = 0.02f;
 constexpr int kBitResoStepCount = 3;
 constexpr int kBitResoSteps[kBitResoStepCount] = {2, 3, 4};
 constexpr const char* kBitResoLabels[kBitResoStepCount] = {"CRUSH", "STATIC", "HISS"};
@@ -706,6 +709,10 @@ volatile float reverb_damp = kReverbDampDefault;
 volatile float reverb_decay = kReverbDecayDefault;
 volatile float reverb_shimmer = 0.0f;
 volatile float delay_wet = kDelayDefaultWet;
+volatile float delay_time = 0.0f;
+volatile float delay_feedback = 0.0f;
+volatile float delay_spread = 0.0f;
+volatile float delay_freeze = 0.0f;
 volatile float fx_s_wet = 0.0f;
 volatile float sat_tape_bump = 0.0f;
 volatile float sat_bit_reso = 0.0f;
@@ -719,6 +726,7 @@ volatile float tape_rate = 0.0f;
 volatile bool fx_params_dirty = true;
 static bool sat_params_initialized = false;
 static bool reverb_params_initialized = false;
+static bool delay_params_initialized = false;
 static bool mod_params_initialized = false;
 volatile float amp_attack = 0.0f;
 volatile float amp_decay = 0.0f;
@@ -753,6 +761,7 @@ static uint8_t record_bold_mask[kDisplayH][kDisplayW];
 static bool request_shift_redraw = false;
 static bool request_perform_redraw = false;
 static bool request_fx_detail_redraw = false;
+static uint32_t delay_snow_next_ms = 0;
 static float pv_window_long[kPvLongSize];
 static float pv_window_short[kPvShortSize];
 static float pv_fft_re[kPvLongSize];
@@ -5265,6 +5274,150 @@ static void DrawFxDetailScreen(int32_t index)
 									 nullptr);
 		}
 	}
+	else if (index == kFxDelayIndex)
+	{
+		constexpr int kMargin = 2;
+		const int block_y = Font5x7::H + 4;
+		int block_h = kDisplayH - block_y - kMargin;
+		if (block_h < 3)
+		{
+			block_h = 3;
+		}
+		const int fader_x = kMargin;
+		const int fader_w = kDisplayW - (kMargin * 2);
+		if (fader_w > 4)
+		{
+			const char* fader_labels[kDelayFaderCount] = {"TIM", "FBK", "SPRD", "FRZ", "MIX"};
+			const float fader_values[kDelayFaderCount]
+				= {delay_time, delay_feedback, delay_spread, 0.0f, delay_wet};
+			int param_index = fx_detail_param_index;
+			const bool fader_select_active
+				= (param_index >= 0 && param_index < kDelayFaderCount);
+			if (!fader_select_active)
+			{
+				param_index = 0;
+			}
+			const bool hide_handles[kDelayFaderCount] = {false, false, false, true, false};
+			const bool hide_rails[kDelayFaderCount] = {false, false, false, true, false};
+			const int fader_offsets[kDelayFaderCount] = {0, 0, 0, 0, 0};
+			DrawVerticalFadersInRect(fader_x,
+									 block_y,
+									 fader_w,
+									 block_h,
+									 fader_labels,
+									 fader_values,
+									 kDelayFaderCount,
+									 fader_select_active,
+									 param_index,
+									 fader_offsets,
+									 nullptr,
+									 hide_rails,
+									 hide_handles);
+			// FRZ status box + snow animation.
+			const int label_y = block_y + block_h - Font5x7::H - 1;
+			const int line_top = block_y + 2;
+			const int line_bottom = label_y - 2;
+			const int fader_left = fader_x + 2;
+			const int fader_right = fader_x + fader_w - 3;
+			const int span_x = fader_right - fader_left;
+			int line_x = fader_left;
+			if (kDelayFaderCount > 1 && span_x > 0)
+			{
+				line_x = fader_left + (span_x * 3) / (kDelayFaderCount - 1);
+			}
+			const char* label = "FRZ";
+			const int label_w = TinyStringWidth(label);
+			int label_x = line_x - (label_w / 2);
+			if (label_x < fader_x + 1)
+			{
+				label_x = fader_x + 1;
+			}
+			if (label_x + label_w > fader_x + fader_w - 2)
+			{
+				label_x = fader_x + fader_w - 2 - label_w;
+			}
+			line_x = label_x + (label_w / 2);
+			const bool freeze_on = (delay_freeze >= 0.5f);
+			const char* on_label = "ON";
+			const char* off_label = "OFF";
+			const int on_w = TinyStringWidth(on_label);
+			const int off_w = TinyStringWidth(off_label);
+			const int text_x_on = line_x - (on_w / 2);
+			const int text_x_off = line_x - (off_w / 2);
+			const int state_gap = 2;
+			const int text_y_on = line_top + 1;
+			const int text_y_off = text_y_on + Font5x7::H + state_gap;
+			const int text_top = text_y_on - 1;
+			const int text_bottom = text_y_off + Font5x7::H + 1;
+			const bool highlight = (fader_select_active && param_index == 3);
+
+			auto DrawSnowflake = [&](int x, int y, bool on)
+			{
+				display.DrawPixel(x, y, on);
+				display.DrawPixel(x - 1, y, on);
+				display.DrawPixel(x + 1, y, on);
+				display.DrawPixel(x, y - 1, on);
+				display.DrawPixel(x, y + 1, on);
+			};
+
+			const int area_left = line_x - 6;
+			const int area_right = line_x + 6;
+			const int area_top = line_top;
+			const int area_bottom = line_bottom;
+			const int area_w = area_right - area_left + 1;
+			const int area_h = area_bottom - area_top + 1;
+			if (area_w > 4 && area_h > 4 && freeze_on)
+			{
+				const uint32_t now = System::GetNow();
+				for (int i = 0; i < 6; ++i)
+				{
+					const int sx = area_left + static_cast<int>((now / 120 + i * 7) % area_w);
+					const int sy = area_top + static_cast<int>((now / 60 + i * 9) % area_h);
+					if (sy < text_top || sy > text_bottom)
+					{
+						DrawSnowflake(sx, sy, true);
+					}
+				}
+			}
+
+			if (freeze_on)
+			{
+				if (highlight)
+				{
+					display.DrawRect(text_x_on - 1,
+									 text_y_on - 1,
+									 text_x_on + on_w,
+									 text_y_on + Font5x7::H,
+									 true,
+									 true);
+					DrawTinyString(on_label, text_x_on, text_y_on, false);
+				}
+				else
+				{
+					DrawTinyString(on_label, text_x_on, text_y_on, true);
+				}
+				DrawTinyString(off_label, text_x_off, text_y_off, true);
+			}
+			else
+			{
+				DrawTinyString(on_label, text_x_on, text_y_on, true);
+				if (highlight)
+				{
+					display.DrawRect(text_x_off - 1,
+									 text_y_off - 1,
+									 text_x_off + off_w,
+									 text_y_off + Font5x7::H,
+									 true,
+									 true);
+					DrawTinyString(off_label, text_x_off, text_y_off, false);
+				}
+				else
+				{
+					DrawTinyString(off_label, text_x_off, text_y_off, true);
+				}
+			}
+		}
+	}
 	else if (index == kFxReverbIndex)
 	{
 		constexpr int kMargin = 2;
@@ -5726,6 +5879,17 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	const float out_sr = hw.AudioSampleRate();
 	const uint32_t now_ms = System::GetNow();
 	const bool ui_blocked = (sd_init_in_progress || save_in_progress || bake_in_progress);
+	if (ui_mode == UiMode::FxDetail
+		&& fx_detail_index == kFxDelayIndex
+		&& delay_freeze >= 0.5f)
+	{
+		const uint32_t now = System::GetNow();
+		if (now >= delay_snow_next_ms)
+		{
+			delay_snow_next_ms = now + 100;
+			request_fx_detail_redraw = true;
+		}
+	}
 	shift_button.Debounce();
 	const bool shift_pressed = shift_button.Pressed();
 	if (ui_mode != UiMode::Perform && ui_mode != UiMode::FxDetail)
@@ -6277,6 +6441,19 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 							fx_params_dirty = true;
 						}
 					}
+					else if (fx_detail_index == kFxDelayIndex)
+					{
+						if (!delay_params_initialized)
+						{
+							delay_time = 0.0f;
+							delay_feedback = 0.0f;
+							delay_spread = 0.0f;
+							delay_freeze = 0.0f;
+							delay_wet = 0.0f;
+							delay_params_initialized = true;
+							fx_params_dirty = true;
+						}
+					}
 					else if (fx_detail_index == kFxChorusIndex)
 					{
 						if (!mod_params_initialized)
@@ -6608,6 +6785,69 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				}
 			}
 		}
+		else if (fx_detail_index == kFxDelayIndex)
+		{
+			if (encoder_l_inc != 0)
+			{
+				const int32_t param_count = kDelayFaderCount;
+				int32_t next = fx_detail_param_index + encoder_l_inc;
+				while (next < 0)
+				{
+					next += param_count;
+				}
+				while (next >= param_count)
+				{
+					next -= param_count;
+				}
+				if (next != fx_detail_param_index)
+				{
+					fx_detail_param_index = next;
+					request_fx_detail_redraw = true;
+				}
+			}
+			if (encoder_r_inc != 0)
+			{
+				const float steps[kDelayFaderCount]
+					= {kDelayParamStep,
+					   kDelayParamStep,
+					   kDelayParamStep,
+					   kDelayParamStep,
+					   kDelayWetStep};
+				volatile float* targets[kDelayFaderCount]
+					= {&delay_time, &delay_feedback, &delay_spread, &delay_freeze, &delay_wet};
+				const int idx = fx_detail_param_index;
+				if (idx >= 0 && idx < kDelayFaderCount)
+				{
+					volatile float* target = targets[idx];
+					const float current = *target;
+					float next = current;
+					if (idx == 3)
+					{
+						const bool freeze_on = (current >= 0.5f);
+						next = freeze_on ? 0.0f : 1.0f;
+					}
+					else
+					{
+						const float step = steps[idx];
+						next = current + (static_cast<float>(encoder_r_inc) * step);
+						if (next < 0.0f)
+						{
+							next = 0.0f;
+						}
+						if (next > 1.0f)
+						{
+							next = 1.0f;
+						}
+					}
+					if (next != current)
+					{
+						*target = next;
+						request_fx_detail_redraw = true;
+						fx_params_dirty = true;
+					}
+				}
+			}
+		}
 		else if (fx_detail_index == kFxReverbIndex)
 		{
 			if (encoder_l_inc != 0)
@@ -6776,6 +7016,10 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	static float cached_chorus_wow = 0.0f;
 	static float cached_tape_rate = 0.0f;
 	static float cached_delay_wet = 0.0f;
+	static float cached_delay_time = 0.0f;
+	static float cached_delay_feedback = 0.0f;
+	static float cached_delay_spread = 0.0f;
+	static float cached_delay_freeze = 0.0f;
 	static float cached_reverb_wet = 0.0f;
 	static float cached_reverb_pre = 0.0f;
 	static float cached_reverb_damp = 0.0f;
@@ -6791,6 +7035,10 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	static float last_chorus_rate = -1.0f;
 	static float last_chorus_wow = -1.0f;
 	static float last_delay_wet = -1.0f;
+	static float last_delay_time = -1.0f;
+	static float last_delay_feedback = -1.0f;
+	static float last_delay_spread = -1.0f;
+	static float last_delay_freeze = -1.0f;
 	static float last_rev_feedback = -1.0f;
 	static float last_rev_lp = -1.0f;
 	static float last_rev_predelay = -1.0f;
@@ -6810,6 +7058,10 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		cached_chorus_wow = chorus_wow;
 		cached_tape_rate = tape_rate;
 		cached_delay_wet = delay_wet;
+		cached_delay_time = delay_time;
+		cached_delay_feedback = delay_feedback;
+		cached_delay_spread = delay_spread;
+		cached_delay_freeze = delay_freeze;
 		cached_reverb_wet = reverb_wet;
 		cached_reverb_pre = reverb_pre;
 		cached_reverb_damp = reverb_damp;
@@ -6834,6 +7086,14 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		if (cached_tape_rate > 1.0f) cached_tape_rate = 1.0f;
 		if (cached_delay_wet < 0.0f) cached_delay_wet = 0.0f;
 		if (cached_delay_wet > 1.0f) cached_delay_wet = 1.0f;
+		if (cached_delay_time < 0.0f) cached_delay_time = 0.0f;
+		if (cached_delay_time > 1.0f) cached_delay_time = 1.0f;
+		if (cached_delay_feedback < 0.0f) cached_delay_feedback = 0.0f;
+		if (cached_delay_feedback > 1.0f) cached_delay_feedback = 1.0f;
+		if (cached_delay_spread < 0.0f) cached_delay_spread = 0.0f;
+		if (cached_delay_spread > 1.0f) cached_delay_spread = 1.0f;
+		if (cached_delay_freeze < 0.0f) cached_delay_freeze = 0.0f;
+		if (cached_delay_freeze > 1.0f) cached_delay_freeze = 1.0f;
 		if (cached_reverb_wet < 0.0f) cached_reverb_wet = 0.0f;
 		if (cached_reverb_wet > 1.0f) cached_reverb_wet = 1.0f;
 		if (cached_reverb_pre < 0.0f) cached_reverb_pre = 0.0f;
@@ -6912,6 +7172,38 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		if (fabsf(cached_delay_wet - last_delay_wet) > kFxParamEpsilon)
 		{
 			last_delay_wet = cached_delay_wet;
+		}
+		if (fabsf(cached_delay_time - last_delay_time) > kFxParamEpsilon)
+		{
+			const float time_curve = cached_delay_time * cached_delay_time;
+			float delay_ms = kDelayTimeMinMs
+				+ (time_curve * (kDelayTimeMaxMs - kDelayTimeMinMs));
+			const float delay_samples = delay_ms * 0.001f * out_sr;
+			const float max_delay = static_cast<float>(kDelayMaxSamples - 1);
+			float delay_target = delay_samples;
+			if (delay_target > max_delay)
+			{
+				delay_target = max_delay;
+			}
+			if (delay_target < 1.0f)
+			{
+				delay_target = 1.0f;
+			}
+			delay_line_l.SetDelay(delay_target);
+			delay_line_r.SetDelay(delay_target);
+			last_delay_time = cached_delay_time;
+		}
+		if (fabsf(cached_delay_feedback - last_delay_feedback) > kFxParamEpsilon)
+		{
+			last_delay_feedback = cached_delay_feedback;
+		}
+		if (fabsf(cached_delay_spread - last_delay_spread) > kFxParamEpsilon)
+		{
+			last_delay_spread = cached_delay_spread;
+		}
+		if (fabsf(cached_delay_freeze - last_delay_freeze) > kFxParamEpsilon)
+		{
+			last_delay_freeze = cached_delay_freeze;
 		}
 
 		float rev_feedback = kReverbFeedback;
@@ -7139,14 +7431,44 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 
 	auto apply_delay = [&](float &l, float &r)
 	{
+		const float freeze = (cached_delay_freeze >= 0.5f) ? 1.0f : 0.0f;
+		float feedback = cached_delay_feedback;
+		if (feedback > kDelayFeedbackMax)
+		{
+			feedback = kDelayFeedbackMax;
+		}
+		if (feedback < 0.0f)
+		{
+			feedback = 0.0f;
+		}
+		const float freeze_mix = (freeze > 0.0f) ? freeze : 0.0f;
+		const float feedback_mix = feedback + (freeze_mix * (1.0f - feedback));
+		const float input_gain = 1.0f - freeze_mix;
 		const float delay_in = 0.5f * (l + r);
+		const float pingpong = feedback;
+		const float input_l = delay_in * input_gain;
+		const float input_r = delay_in * input_gain * (1.0f - pingpong);
 		const float delay_out_l = delay_line_l.Read();
 		const float delay_out_r = delay_line_r.Read();
-		// Ping-pong delay: mono input with cross-feedback for left/right bounce.
-		delay_line_l.Write(delay_in + (delay_out_r * kDelayFeedback));
-		delay_line_r.Write(delay_out_l * kDelayFeedback);
-		const float delay_mix_l = (l * (1.0f - delay_mix)) + (delay_out_l * delay_mix);
-		const float delay_mix_r = (r * (1.0f - delay_mix)) + (delay_out_r * delay_mix);
+		// Ping-pong delay with spread.
+		float fb_l = delay_out_r * feedback_mix;
+		float fb_r = delay_out_l * feedback_mix;
+		delay_line_l.Write(input_l + fb_l);
+		delay_line_r.Write(input_r + fb_r);
+		const float spread = cached_delay_spread;
+		float delay_l = delay_out_l;
+		float delay_r = delay_out_r;
+		if (spread > 0.0f)
+		{
+			const float width = 1.0f + (spread * spread * 2.5f);
+			const float mid = 0.5f * (delay_l + delay_r);
+			const float side = 0.5f * (delay_l - delay_r);
+			delay_l = mid + (side * width);
+			delay_r = mid - (side * width);
+		}
+		const float mix = delay_mix;
+		const float delay_mix_l = (l * (1.0f - mix)) + (delay_l * mix);
+		const float delay_mix_r = (r * (1.0f - mix)) + (delay_r * mix);
 		l = delay_mix_l;
 		r = delay_mix_r;
 	};
@@ -7788,11 +8110,16 @@ int main(void)
 
 	delay_line_l.Init();
 	delay_line_r.Init();
-	float delay_samples = kDelayTimeSec * hw.AudioSampleRate();
+	const float delay_init_ms = kDelayTimeMinMs;
+	float delay_samples = delay_init_ms * 0.001f * hw.AudioSampleRate();
 	const float max_delay = static_cast<float>(kDelayMaxSamples - 1);
 	if (delay_samples > max_delay)
 	{
 		delay_samples = max_delay;
+	}
+	if (delay_samples < 1.0f)
+	{
+		delay_samples = 1.0f;
 	}
 	delay_line_l.SetDelay(delay_samples);
 	delay_line_r.SetDelay(delay_samples);

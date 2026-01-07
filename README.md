@@ -1,4 +1,12 @@
-### 1/6/25 10:57am
+### 1/7/26 11:23am
+Cuz revamped "DELAY" section
+- TIM - Number of repeats
+- FBK - Feedback of repeats
+- SPRD - Stereo Widening effect
+- FRZ - Latching on/off Freeze function with "snowflake" animation
+- MIX - Overall wet/dry of Delay
+
+### 1/6/26 10:57am
 Cuz revamped "CHORUS" section and changed it to Modulation section since added a TAPE setting.
 - Modulation section = CHORUS and TAPE
 - CHORUS = DEPTH & SPEED
@@ -11,7 +19,7 @@ Revamped SATURATION setting
 - Tape = SAT and BUMP. Sat is Edge's original setting and BUMP mimics a transformer being pushed at the output stage.
 - BIT = RESOULTION and SAMPLERATE. RESO has three different bit modes called CRUSH, STATIC, and HISS for more/less subtle changes.
 
-### 1/5/25 2:57pm
+### 1/5/26 2:57pm
 Cuz revamped entire Reverb Algo
 - Added SHM - octave up feedback loop
 - WET - goes 100% wet at 100% fader
