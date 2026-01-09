@@ -8013,6 +8013,8 @@ static float last_chorus_wow = -1.0f;
 		last_delay_time = delay_time_smoothed;
 	}
 	const bool perform_mode = IsPerformUiMode(ui_mode);
+	const bool main_mode = (ui_mode == UiMode::Main);
+	const bool fx_allowed = perform_mode || IsPlayUiMode(ui_mode) || ui_mode == UiMode::FxDetail;
 	const bool amp_env_active = perform_mode;
 	const float amp_attack_ms = AmpEnvMsFromFader(amp_attack);
 	const float amp_release_ms = AmpEnvMsFromFader(amp_release);
@@ -8775,6 +8777,18 @@ static float last_chorus_wow = -1.0f;
 			out[1][i] = 0.0f;
 			continue;
 		}
+		if (main_mode)
+		{
+			out[0][i] = 0.0f;
+			out[1][i] = 0.0f;
+			continue;
+		}
+		if (!fx_allowed)
+		{
+			out[0][i] = sig_l;
+			out[1][i] = sig_r;
+			continue;
+		}
 		float fx_l = sig_l;
 		float fx_r = sig_r;
 		for (int stage = 0; stage < kPerformFaderCount; ++stage)
@@ -9365,6 +9379,10 @@ int main(void)
 				playhead_step = 0;
 				playhead_last_step_ms = 0;
 				play_screen_dirty = true;
+			}
+			if (IsPerformUiMode(last_mode) && !IsPerformUiMode(mode))
+			{
+				ResetPerformVoices();
 			}
 			if (mode == UiMode::Record)
 			{
