@@ -119,6 +119,8 @@ constexpr float kChorusWidthMax = 2.2f;
 constexpr size_t kDelayMaxSamples = 96000;
 constexpr float kDelayTimeMinMs = 50.0f;
 constexpr float kDelayTimeMaxMs = 2000.0f;
+constexpr float kDelayTimeSlewMs = 180.0f;
+constexpr float kDelayParamSlewMs = 120.0f;
 constexpr float kDelayFeedbackMax = 0.98f;
 constexpr float kDelayDefaultWet = 0.0f;
 constexpr float kDelayWetStep = 0.02f;
@@ -7734,6 +7736,9 @@ static float cached_tape_rate = 0.0f;
 	static float cached_delay_feedback = 0.0f;
 	static float cached_delay_spread = 0.0f;
 	static float cached_delay_freeze = 0.0f;
+	static float delay_time_smoothed = -1.0f;
+	static float delay_feedback_smoothed = -1.0f;
+	static float delay_spread_smoothed = -1.0f;
 	static float cached_reverb_wet = 0.0f;
 	static float cached_reverb_pre = 0.0f;
 	static float cached_reverb_damp = 0.0f;
@@ -7891,26 +7896,6 @@ static float last_chorus_wow = -1.0f;
 		{
 			last_delay_wet = cached_delay_wet;
 		}
-		if (fabsf(cached_delay_time - last_delay_time) > kFxParamEpsilon)
-		{
-			const float time_curve = cached_delay_time * cached_delay_time;
-			float delay_ms = kDelayTimeMinMs
-				+ (time_curve * (kDelayTimeMaxMs - kDelayTimeMinMs));
-			const float delay_samples = delay_ms * 0.001f * out_sr;
-			const float max_delay = static_cast<float>(kDelayMaxSamples - 1);
-			float delay_target = delay_samples;
-			if (delay_target > max_delay)
-			{
-				delay_target = max_delay;
-			}
-			if (delay_target < 1.0f)
-			{
-				delay_target = 1.0f;
-			}
-			delay_line_l.SetDelay(delay_target);
-			delay_line_r.SetDelay(delay_target);
-			last_delay_time = cached_delay_time;
-		}
 		if (fabsf(cached_delay_feedback - last_delay_feedback) > kFxParamEpsilon)
 		{
 			last_delay_feedback = cached_delay_feedback;
@@ -7987,6 +7972,46 @@ static float last_chorus_wow = -1.0f;
 	const float chorus_mix = cached_chorus_mix;
 	const float delay_mix = cached_delay_wet;
 	const float rev_shimmer = cached_reverb_shimmer;
+	const float dt = static_cast<float>(size) / out_sr;
+	const float time_tau = kDelayTimeSlewMs * 0.001f;
+	const float time_alpha = (time_tau > 0.0f) ? (1.0f - expf(-dt / time_tau)) : 1.0f;
+	const float param_tau = kDelayParamSlewMs * 0.001f;
+	const float param_alpha = (param_tau > 0.0f) ? (1.0f - expf(-dt / param_tau)) : 1.0f;
+	const float time_curve = cached_delay_time * cached_delay_time;
+	float delay_ms = kDelayTimeMinMs
+		+ (time_curve * (kDelayTimeMaxMs - kDelayTimeMinMs));
+	const float delay_samples = delay_ms * 0.001f * out_sr;
+	const float max_delay = static_cast<float>(kDelayMaxSamples - 1);
+	float delay_target = delay_samples;
+	if (delay_target > max_delay)
+	{
+		delay_target = max_delay;
+	}
+	if (delay_target < 1.0f)
+	{
+		delay_target = 1.0f;
+	}
+	if (delay_time_smoothed < 0.0f)
+	{
+		delay_time_smoothed = delay_target;
+	}
+	delay_time_smoothed += (delay_target - delay_time_smoothed) * time_alpha;
+	if (delay_feedback_smoothed < 0.0f)
+	{
+		delay_feedback_smoothed = cached_delay_feedback;
+	}
+	delay_feedback_smoothed += (cached_delay_feedback - delay_feedback_smoothed) * param_alpha;
+	if (delay_spread_smoothed < 0.0f)
+	{
+		delay_spread_smoothed = cached_delay_spread;
+	}
+	delay_spread_smoothed += (cached_delay_spread - delay_spread_smoothed) * param_alpha;
+	if (fabsf(delay_time_smoothed - last_delay_time) > kFxParamEpsilon)
+	{
+		delay_line_l.SetDelay(delay_time_smoothed);
+		delay_line_r.SetDelay(delay_time_smoothed);
+		last_delay_time = delay_time_smoothed;
+	}
 	const bool perform_mode = IsPerformUiMode(ui_mode);
 	const bool amp_env_active = perform_mode;
 	const float amp_attack_ms = AmpEnvMsFromFader(amp_attack);
@@ -8155,7 +8180,7 @@ static float last_chorus_wow = -1.0f;
 	auto apply_delay = [&](float &l, float &r)
 	{
 		const float freeze = (cached_delay_freeze >= 0.5f) ? 1.0f : 0.0f;
-		float feedback = cached_delay_feedback;
+		float feedback = delay_feedback_smoothed;
 		if (feedback > kDelayFeedbackMax)
 		{
 			feedback = kDelayFeedbackMax;
@@ -8178,7 +8203,7 @@ static float last_chorus_wow = -1.0f;
 		float fb_r = delay_out_l * feedback_mix;
 		delay_line_l.Write(input_l + fb_l);
 		delay_line_r.Write(input_r + fb_r);
-		const float spread = cached_delay_spread;
+		const float spread = delay_spread_smoothed;
 		float delay_l = delay_out_l;
 		float delay_r = delay_out_r;
 		if (spread > 0.0f)
