@@ -1,3 +1,21 @@
+# 1/9/26 4:06pm
+Cuz completey redesigned HOME screen UI
+- PERFORM/PLAY now completely independent engines loading into their own buffers
+- LOAD screen is staging ground for PERF&PLAY Presets - and BAKE feature
+- EDT now loads a file (can preview dry signal here)
+- Waveform viewer now accurate across both modes and within every track of sampler
+- FX engines no longer crossing over in modes
+- RECORD screen audio muted until SRC is selected for monitoring
+- Make sure MaxKbSamples are only set for 5 seconds to save CPU and buffer time.
+- built recorded audio fail safe message so users don't lose freshly recorded samples on accident.
+- Added DELETE menu sample preview so users can hear a sample before deleting it to validate.
+- RECORD screen audio wavform viewer is accurate when loading to PERFORM - before it would only show previosly loaded sample visually.(add options to record to specific slot in PLAY?)
+- Updated playback head animation in EDT quick view and Waveform View trim section.
+- Removed all BAKE features within RECORD for now (left staging area in LOAD for future dev)
+- Increased SAVE speed. kSaveChunkFrames increased to 8192 & Removed the per‑step time budget so StepSaveRecordedSample writes the full file in one go.
+
+
+
 ### 1/8/26 6:10pm
 Cuz fixed PERFORM fader response to be MASTER MIX knobs for FX details
 - added mix inside of SAT and MOD
