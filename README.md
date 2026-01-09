@@ -1,3 +1,8 @@
+### 1/8/26 6:10pm
+Cuz fixed PERFORM fader response to be MASTER MIX knobs for FX details
+- added mix inside of SAT and MOD
+- all FX detail params start at 50% except Mix Control
+
 ### 1/7/26 11:23am
 Cuz revamped "DELAY" section
 - TIM - Number of repeats
