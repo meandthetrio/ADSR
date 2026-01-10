@@ -20,8 +20,8 @@ constexpr int32_t kMenuCount = 4;
 constexpr int32_t kShiftMenuCount = 2;
 constexpr int32_t kLoadTargetCount = 2;
 constexpr int32_t kRecordTargetCount = 2;
-constexpr int32_t kRecordTargetPerform = 0;
-constexpr int32_t kRecordTargetPlay = 1;
+constexpr int32_t kRecordTargetSave = 0;
+constexpr int32_t kRecordTargetDiscard = 1;
 constexpr int32_t kPerformBoxCount = 4;
 constexpr int32_t kPerformEdtIndex = 0;
 constexpr int32_t kPerformFaderCount = 4;
@@ -69,6 +69,233 @@ constexpr int kPlayStepCount = 16;
 constexpr uint32_t kPreviewReadBudgetMs = 2;
 constexpr size_t kPreviewBufferFrames = 4096;
 constexpr size_t kPreviewReadFrames = 256;
+
+static const char* kSaveColors[] =
+{
+	"Red",
+	"White",
+	"Orange",
+	"Amber",
+	"Gold",
+	"Yellow",
+	"Lime",
+	"Green",
+	"Emerald",
+	"Teal",
+	"Cyan",
+	"Azure",
+	"Blue",
+	"Indigo",
+	"Violet",
+	"Magenta",
+	"Pink",
+	"Rose",
+	"Crimson",
+	"Scarlet",
+	"Maroon",
+	"Purple",
+	"Plum",
+	"Lavender",
+	"Lemon",
+	"Sage",
+	"Olive",
+	"Brown",
+	"Umber",
+	"Slate",
+	"Black",
+};
+
+static const char* kSaveAdjectives[] =
+{
+	"Calm",
+	"Quiet",
+	"Soft",
+	"Still",
+	"Dream",
+	"Wish",
+	"Sigh",
+	"Hush",
+	"Ashen",
+	"Chill",
+	"Lunar",
+	"Solar",
+	"Aura",
+	"Chord",
+	"Tempo",
+	"Pulse",
+	"Reflect",
+	"Vibe",
+	"Tone",
+	"Hum",
+	"Fern",
+	"Moss",
+	"Briar",
+	"Grove",
+	"Shade",
+	"River",
+	"Raw",
+	"Shore",
+	"Tidal",
+	"Wave",
+	"Spray",
+	"Rain",
+	"Cloud",
+	"Spark",
+	"Smoke",
+	"Snow",
+	"Ice",
+	"Orbit",
+	"Nova",
+	"Comet",
+	"Star",
+	"Sky",
+	"Void",
+	"Ether",
+	"Zen",
+	"Thin",
+	"Cliff",
+	"Ridge",
+	"Peak",
+	"Vale",
+	"Field",
+	"Path",
+	"Trail",
+	"Omni",
+	"Sad",
+	"Harp",
+	"Viola",
+	"Bass",
+	"Organ",
+	"Flute",
+	"Drone",
+	"Scale",
+	"Note",
+	"Desert",
+	"Heath",
+	"Cove",
+	"Delta",
+	"Bland",
+	"Reef",
+	"Loam",
+	"Glint",
+	"Fable",
+	"Verse",
+	"Rhyme",
+	"Psalm",
+	"Chant",
+	"Veil",
+	"Glow",
+	"Curve",
+	"Fragile",
+	"Cursed",
+	"Magic",
+	"Holy",
+	"Fever",
+};
+
+static const char* kSaveNouns[] =
+{
+	"Mist",
+	"Horizon",
+	"Ember",
+	"Drift",
+	"Canopy",
+	"Echo",
+	"Mound",
+	"Stillness",
+	"Moonlight",
+	"Ash",
+	"Breeze",
+	"Meadow",
+	"Shadow",
+	"Tides",
+	"Sorrow",
+	"Thicket",
+	"Dew",
+	"Lumins",
+	"Dusk",
+	"Frost",
+	"Hollow",
+	"Murmur",
+	"Storm",
+	"Feather",
+	"Veil",
+	"Ripple",
+	"Retro",
+	"Bloom",
+	"Stone",
+	"Whisper",
+	"Dawn",
+	"Drip",
+	"Current",
+	"Glimmer",
+	"Hammer",
+	"Soil",
+	"Flame",
+	"Canter",
+	"Fogbank",
+	"Reflection",
+	"Raindrop",
+	"Skyward",
+	"Tempest",
+	"Arrow",
+	"Leaf",
+	"Glow",
+	"Thunderhead",
+	"Pathway",
+	"Snowdrift",
+	"Again",
+	"Breath",
+	"Overcast",
+	"Pool",
+	"Petal",
+	"Lilt",
+	"Club",
+	"Cradle",
+	"Moonrise",
+	"Erosion",
+	"Sunshower",
+	"Branch",
+	"Gales",
+	"Pool",
+	"Shimmer",
+	"Silence",
+	"Lineman",
+	"Brother",
+	"Solstice",
+	"Driftwood",
+	"Clearing",
+	"Glowfly",
+	"Buffalo",
+	"Carnage",
+	"Basin",
+	"Frostline",
+	"Skyscape",
+	"Undertone",
+	"Wreckage",
+	"Lichen",
+	"Daybreak",
+	"Haze",
+	"Bramble",
+	"Rainlight",
+	"Snowmelt",
+	"Stones",
+	"Backwind",
+	"Twilight",
+	"Stream",
+	"Overhang",
+	"Quiver",
+	"Shadowland",
+	"Fieldnote",
+	"Softrain",
+	"String",
+	"Sundown",
+	"Nightmoves",
+	"Tiger",
+	"Mother",
+	"Lowtide",
+	"Earthsong",
+};
 constexpr int kPerformVoiceCount = 5;
 constexpr float kReverbFeedback = 0.85f;
 constexpr float kReverbLpFreq = 12000.0f;
@@ -135,6 +362,7 @@ enum class UiMode : int32_t
 	Play,
 	PlayTrack,
 	Record,
+	PresetSaveStub,
 	Shift,
 };
 
@@ -798,7 +1026,7 @@ constexpr size_t kRecordMaxFrames = static_cast<size_t>(kRecordMaxSeconds) * 480
 constexpr uint32_t kRecordCountdownMs = 4000;
 volatile RecordState record_state = RecordState::Armed;
 volatile int32_t record_source_index = 0;
-volatile int32_t record_target_index = kRecordTargetPlay;
+volatile int32_t record_target_index = kRecordTargetSave;
 volatile uint32_t record_countdown_start_ms = 0;
 volatile size_t record_pos = 0;
 volatile bool record_waveform_pending = false;
@@ -1055,7 +1283,7 @@ static int32_t NextMenuIndex(int32_t current, int32_t delta)
 	}
 	return order[pos];
 }
-const char* kShiftMenuLabels[kShiftMenuCount] = {"SAVE", "DELETE"};
+const char* kShiftMenuLabels[kShiftMenuCount] = {"SAVE PRESET", "DELETE"};
 
 template <typename... Va>
 static void LogLine(const char* format, Va... va)
@@ -1114,6 +1342,7 @@ static const char* UiModeName(UiMode mode)
 		case UiMode::Play: return "PLAY";
 		case UiMode::PlayTrack: return "PLAY_TRACK";
 		case UiMode::Record: return "RECORD";
+		case UiMode::PresetSaveStub: return "PRESET_SAVE_STUB";
 		case UiMode::Shift: return "SHIFT";
 		default: return "UNKNOWN";
 	}
@@ -1443,6 +1672,12 @@ static int32_t LoadVisibleLines()
 	return load_lines;
 }
 
+template <size_t N>
+constexpr size_t ArraySize(const char* const (&)[N])
+{
+	return N;
+}
+
 static void MountSd()
 {
 	if (sd_mounted)
@@ -1471,6 +1706,77 @@ static bool BuildNextSaveName(char* out_name, size_t out_len)
 	{
 		return false;
 	}
+	static uint32_t save_name_seed = 0;
+	if (save_name_seed == 0)
+	{
+		save_name_seed = static_cast<uint32_t>(System::GetNow()) ^ 0xA5A5A5A5u;
+	}
+	auto next_rand = [&]()
+	{
+		save_name_seed = (save_name_seed * 1664525u) + 1013904223u;
+		return save_name_seed;
+	};
+
+	const size_t color_count = ArraySize(kSaveColors);
+	const size_t adj_count = ArraySize(kSaveAdjectives);
+	const size_t noun_count = ArraySize(kSaveNouns);
+
+	for (int attempt = 0; attempt < 5000; ++attempt)
+	{
+		const char* adj = kSaveAdjectives[next_rand() % adj_count];
+		const char* color = kSaveColors[next_rand() % color_count];
+		const char* noun = kSaveNouns[next_rand() % noun_count];
+
+		char base[64];
+		const int base_len = snprintf(base, sizeof(base), "%s%s%s", adj, color, noun);
+		if (base_len <= 0)
+		{
+			continue;
+		}
+		if (static_cast<size_t>(base_len) + 4 >= out_len)
+		{
+			continue;
+		}
+		if (base_len >= static_cast<int>(sizeof(base) - 1))
+		{
+			continue;
+		}
+
+		for (int suffix = 0; suffix < 100; ++suffix)
+		{
+			char name[64];
+			if (suffix == 0)
+			{
+				if (static_cast<size_t>(base_len) + 4 >= sizeof(name))
+				{
+					continue;
+				}
+				snprintf(name, sizeof(name), "%s.wav", base);
+			}
+			else
+			{
+				if (static_cast<size_t>(base_len) + 6 >= sizeof(name))
+				{
+					continue;
+				}
+				snprintf(name, sizeof(name), "%s%02d.wav", base, suffix);
+			}
+			if (StrLen(name) >= out_len)
+			{
+				continue;
+			}
+			char path[64];
+			BuildFilePath(name, path, sizeof(path));
+			FILINFO finfo;
+			const FRESULT res = f_stat(path, &finfo);
+			if (res != FR_OK)
+			{
+				CopyString(out_name, name, out_len);
+				return true;
+			}
+		}
+	}
+
 	for (int i = 1; i <= 9999; ++i)
 	{
 		char name[16];
@@ -2013,35 +2319,6 @@ static void SetSampleContext(SampleContext ctx)
 		waveform_ready = true;
 		waveform_dirty = true;
 	}
-}
-
-static void CopyCurrentSampleToContext(SampleContext dest)
-{
-	if (current_sample_context == dest)
-	{
-		return;
-	}
-	int16_t* dest_l = (dest == SampleContext::Perform)
-		? perform_sample_buffer_l
-		: play_sample_buffer_l;
-	int16_t* dest_r = (dest == SampleContext::Perform)
-		? perform_sample_buffer_r
-		: play_sample_buffer_r;
-	const size_t frames = (sample_length > kMaxSampleSamples)
-		? kMaxSampleSamples
-		: sample_length;
-	if (frames > 0)
-	{
-		std::memcpy(dest_l, sample_buffer_l, frames * sizeof(int16_t));
-		std::memcpy(dest_r, sample_buffer_r, frames * sizeof(int16_t));
-	}
-	SampleState& state = SampleStateForContext(dest);
-	SaveSampleState(state);
-	WaveformCache& dest_cache = WaveformCacheForContext(dest);
-	std::memcpy(dest_cache.min, waveform_min, sizeof(waveform_min));
-	std::memcpy(dest_cache.max, waveform_max, sizeof(waveform_max));
-	dest_cache.ready = waveform_ready;
-	dest_cache.dirty = waveform_dirty;
 }
 
 static void UpdatePlayStepMs()
@@ -5752,43 +6029,35 @@ static void DrawLoadStubScreen(LoadStubMode mode)
 	display.Update();
 }
 
-static void DrawRecordTargetScreen(int32_t selected)
+static void DrawPresetSaveStub()
 {
 	display.Fill(false);
-	constexpr int kMargin = 2;
-	constexpr int kGap = 2;
-	const int top_h = (kDisplayH - (kMargin * 2) - kGap) / 2;
-	const int bottom_h = kDisplayH - (kMargin * 2) - kGap - top_h;
-	const int top_y = kMargin;
-	const int bottom_y = kMargin + top_h + kGap;
-	const int box_w = kDisplayW - (kMargin * 2);
+	const char* line1 = "ABILITY TO";
+	const char* line2 = "SAVE PRESETS";
+	const char* line3 = "COMING SOON";
+	const int w1 = TinyStringWidth(line1);
+	const int w2 = TinyStringWidth(line2);
+	const int w3 = TinyStringWidth(line3);
+	const int x1 = (kDisplayW - w1) / 2;
+	const int x2 = (kDisplayW - w2) / 2;
+	const int x3 = (kDisplayW - w3) / 2;
+	const int y1 = (kDisplayH / 2) - Font5x7::H - 6;
+	const int y2 = y1 + Font5x7::H + 4;
+	const int y3 = y2 + Font5x7::H + 4;
+	DrawTinyString(line1, x1, y1, true);
+	DrawTinyString(line2, x2, y2, true);
+	DrawTinyString(line3, x3, y3, true);
+	display.Update();
+}
 
-	auto draw_box = [&](int x, int y, int w, int h, const char* label, bool highlight)
-	{
-		display.DrawRect(x, y, x + w - 1, y + h - 1, true, highlight);
-		const int len = static_cast<int>(StrLen(label));
-		if (len <= 0)
-		{
-			return;
-		}
-		const int char_w = Font5x7::W + 1;
-		const int text_w = (len - 1) * char_w + Font5x7::W;
-		const int text_h = Font5x7::H;
-		int text_x = x + (w - text_w) / 2;
-		int text_y = y + (h - text_h) / 2;
-		if (text_x < x + 1)
-		{
-			text_x = x + 1;
-		}
-		if (text_y < y + 1)
-		{
-			text_y = y + 1;
-		}
-		DrawTinyString(label, text_x, text_y, !highlight);
-	};
-
-	draw_box(kMargin, top_y, box_w, top_h, "PLAY", selected == kRecordTargetPlay);
-	draw_box(kMargin, bottom_y, box_w, bottom_h, "PERFORM", selected == kRecordTargetPerform);
+static void DrawRecordTargetScreen(int32_t selected)
+{
+	const FontDef font = Font_6x8;
+	display.Fill(false);
+	display.SetCursor(0, 0);
+	display.WriteString("SAVE SAMPLE?", font, true);
+	display.SetCursor(0, (font.FontHeight + 2) * 2);
+	display.WriteString("L=NO  R=YES", font, true);
 	display.Update();
 }
 
@@ -6159,16 +6428,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			LogLine("Shift menu select: %s", kShiftMenuLabels[shift_menu_index]);
 			if (shift_menu_index == 0)
 			{
-				save_in_progress = true;
-				save_done = false;
-				save_success = false;
-				save_started = false;
-				save_prev_mode = shift_prev_mode;
-				save_start_ms = System::GetNow();
-				save_result_until_ms = 0;
-				save_draw_next_ms = 0;
-				save_filename[0] = '\0';
-				ResetSaveState();
+				ui_mode = UiMode::PresetSaveStub;
 			}
 				else if (shift_menu_index == 1)
 				{
@@ -6182,11 +6442,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 					load_scroll = 0;
 				request_delete_scan = true;
 				request_delete_redraw = true;
-			}
-			if (!sd_init_in_progress && shift_menu_index == 0)
-			{
-				ui_mode = shift_prev_mode;
-				request_shift_redraw = true;
 			}
 		}
 		if (encoder_l_pressed)
@@ -6380,6 +6635,14 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			ui_mode = UiMode::LoadModeSelect;
 		}
 	}
+	else if (!ui_blocked && ui_mode == UiMode::PresetSaveStub)
+	{
+		if (encoder_l_pressed || encoder_r_pressed)
+		{
+			ui_mode = UiMode::Shift;
+			request_shift_redraw = true;
+		}
+	}
 	else if (!ui_blocked && ui_mode == UiMode::LoadTarget)
 	{
 		if (encoder_l_inc != 0)
@@ -6481,29 +6744,22 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			}
 			else if (record_state == RecordState::Review && sample_loaded)
 			{
+				record_target_index = kRecordTargetSave;
 				record_state = RecordState::TargetSelect;
 			}
 			else if (record_state == RecordState::TargetSelect)
 			{
-				if (record_target_index == kRecordTargetPerform)
-				{
-					CopyCurrentSampleToContext(SampleContext::Perform);
-					SetSampleContext(SampleContext::Perform);
-					ui_mode = UiMode::Perform;
-					midi_ignore_until_ms = now_ms + 200;
-					request_perform_redraw = true;
-				}
-				else if (record_target_index == kRecordTargetPlay)
-				{
-					SetSampleContext(SampleContext::Play);
-					ui_mode = UiMode::Play;
-					if (sample_loaded && sample_length > 0)
-					{
-						waveform_ready = true;
-					}
-					waveform_dirty = true;
-					request_length_redraw = true;
-				}
+				save_in_progress = true;
+				save_done = false;
+				save_success = false;
+				save_started = false;
+				save_prev_mode = UiMode::Main;
+				save_start_ms = System::GetNow();
+				save_result_until_ms = 0;
+				save_draw_next_ms = 0;
+				save_filename[0] = '\0';
+				ResetSaveState();
+				record_state = RecordState::Review;
 			}
 			else if (record_state == RecordState::BackConfirm)
 			{
@@ -6524,6 +6780,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			{
 				record_state = RecordState::Review;
 				waveform_dirty = true;
+				request_length_redraw = true;
 			}
 			else if (record_state == RecordState::SourceSelect)
 			{
@@ -9150,6 +9407,10 @@ int main(void)
 				DrawShiftMenu(shift_menu_index);
 				last_shift_menu = shift_menu_index;
 			}
+			else if (mode == UiMode::PresetSaveStub)
+			{
+				DrawPresetSaveStub();
+			}
 			else
 			{
 				if (record_state == RecordState::BackConfirm)
@@ -9251,6 +9512,10 @@ int main(void)
 					last_shift_menu = current;
 				}
 			}
+		}
+		else if (mode == UiMode::PresetSaveStub)
+		{
+			DrawPresetSaveStub();
 		}
 		else if (mode == UiMode::Load)
 		{

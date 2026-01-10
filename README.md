@@ -1,3 +1,10 @@
+# 1/9/26 8:52pm
+Cuz reworked Sample saving screen
+- Isolated "SAVE" only to RECORDED samples for quicker load to SD card.
+- Built new SAVE menus after RECORD
+- SHFT+SAVE now dedicated to "SAVE PRESET"
+- Built Auto-name generator for saving samples in arrays{adj}{color}{noun} format.
+
 # 1/9/26 4:06pm
 Cuz completey redesigned HOME screen UI
 - PERFORM/PLAY now completely independent engines loading into their own buffers
@@ -12,7 +19,7 @@ Cuz completey redesigned HOME screen UI
 - RECORD screen audio wavform viewer is accurate when loading to PERFORM - before it would only show previosly loaded sample visually.(add options to record to specific slot in PLAY?)
 - Updated playback head animation in EDT quick view and Waveform View trim section.
 - Removed all BAKE features within RECORD for now (left staging area in LOAD for future dev)
-- Increased SAVE speed. kSaveChunkFrames increased to 8192 & Removed the per‑step time budget so StepSaveRecordedSample writes the full file in one go.
+- Increased SAVE speed. kSaveChunkFrames increased to 8192 & Removed the per‑step time budget so StepSaveRecordedSample writes the full file in one go. (do this before loading to PERF or PLAY)
 
 
 
