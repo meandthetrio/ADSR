@@ -899,6 +899,7 @@ struct PerformVoice
 	float release_start = 0.0f;
 	float release_pos = 0.0f;
 	int32_t note = -1;
+	int32_t track = -1;
 	size_t offset = 0;
 	size_t length = 0;
 	uint32_t env_samples = 0;
@@ -1035,6 +1036,9 @@ volatile bool encoder_r_button_press = false;
 volatile bool request_length_redraw = false;
 static int32_t play_bpm = kPlayBpm;
 static uint32_t play_step_ms = 0;
+static volatile float cpu_load_pct = 0.0f;
+static volatile float cpu_load_peak_pct = 0.0f;
+static float cpu_load_ema = 0.0f;
 static PlaySelectMode play_select_mode = PlaySelectMode::Bpm;
 static int32_t play_select_row = 0;
 static int32_t play_select_col = 0;
@@ -1047,6 +1051,12 @@ volatile bool request_playhead_redraw = false;
 volatile bool button1_press = false;
 volatile bool button2_press = false;
 volatile bool request_playback_stop_log = false;
+static uint32_t master_mod_hold = 0;
+static uint32_t master_delay_hold = 0;
+static uint32_t master_reverb_hold = 0;
+static uint32_t master_mod_tail_samples = 0;
+static uint32_t master_delay_tail_samples = 0;
+static uint32_t master_reverb_tail_samples = 0;
 volatile float reverb_wet = kReverbDefaultWet;
 volatile float reverb_pre = 0.5f;
 volatile float reverb_damp = 0.5f;
@@ -2339,6 +2349,29 @@ static void UpdatePlayStepMs()
 	}
 }
 
+static void UpdateMasterFxTailSamples(float sample_rate)
+{
+	if (sample_rate < 1.0f)
+	{
+		sample_rate = 1.0f;
+	}
+	master_mod_tail_samples = static_cast<uint32_t>(sample_rate * 0.05f);
+	if (master_mod_tail_samples < 1)
+	{
+		master_mod_tail_samples = 1;
+	}
+	master_delay_tail_samples = static_cast<uint32_t>(sample_rate * 0.50f);
+	if (master_delay_tail_samples < 1)
+	{
+		master_delay_tail_samples = 1;
+	}
+	master_reverb_tail_samples = static_cast<uint32_t>(sample_rate * 1.00f);
+	if (master_reverb_tail_samples < 1)
+	{
+		master_reverb_tail_samples = 1;
+	}
+}
+
 static bool TrackHasSampleState(int32_t track)
 {
 	if (track < 0 || track >= kPlayTrackCount)
@@ -2413,7 +2446,7 @@ static bool ComputeTrimWindowFrames(float trim_start_in,
 	return (out_end > out_start);
 }
 
-static void StartSequencerVoiceWindow(size_t window_start, size_t window_end)
+static void StartSequencerVoiceWindow(size_t window_start, size_t window_end, int32_t track)
 {
 	if (!sample_loaded || sample_length < 1)
 	{
@@ -2451,6 +2484,7 @@ static void StartSequencerVoiceWindow(size_t window_start, size_t window_end)
 	voice.active = true;
 	voice.releasing = false;
 	voice.note = -1;
+	voice.track = track;
 	voice.phase = 0.0f;
 	voice.amp = 1.0f;
 	voice.env = 0.0f;
@@ -2494,7 +2528,7 @@ static void TriggerSequencerStep(int32_t step)
 		{
 			continue;
 		}
-		StartSequencerVoiceWindow(window_start, window_end);
+		StartSequencerVoiceWindow(window_start, window_end, track);
 	}
 }
 
@@ -4922,6 +4956,35 @@ static void DrawPlayScreen()
 		DrawPlayTinyText(label_x, label_y, label, true);
 	}
 
+	char cpu_label[12];
+	int cpu_pct = static_cast<int>(cpu_load_pct + 0.5f);
+	if (cpu_pct < 0)
+	{
+		cpu_pct = 0;
+	}
+	if (cpu_pct > 999)
+	{
+		cpu_pct = 999;
+	}
+	snprintf(cpu_label, sizeof(cpu_label), "CPU %d%%", cpu_pct);
+	const int cpu_len = static_cast<int>(StrLen(cpu_label));
+	const int cpu_w = (cpu_len > 0)
+		? (cpu_len * kPlayTinyW + (cpu_len - 1) * kPlayTinySpacing)
+		: 0;
+	if (cpu_w > 0)
+	{
+		int cpu_x = label_x + label_w + 6;
+		if (cpu_x + cpu_w >= kDisplayW)
+		{
+			cpu_x = kDisplayW - cpu_w - 1;
+		}
+		if (cpu_x < 0)
+		{
+			cpu_x = 0;
+		}
+		DrawPlayTinyText(cpu_x, label_y, cpu_label, true);
+	}
+
 	const int line_y2 = label_y + kPlayTinyH + 2;
 	if (line_y2 < kDisplayH)
 	{
@@ -6239,6 +6302,7 @@ static void StartPerformVoice(int32_t note)
 	voice.active = true;
 	voice.releasing = false;
 	voice.note = note;
+	voice.track = -1;
 	voice.phase = 0.0f;
 	voice.amp = 1.0f;
 	voice.env = 0.0f;
@@ -6348,6 +6412,7 @@ static void HandleMidiMessage(MidiEvent msg)
 
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size)
 {
+	const uint32_t cyc_start = DWT->CYCCNT;
 	hw.ProcessAllControls();
 	const int32_t encoder_l_inc = hw.encoder.Increment();
 	const bool encoder_l_pressed = hw.encoder.RisingEdge();
@@ -7882,6 +7947,7 @@ static float last_chorus_wow = -1.0f;
 
 	const int32_t sat_mode_local = cached_sat_mode;
 	const float sat_mix = cached_sat_mix;
+	const bool sat_active = (sat_mix > kFxParamEpsilon);
 	const float bit_reso = cached_sat_reso;
 	const float bit_smpl = cached_sat_smpl;
 	const int32_t chorus_mode_local = cached_chorus_mode;
@@ -7937,6 +8003,34 @@ static float last_chorus_wow = -1.0f;
 	const float amp_attack_samples = amp_attack_ms * 0.001f * out_sr;
 	const float amp_release_samples = amp_release_ms * 0.001f * out_sr;
 	const bool play_seq_mode = IsPlayUiMode(ui_mode) && sample_loaded;
+	const bool play_master_fx = IsPlayUiMode(ui_mode);
+	const int32_t live_track = (perform_context == PerformContext::Track
+		&& perform_context_track >= 0
+		&& perform_context_track < kPlayTrackCount)
+		? perform_context_track
+		: -1;
+	float track_mod_send[kPlayTrackCount] = {};
+	float track_delay_send[kPlayTrackCount] = {};
+	float track_reverb_send[kPlayTrackCount] = {};
+	if (play_master_fx)
+	{
+		for (int t = 0; t < kPlayTrackCount; ++t)
+		{
+			const bool use_live = (t == live_track);
+			float mod_send = use_live ? fx_c_wet : track_perform_state[t].fx_c_wet;
+			float delay_send = use_live ? delay_wet : track_perform_state[t].delay_wet;
+			float reverb_send = use_live ? reverb_wet : track_perform_state[t].reverb_wet;
+			if (mod_send < 0.0f) mod_send = 0.0f;
+			if (mod_send > 1.0f) mod_send = 1.0f;
+			if (delay_send < 0.0f) delay_send = 0.0f;
+			if (delay_send > 1.0f) delay_send = 1.0f;
+			if (reverb_send < 0.0f) reverb_send = 0.0f;
+			if (reverb_send > 1.0f) reverb_send = 1.0f;
+			track_mod_send[t] = mod_send;
+			track_delay_send[t] = delay_send;
+			track_reverb_send[t] = reverb_send;
+		}
+	}
 	const bool use_poly = (record_state != RecordState::Recording)
 		&& ((perform_mode && sample_loaded) || play_seq_mode);
 	const bool sample_stereo = (sample_channels == 2);
@@ -7964,6 +8058,10 @@ static float last_chorus_wow = -1.0f;
 
 	auto apply_saturation = [&](float &l, float &r)
 	{
+		if (sat_mix <= kFxParamEpsilon)
+		{
+			return;
+		}
 		const float dry_l = l;
 		const float dry_r = r;
 		float wet_l = l;
@@ -8270,10 +8368,34 @@ static float last_chorus_wow = -1.0f;
 		? (fx_chain_fade_target - fx_gain) / static_cast<float>(fade_samples_left)
 		: 0.0f;
 
+	const float kSendEps = 1e-7f;
 	for (size_t i = 0; i < size; i++)
 	{
 		float sig_l = 0.0f;
 		float sig_r = 0.0f;
+		float mod_send_l = 0.0f;
+		float mod_send_r = 0.0f;
+		float delay_send_l = 0.0f;
+		float delay_send_r = 0.0f;
+		float reverb_send_l = 0.0f;
+		float reverb_send_r = 0.0f;
+		auto add_voice = [&](float v_l, float v_r, int32_t track)
+		{
+			sig_l += v_l;
+			sig_r += v_r;
+			if (play_master_fx && track >= 0 && track < kPlayTrackCount)
+			{
+				const float mod_send = track_mod_send[track];
+				const float delay_send = track_delay_send[track];
+				const float reverb_send = track_reverb_send[track];
+				mod_send_l += v_l * mod_send;
+				mod_send_r += v_r * mod_send;
+				delay_send_l += v_l * delay_send;
+				delay_send_r += v_r * delay_send;
+				reverb_send_l += v_l * reverb_send;
+				reverb_send_r += v_r * reverb_send;
+			}
+		};
 		const bool monitor_active =
 			(ui_mode == UiMode::Record
 				&& record_state != RecordState::Review
@@ -8533,8 +8655,7 @@ static float last_chorus_wow = -1.0f;
 						samp_l = perform_lpf_l2[v].Process(perform_lpf_l1[v].Process(samp_l));
 						samp_r = perform_lpf_r2[v].Process(perform_lpf_r1[v].Process(samp_r));
 					}
-					sig_l += samp_l;
-					sig_r += samp_r;
+					add_voice(samp_l, samp_r, voice.track);
 					voice.active = false;
 					voice.releasing = false;
 					voice.release_pos = 0.0f;
@@ -8576,8 +8697,7 @@ static float last_chorus_wow = -1.0f;
 					samp_l = perform_lpf_l2[v].Process(perform_lpf_l1[v].Process(samp_l));
 					samp_r = perform_lpf_r2[v].Process(perform_lpf_r1[v].Process(samp_r));
 				}
-				sig_l += samp_l;
-				sig_r += samp_r;
+				add_voice(samp_l, samp_r, voice.track);
 				voice.phase += voice.rate;
 				if (!voice.releasing)
 				{
@@ -8664,15 +8784,89 @@ static float last_chorus_wow = -1.0f;
 		}
 		float fx_l = sig_l;
 		float fx_r = sig_r;
-		for (int stage = 0; stage < kPerformFaderCount; ++stage)
+		if (play_master_fx)
 		{
-			switch (fx_order[stage])
+			const float mod_in_mag = fabsf(mod_send_l) + fabsf(mod_send_r);
+			const float delay_in_mag = fabsf(delay_send_l) + fabsf(delay_send_r);
+			const float reverb_in_mag = fabsf(reverb_send_l) + fabsf(reverb_send_r);
+			if (mod_in_mag > kSendEps)
 			{
-				case kFxSatIndex: apply_saturation(fx_l, fx_r); break;
-				case kFxChorusIndex: apply_chorus(fx_l, fx_r); break;
-				case kFxDelayIndex: apply_delay(fx_l, fx_r); break;
-				case kFxReverbIndex: apply_reverb(fx_l, fx_r); break;
-				default: break;
+				master_mod_hold = master_mod_tail_samples;
+			}
+			else if (master_mod_hold > 0)
+			{
+				--master_mod_hold;
+			}
+			if (delay_in_mag > kSendEps)
+			{
+				master_delay_hold = master_delay_tail_samples;
+			}
+			else if (master_delay_hold > 0)
+			{
+				--master_delay_hold;
+			}
+			if (reverb_in_mag > kSendEps)
+			{
+				master_reverb_hold = master_reverb_tail_samples;
+			}
+			else if (master_reverb_hold > 0)
+			{
+				--master_reverb_hold;
+			}
+			const bool mod_active = (master_mod_hold > 0);
+			const bool delay_active = (master_delay_hold > 0);
+			const bool reverb_active = (master_reverb_hold > 0);
+			const float dry_mag = fabsf(fx_l) + fabsf(fx_r);
+			if (!(dry_mag < kSendEps
+				  && !sat_active
+				  && !mod_active
+				  && !delay_active
+				  && !reverb_active))
+			{
+				if (sat_active)
+				{
+					apply_saturation(fx_l, fx_r);
+				}
+				float mod_out_l = 0.0f;
+				float mod_out_r = 0.0f;
+				if (mod_active)
+				{
+					mod_out_l = mod_send_l;
+					mod_out_r = mod_send_r;
+					apply_chorus(mod_out_l, mod_out_r);
+				}
+				float delay_out_l = 0.0f;
+				float delay_out_r = 0.0f;
+				if (delay_active)
+				{
+					delay_out_l = delay_send_l;
+					delay_out_r = delay_send_r;
+					apply_delay(delay_out_l, delay_out_r);
+				}
+				float reverb_out_l = 0.0f;
+				float reverb_out_r = 0.0f;
+				if (reverb_active)
+				{
+					reverb_out_l = reverb_send_l;
+					reverb_out_r = reverb_send_r;
+					apply_reverb(reverb_out_l, reverb_out_r);
+				}
+				fx_l += mod_out_l + delay_out_l + reverb_out_l;
+				fx_r += mod_out_r + delay_out_r + reverb_out_r;
+			}
+		}
+		else
+		{
+			for (int stage = 0; stage < kPerformFaderCount; ++stage)
+			{
+				switch (fx_order[stage])
+				{
+					case kFxSatIndex: apply_saturation(fx_l, fx_r); break;
+					case kFxChorusIndex: apply_chorus(fx_l, fx_r); break;
+					case kFxDelayIndex: apply_delay(fx_l, fx_r); break;
+					case kFxReverbIndex: apply_reverb(fx_l, fx_r); break;
+					default: break;
+				}
 			}
 		}
 		out[0][i] = fx_l * fx_gain;
@@ -8688,14 +8882,41 @@ static float last_chorus_wow = -1.0f;
 		fx_chain_pause_pending = false;
 		fx_chain_fade_gain = 0.0f;
 	}
+	const uint32_t cyc_end = DWT->CYCCNT;
+	const uint32_t cyc_used = cyc_end - cyc_start;
+	const float cycles_per_block = (static_cast<float>(SystemCoreClock) / out_sr)
+		* static_cast<float>(size);
+	float load_pct = 0.0f;
+	if (cycles_per_block > 0.0f)
+	{
+		load_pct = 100.0f * (static_cast<float>(cyc_used) / cycles_per_block);
+	}
+	cpu_load_ema = (cpu_load_ema * 0.95f) + (load_pct * 0.05f);
+	cpu_load_pct = cpu_load_ema;
+	if (load_pct > cpu_load_peak_pct)
+	{
+		cpu_load_peak_pct = load_pct;
+	}
+	else
+	{
+		cpu_load_peak_pct *= 0.995f;
+		if (cpu_load_peak_pct < 0.0f)
+		{
+			cpu_load_peak_pct = 0.0f;
+		}
+	}
 	request_playhead_redraw = true;
 }
 
 int main(void)
 {
 	hw.Init();
+	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+	DWT->CYCCNT = 0;
+	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 	hw.SetAudioBlockSize(16); // number of samples handled per callback
 	hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
+	UpdateMasterFxTailSamples(hw.AudioSampleRate());
 	hw.seed.StartLog(false);
 	LogLine("Logger started");
 
@@ -8801,6 +9022,8 @@ int main(void)
 	bool last_sd_mounted = false;
 	RecordState last_record_state = RecordState::Armed;
 	bool last_playback_active = false;
+	uint8_t last_cpu_pct = 0;
+	int32_t last_playhead_step = -1;
 	uint32_t last_perform_playhead_ms = 0;
 	bool last_perform_playhead_active = false;
 	uint32_t last_edt_playhead_ms = 0;
@@ -8822,6 +9045,27 @@ int main(void)
 		if (aux_delta != 0 && UiLogEnabled())
 		{
 			LogLine("Encoder R delta=%ld", static_cast<long>(aux_delta));
+		}
+		const bool play_ui = IsPlayUiMode(ui_mode);
+		const int32_t current_step = playhead_step;
+		const uint8_t cpu_pct_ui = static_cast<uint8_t>(cpu_load_pct + 0.5f);
+		if (play_ui)
+		{
+			if (current_step != last_playhead_step || cpu_pct_ui != last_cpu_pct)
+			{
+				last_playhead_step = current_step;
+				last_cpu_pct = cpu_pct_ui;
+				play_screen_dirty = true;
+			}
+			if (play_screen_dirty)
+			{
+				request_playhead_redraw = true;
+			}
+		}
+		else
+		{
+			last_playhead_step = current_step;
+			last_cpu_pct = cpu_pct_ui;
 		}
 		if (encoder_r_button_press)
 		{
