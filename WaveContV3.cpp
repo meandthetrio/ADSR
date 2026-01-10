@@ -18,10 +18,11 @@ using PodDisplay = OledDisplay<SSD130xI2c128x64Driver>;
 constexpr bool kLogEnabled = true;
 constexpr int32_t kMenuCount = 4;
 constexpr int32_t kShiftMenuCount = 2;
-constexpr int32_t kLoadTargetCount = 2;
-constexpr int32_t kRecordTargetCount = 2;
+constexpr int32_t kLoadTargetCount = 3;
+constexpr int32_t kRecordTargetCount = 3;
 constexpr int32_t kRecordTargetPerform = 0;
 constexpr int32_t kRecordTargetPlay = 1;
+constexpr int32_t kRecordTargetBake = 2;
 constexpr int32_t kPerformBoxCount = 4;
 constexpr int32_t kPerformEdtIndex = 0;
 constexpr int32_t kPerformFaderCount = 4;
@@ -69,6 +70,21 @@ constexpr int kPlayStepCount = 16;
 constexpr uint32_t kPreviewReadBudgetMs = 2;
 constexpr size_t kPreviewBufferFrames = 4096;
 constexpr size_t kPreviewReadFrames = 256;
+constexpr size_t kPvLongSize = 1024;
+constexpr size_t kPvShortSize = 256;
+constexpr size_t kPvLongHop = kPvLongSize / 4;
+constexpr size_t kPvShortHop = kPvShortSize / 4;
+constexpr float kPvTransientThresh = 1.6f;
+constexpr float kPvTransientFloor = 1e-4f;
+constexpr float kPvTransientMix = 0.6f;
+constexpr int kPvPhaseLockRadius = 8;
+constexpr size_t kPvMaxFrames = (kMaxSampleSamples / kPvLongHop) + 4;
+constexpr float kPvOutputGain = 0.9f;
+constexpr size_t kPvStretchBufSize = kMaxSampleSamples * 2 + kPvLongSize;
+constexpr int kBakeFirstMidi = kBaseMidiNote - 12;
+constexpr int kBakeLastMidi = kBaseMidiNote + 12;
+constexpr int kBakeNoteCount = kBakeLastMidi - kBakeFirstMidi + 1;
+constexpr size_t kBakeBankFramesMax = kMaxSampleSamples * 4;
 constexpr int kPerformVoiceCount = 5;
 constexpr float kReverbFeedback = 0.85f;
 constexpr float kReverbLpFreq = 12000.0f;
@@ -132,13 +148,15 @@ enum class UiMode : int32_t
 	Play,
 	PlayTrack,
 	Record,
+	ConfirmBake,
 	Shift,
 };
 
 enum class LoadDestination : int32_t
 {
 	Play = 0,
-	Perform = 1,
+	Bake = 1,
+	Perform = 2,
 };
 
 enum class RecordState : int32_t
@@ -598,6 +616,11 @@ static volatile int32_t request_delete_index = -1;
 static volatile bool delete_confirm = false;
 static bool request_delete_redraw = false;
 static char delete_confirm_name[kMaxWavNameLen] = {0};
+static UiMode confirm_bake_prev_mode = UiMode::Record;
+static volatile int32_t confirm_bake_selected = 0;
+static volatile bool request_confirm_bake_redraw = false;
+static volatile bool request_bake_process = false;
+static bool bake_in_progress = false;
 char wav_files[kMaxWavFiles][kMaxWavNameLen];
 char loaded_sample_name[kMaxWavNameLen] = {0};
 int32_t load_lines = 1;
@@ -606,6 +629,9 @@ int32_t load_chars_per_line = 1;
 
 DSY_SDRAM_BSS int16_t sample_buffer_l[kMaxSampleSamples];
 DSY_SDRAM_BSS int16_t sample_buffer_r[kMaxSampleSamples];
+DSY_SDRAM_BSS int16_t baked_buffer_l[kBakeBankFramesMax];
+DSY_SDRAM_BSS int16_t baked_buffer_r[kBakeBankFramesMax];
+DSY_SDRAM_BSS float baked_stretch_buf[kPvStretchBufSize];
 volatile size_t sample_length = 0;
 volatile size_t sample_play_start = 0;
 volatile size_t sample_play_end = 0;
@@ -621,6 +647,10 @@ volatile bool playback_release_active = false;
 volatile float playback_release_pos = 0.0f;
 volatile float playback_release_start = 0.0f;
 volatile int32_t current_note = -1;
+volatile size_t baked_length = 0;
+volatile bool baked_ready = false;
+static size_t baked_note_offsets[kBakeNoteCount];
+static bool baked_note_ready[kBakeNoteCount];
 
 struct PerformVoice
 {
@@ -732,6 +762,10 @@ static int16_t waveform_max[128];
 static bool waveform_ready = false;
 static bool waveform_dirty = false;
 static bool waveform_from_recording = false;
+static volatile bool perform_bake_active = false;
+static volatile size_t baked_play_start = 0;
+static volatile size_t baked_play_end = 0;
+static volatile bool baked_window_valid = false;
 static volatile float perform_attack_norm = 0.0f;
 static volatile float perform_release_norm = 0.0f;
 static const char* waveform_title = nullptr;
@@ -850,6 +884,18 @@ static bool request_perform_redraw = false;
 static bool request_fx_detail_redraw = false;
 static uint32_t delay_snow_next_ms = 0;
 static uint32_t midi_ignore_until_ms = 0;
+static float pv_window_long[kPvLongSize];
+static float pv_window_short[kPvShortSize];
+static float pv_fft_re[kPvLongSize];
+static float pv_fft_im[kPvLongSize];
+static float pv_mag[kPvLongSize / 2 + 1];
+static float pv_phase[kPvLongSize / 2 + 1];
+static float pv_prev_phase[kPvLongSize / 2 + 1];
+static float pv_sum_phase[kPvLongSize / 2 + 1];
+static float pv_omega[kPvLongSize / 2 + 1];
+static bool pv_window_ready = false;
+static bool pv_transient_flags[kPvMaxFrames];
+
 static inline bool UiLogEnabled()
 {
 	if (!kUiLogsEnabled)
@@ -1078,6 +1124,7 @@ static const char* UiModeName(UiMode mode)
 		case UiMode::Play: return "PLAY";
 		case UiMode::PlayTrack: return "PLAY_TRACK";
 		case UiMode::Record: return "RECORD";
+		case UiMode::ConfirmBake: return "CONFIRM_BAKE";
 		case UiMode::Shift: return "SHIFT";
 		default: return "UNKNOWN";
 	}
@@ -1088,6 +1135,7 @@ static const char* LoadDestinationName(LoadDestination dest)
 	switch (dest)
 	{
 		case LoadDestination::Play: return "PLAY";
+		case LoadDestination::Bake: return "BAKE";
 		case LoadDestination::Perform: return "PERFORM";
 		default: return "UNKNOWN";
 	}
@@ -2269,6 +2317,454 @@ static void ResetPerformVoices()
 	}
 }
 
+static inline float WrapPhase(float phase)
+{
+	while (phase > kPi)
+	{
+		phase -= kTwoPi;
+	}
+	while (phase < -kPi)
+	{
+		phase += kTwoPi;
+	}
+	return phase;
+}
+
+static void InitPvTables()
+{
+	if (pv_window_ready)
+	{
+		return;
+	}
+	for (size_t i = 0; i < kPvLongSize; ++i)
+	{
+		pv_window_long[i] = 0.5f - 0.5f * cosf(kTwoPi * static_cast<float>(i)
+			/ static_cast<float>(kPvLongSize - 1));
+	}
+	for (size_t i = 0; i < kPvShortSize; ++i)
+	{
+		pv_window_short[i] = 0.5f - 0.5f * cosf(kTwoPi * static_cast<float>(i)
+			/ static_cast<float>(kPvShortSize - 1));
+	}
+	for (size_t k = 0; k <= kPvLongSize / 2; ++k)
+	{
+		pv_omega[k] = kTwoPi * static_cast<float>(k)
+			/ static_cast<float>(kPvLongSize);
+	}
+	pv_window_ready = true;
+}
+
+static void Fft(float* re, float* im, size_t n, bool inverse)
+{
+	if (n < 2)
+	{
+		return;
+	}
+	for (size_t i = 1, j = 0; i < n; ++i)
+	{
+		size_t bit = n >> 1;
+		for (; j & bit; bit >>= 1)
+		{
+			j ^= bit;
+		}
+		j ^= bit;
+		if (i < j)
+		{
+			float tr = re[i];
+			re[i] = re[j];
+			re[j] = tr;
+			float ti = im[i];
+			im[i] = im[j];
+			im[j] = ti;
+		}
+	}
+
+	for (size_t len = 2; len <= n; len <<= 1)
+	{
+		const float ang = (inverse ? 1.0f : -1.0f) * kTwoPi / static_cast<float>(len);
+		const float wlen_cos = cosf(ang);
+		const float wlen_sin = sinf(ang);
+		for (size_t i = 0; i < n; i += len)
+		{
+			float wcos = 1.0f;
+			float wsin = 0.0f;
+			const size_t half = len >> 1;
+			for (size_t j = 0; j < half; ++j)
+			{
+				const size_t u = i + j;
+				const size_t v = u + half;
+				const float tre = re[v] * wcos - im[v] * wsin;
+				const float tim = re[v] * wsin + im[v] * wcos;
+				re[v] = re[u] - tre;
+				im[v] = im[u] - tim;
+				re[u] += tre;
+				im[u] += tim;
+				const float next_wcos = wcos * wlen_cos - wsin * wlen_sin;
+				wsin = wcos * wlen_sin + wsin * wlen_cos;
+				wcos = next_wcos;
+			}
+		}
+	}
+
+	if (inverse)
+	{
+		const float inv_n = 1.0f / static_cast<float>(n);
+		for (size_t i = 0; i < n; ++i)
+		{
+			re[i] *= inv_n;
+			im[i] *= inv_n;
+		}
+	}
+}
+
+static size_t DetectTransientFrames(const int16_t* in_l,
+									const int16_t* in_r,
+									bool stereo,
+									size_t in_len,
+									bool* out_flags,
+									size_t max_frames)
+{
+	const size_t win = kPvLongSize;
+	const size_t hop = kPvLongHop;
+	if (in_len < win)
+	{
+		return 0;
+	}
+	size_t frames = 1 + (in_len - win) / hop;
+	if (frames > max_frames)
+	{
+		frames = max_frames;
+	}
+	float prev_energy = 0.0f;
+	for (size_t f = 0; f < frames; ++f)
+	{
+		const size_t start = f * hop;
+		float energy = 0.0f;
+		for (size_t i = 0; i < win; ++i)
+		{
+			const size_t idx = start + i;
+			if (idx >= in_len)
+			{
+				break;
+			}
+			float s = static_cast<float>(in_l[idx]);
+			if (stereo && in_r != nullptr)
+			{
+				s = 0.5f * (s + static_cast<float>(in_r[idx]));
+			}
+			const float v = s * kSampleScale;
+			energy += v * v;
+		}
+		energy /= static_cast<float>(win);
+		const bool transient = (prev_energy > 0.0f)
+			&& (energy > prev_energy * kPvTransientThresh)
+			&& (energy > kPvTransientFloor);
+		out_flags[f] = transient;
+		prev_energy = energy;
+	}
+	return frames;
+}
+
+static size_t PhaseVocoderStretchChannel(const int16_t* in,
+										 size_t in_len,
+										 float stretch,
+										 const bool* transient_flags,
+										 size_t frames,
+										 float* out,
+										 size_t out_cap)
+{
+	if (in_len == 0 || out_cap == 0)
+	{
+		return 0;
+	}
+	if (in_len < kPvLongSize || frames == 0)
+	{
+		const size_t copy_len = (in_len < out_cap) ? in_len : out_cap;
+		for (size_t i = 0; i < copy_len; ++i)
+		{
+			out[i] = static_cast<float>(in[i]) * kSampleScale;
+		}
+		return copy_len;
+	}
+
+	std::memset(out, 0, sizeof(float) * out_cap);
+	std::memset(pv_prev_phase, 0, sizeof(pv_prev_phase));
+	std::memset(pv_sum_phase, 0, sizeof(pv_sum_phase));
+
+	const size_t bins = kPvLongSize / 2;
+	const float analysis_hop = static_cast<float>(kPvLongHop);
+	const float synth_hop = analysis_hop * stretch;
+	float out_pos = 0.0f;
+	size_t out_len = 0;
+
+	for (size_t f = 0; f < frames; ++f)
+	{
+		const size_t in_pos = f * kPvLongHop;
+		for (size_t i = 0; i < kPvLongSize; ++i)
+		{
+			const size_t idx = in_pos + i;
+			const float s = (idx < in_len)
+				? static_cast<float>(in[idx]) * kSampleScale
+				: 0.0f;
+			pv_fft_re[i] = s * pv_window_long[i];
+			pv_fft_im[i] = 0.0f;
+		}
+
+		Fft(pv_fft_re, pv_fft_im, kPvLongSize, false);
+
+		for (size_t k = 0; k <= bins; ++k)
+		{
+			const float re = pv_fft_re[k];
+			const float im = pv_fft_im[k];
+			const float mag = sqrtf(re * re + im * im);
+			const float phase = atan2f(im, re);
+			pv_mag[k] = mag;
+			pv_phase[k] = phase;
+
+			const float delta = WrapPhase(phase - pv_prev_phase[k] - pv_omega[k] * analysis_hop);
+			const float true_freq = pv_omega[k] + delta / analysis_hop;
+			pv_sum_phase[k] += true_freq * synth_hop;
+			pv_prev_phase[k] = phase;
+		}
+
+		const bool transient = transient_flags != nullptr && transient_flags[f];
+		if (transient)
+		{
+			for (size_t k = 0; k <= bins; ++k)
+			{
+				pv_sum_phase[k] = pv_phase[k];
+				pv_prev_phase[k] = pv_phase[k];
+			}
+		}
+
+		for (size_t k = 0; k <= bins; ++k)
+		{
+			int peak = -1;
+			float peak_mag = 0.0f;
+			size_t start = (k > static_cast<size_t>(kPvPhaseLockRadius))
+				? (k - static_cast<size_t>(kPvPhaseLockRadius))
+				: 1;
+			size_t end = k + static_cast<size_t>(kPvPhaseLockRadius);
+			if (end >= bins)
+			{
+				end = bins - 1;
+			}
+			for (size_t p = start; p <= end; ++p)
+			{
+				if (p == 0 || p >= bins)
+				{
+					continue;
+				}
+				if (pv_mag[p] > pv_mag[p - 1] && pv_mag[p] >= pv_mag[p + 1])
+				{
+					if (pv_mag[p] > peak_mag)
+					{
+						peak_mag = pv_mag[p];
+						peak = static_cast<int>(p);
+					}
+				}
+			}
+			float out_phase = pv_sum_phase[k];
+			if (peak >= 0)
+			{
+				out_phase = pv_sum_phase[peak] + (pv_phase[k] - pv_phase[peak]);
+			}
+			pv_fft_re[k] = pv_mag[k] * cosf(out_phase);
+			pv_fft_im[k] = pv_mag[k] * sinf(out_phase);
+		}
+
+		for (size_t k = 1; k < bins; ++k)
+		{
+			pv_fft_re[kPvLongSize - k] = pv_fft_re[k];
+			pv_fft_im[kPvLongSize - k] = -pv_fft_im[k];
+		}
+		pv_fft_im[0] = 0.0f;
+		pv_fft_im[bins] = 0.0f;
+
+		Fft(pv_fft_re, pv_fft_im, kPvLongSize, true);
+
+		const size_t out_index = static_cast<size_t>(out_pos + 0.5f);
+		for (size_t i = 0; i < kPvLongSize; ++i)
+		{
+			const size_t oi = out_index + i;
+			if (oi >= out_cap)
+			{
+				break;
+			}
+			out[oi] += pv_fft_re[i] * pv_window_long[i];
+		}
+
+		if (transient)
+		{
+			const size_t short_offset = (kPvLongSize - kPvShortSize) / 2;
+			const size_t short_start = in_pos + short_offset;
+			const size_t short_out_index = out_index + short_offset;
+			for (size_t i = 0; i < kPvShortSize; ++i)
+			{
+				const size_t idx = short_start + i;
+				const size_t oi = short_out_index + i;
+				if (oi >= out_cap)
+				{
+					break;
+				}
+				const float s = (idx < in_len)
+					? static_cast<float>(in[idx]) * kSampleScale
+					: 0.0f;
+				out[oi] += s * pv_window_short[i] * kPvTransientMix;
+			}
+		}
+
+		out_pos += synth_hop;
+		const size_t frame_end = out_index + kPvLongSize;
+		if (frame_end > out_len)
+		{
+			out_len = frame_end;
+		}
+		if (out_len >= out_cap)
+		{
+			out_len = out_cap;
+			break;
+		}
+	}
+	return out_len;
+}
+
+static void ResampleToLength(const float* in, size_t in_len, int16_t* out, size_t out_len)
+{
+	if (out_len == 0)
+	{
+		return;
+	}
+	if (in_len == 0)
+	{
+		for (size_t i = 0; i < out_len; ++i)
+		{
+			out[i] = 0;
+		}
+		return;
+	}
+	if (in_len == 1)
+	{
+		const float val = in[0] * kPvOutputGain;
+		int32_t s = static_cast<int32_t>(val * 32767.0f);
+		if (s > 32767) s = 32767;
+		if (s < -32768) s = -32768;
+		const int16_t samp = static_cast<int16_t>(s);
+		for (size_t i = 0; i < out_len; ++i)
+		{
+			out[i] = samp;
+		}
+		return;
+	}
+	const float scale = static_cast<float>(in_len - 1) / static_cast<float>(out_len - 1);
+	for (size_t i = 0; i < out_len; ++i)
+	{
+		const float pos = static_cast<float>(i) * scale;
+		const size_t idx = static_cast<size_t>(pos);
+		const float frac = pos - static_cast<float>(idx);
+		const float s0 = in[idx];
+		const float s1 = in[(idx + 1 < in_len) ? (idx + 1) : idx];
+		float val = (s0 + (s1 - s0) * frac) * kPvOutputGain;
+		int32_t s = static_cast<int32_t>(val * 32767.0f);
+		if (s > 32767) s = 32767;
+		if (s < -32768) s = -32768;
+		out[i] = static_cast<int16_t>(s);
+	}
+}
+
+static bool ProcessBakedBank()
+{
+	if (!sample_loaded || !baked_window_valid)
+	{
+		return false;
+	}
+	const size_t window_start = baked_play_start;
+	const size_t window_end = baked_play_end;
+	if (window_end <= window_start)
+	{
+		return false;
+	}
+	const size_t window_len = window_end - window_start;
+	if (window_len == 0 || window_len > kMaxSampleSamples)
+	{
+		return false;
+	}
+	const size_t needed_frames = window_len * static_cast<size_t>(kBakeNoteCount);
+	if (needed_frames > kBakeBankFramesMax)
+	{
+		LogLine("Bake failed: window too long (%lu frames) for bank",
+				static_cast<unsigned long>(window_len));
+		return false;
+	}
+
+	InitPvTables();
+
+	const bool stereo = (sample_channels == 2);
+	const size_t frames = DetectTransientFrames(sample_buffer_l + window_start,
+												stereo ? (sample_buffer_r + window_start) : nullptr,
+												stereo,
+												window_len,
+												pv_transient_flags,
+												kPvMaxFrames);
+	const size_t out_cap = kPvStretchBufSize;
+
+	for (int i = 0; i < kBakeNoteCount; ++i)
+	{
+		const int midi_note = kBakeFirstMidi + i;
+		const int semis = midi_note - kBaseMidiNote;
+		const size_t offset = static_cast<size_t>(i) * window_len;
+		baked_note_offsets[i] = offset;
+		baked_note_ready[i] = false;
+		int16_t* out_l = baked_buffer_l + offset;
+		int16_t* out_r = baked_buffer_r + offset;
+		if (semis == 0)
+		{
+			for (size_t s = 0; s < window_len; ++s)
+			{
+				const size_t idx = window_start + s;
+				out_l[s] = sample_buffer_l[idx];
+				out_r[s] = (sample_channels == 2) ? sample_buffer_r[idx] : sample_buffer_l[idx];
+			}
+			baked_note_ready[i] = true;
+			continue;
+		}
+
+		const float pitch_ratio = powf(2.0f, static_cast<float>(semis) / 12.0f);
+		const size_t stretch_len_l = PhaseVocoderStretchChannel(sample_buffer_l + window_start,
+																window_len,
+																pitch_ratio,
+																pv_transient_flags,
+																frames,
+																baked_stretch_buf,
+																out_cap);
+		ResampleToLength(baked_stretch_buf, stretch_len_l, out_l, window_len);
+
+		if (stereo)
+		{
+			const size_t stretch_len_r = PhaseVocoderStretchChannel(sample_buffer_r + window_start,
+																	window_len,
+																	pitch_ratio,
+																	pv_transient_flags,
+																	frames,
+																	baked_stretch_buf,
+																	out_cap);
+			ResampleToLength(baked_stretch_buf, stretch_len_r, out_r, window_len);
+		}
+		else
+		{
+			for (size_t s = 0; s < window_len; ++s)
+			{
+				out_r[s] = out_l[s];
+			}
+		}
+		baked_note_ready[i] = true;
+	}
+
+	baked_length = window_len;
+	baked_ready = true;
+	return true;
+}
+
 static void ApplyLoadedSampleFade(size_t length, uint32_t rate)
 {
 	if (length == 0 || rate == 0)
@@ -2313,6 +2809,15 @@ static bool LoadSampleFromPath(const char* path)
 	playback_active = false;
 	playback_phase = 0.0f;
 	sample_loaded = false;
+	perform_bake_active = false;
+	baked_window_valid = false;
+	baked_ready = false;
+	baked_length = 0;
+	for (int i = 0; i < kBakeNoteCount; ++i)
+	{
+		baked_note_offsets[i] = 0;
+		baked_note_ready[i] = false;
+	}
 	perform_attack_norm = 0.0f;
 	perform_release_norm = 0.0f;
 	ResetPerformVoices();
@@ -3430,7 +3935,8 @@ static int LoadTargetDisplayIndex(LoadDestination selected)
 	switch (selected)
 	{
 		case LoadDestination::Play: return 0;
-		case LoadDestination::Perform: return 1;
+		case LoadDestination::Bake: return 1;
+		case LoadDestination::Perform: return 2;
 		default: return 0;
 	}
 }
@@ -3440,7 +3946,8 @@ static LoadDestination LoadTargetFromDisplayIndex(int32_t index)
 	switch (index)
 	{
 		case 0: return LoadDestination::Play;
-		case 1: return LoadDestination::Perform;
+		case 1: return LoadDestination::Bake;
+		case 2: return LoadDestination::Perform;
 		default: return LoadDestination::Play;
 	}
 }
@@ -3451,10 +3958,14 @@ static void DrawLoadTargetMenu(LoadDestination selected)
 	display.Fill(false);
 	constexpr int kMargin = 2;
 	constexpr int kGap = 2;
-	const int box_h = (kDisplayH - (kMargin * 2) - kGap) / 2;
-	const int box_w = kDisplayW - (kMargin * 2);
+	const int top_h = (kDisplayH - (kMargin * 2) - kGap) / 2;
+	const int bottom_h = kDisplayH - (kMargin * 2) - kGap - top_h;
 	const int top_y = kMargin;
-	const int bottom_y = kMargin + box_h + kGap;
+	const int bottom_y = kMargin + top_h + kGap;
+	const int top_w = (kDisplayW - (kMargin * 2) - kGap) / 2;
+	const int left_x = kMargin;
+	const int right_x = kMargin + top_w + kGap;
+	const int bottom_w = kDisplayW - (kMargin * 2);
 
 	auto draw_box = [&](int x, int y, int w, int h, const char* label, bool highlight)
 	{
@@ -3480,8 +3991,9 @@ static void DrawLoadTargetMenu(LoadDestination selected)
 		DrawTinyString(label, text_x, text_y, !highlight);
 	};
 
-	draw_box(kMargin, top_y, box_w, box_h, "PLAY", selected_idx == 0);
-	draw_box(kMargin, bottom_y, box_w, box_h, "PERFORM", selected_idx == 1);
+	draw_box(left_x, top_y, top_w, top_h, "PLAY", selected_idx == 0);
+	draw_box(right_x, top_y, top_w, top_h, "BAKE", selected_idx == 1);
+	draw_box(kMargin, bottom_y, bottom_w, bottom_h, "PERFORM", selected_idx == 2);
 	display.Update();
 }
 
@@ -3861,6 +4373,38 @@ static void DrawDeleteConfirm(const char* name)
 	display.Update();
 }
 
+static void DrawConfirmBakeScreen(int32_t selected)
+{
+	const FontDef font = Font_6x8;
+	display.Fill(false);
+	display.SetCursor(0, 0);
+	display.WriteString("Confirm Bake?", font, true);
+
+	const int box_y = font.FontHeight + 6;
+	const int box_h = 28;
+	const int box_w = 50;
+	const int gap = 8;
+	const int start_x = (kDisplayW - (box_w * 2 + gap)) / 2;
+
+	auto draw_box = [&](int x, const char* label, bool highlight)
+	{
+		display.DrawRect(x,
+						 box_y,
+						 x + box_w - 1,
+						 box_y + box_h - 1,
+						 true,
+						 highlight);
+		const int text_x = x + (box_w - static_cast<int>(StrLen(label)) * font.FontWidth) / 2;
+		const int text_y = box_y + (box_h - font.FontHeight) / 2;
+		display.SetCursor(text_x, text_y);
+		display.WriteString(label, font, !highlight);
+	};
+
+	draw_box(start_x, "YES", selected == 0);
+	draw_box(start_x + box_w + gap, "NO", selected == 1);
+	display.Update();
+}
+
 static void DrawRecordSourceScreen()
 {
 	const FontDef font = Font_6x8;
@@ -3923,6 +4467,15 @@ static void StartRecording()
 	record_pos = 0;
 	sample_length = 0;
 	sample_loaded = false;
+	perform_bake_active = false;
+	baked_window_valid = false;
+	baked_ready = false;
+	baked_length = 0;
+	for (int i = 0; i < kBakeNoteCount; ++i)
+	{
+		baked_note_offsets[i] = 0;
+		baked_note_ready[i] = false;
+	}
 	perform_attack_norm = 0.0f;
 	perform_release_norm = 0.0f;
 	ResetPerformVoices();
@@ -4700,6 +5253,87 @@ static void DrawWaveform()
 	const int H = 64;
 	const int text_h = Font_6x8.FontHeight + 1;
 	const int mid = text_h + (H - text_h) / 2;
+	const bool baked_view = perform_bake_active && ui_mode == UiMode::Play && baked_window_valid;
+
+	if (baked_view)
+	{
+		size_t view_start = baked_play_start;
+		size_t view_end = baked_play_end;
+		if (view_end > sample_length || view_end == 0)
+		{
+			view_end = sample_length;
+		}
+		if (view_end <= view_start)
+		{
+			view_start = 0;
+			view_end = sample_length;
+		}
+		const size_t view_len = (view_end > view_start) ? (view_end - view_start) : 0;
+		const float scale = 28.0f;
+		for (int x = 0; x < W; ++x)
+		{
+			const size_t start = view_start + (view_len * static_cast<size_t>(x)) / static_cast<size_t>(W);
+			size_t end = view_start + (view_len * static_cast<size_t>(x + 1)) / static_cast<size_t>(W);
+			if (end <= start)
+			{
+				end = start + 1;
+			}
+			if (end > view_end)
+			{
+				end = view_end;
+			}
+
+			float minv = 1.0f;
+			float maxv = -1.0f;
+			for (size_t i = start; i < end; ++i)
+			{
+				int32_t sample = sample_buffer_l[i];
+				if (sample_channels == 2)
+				{
+					sample = (sample + sample_buffer_r[i]) / 2;
+				}
+				const float s = static_cast<float>(sample) * kSampleScale;
+				if (s < minv)
+				{
+					minv = s;
+				}
+				if (s > maxv)
+				{
+					maxv = s;
+				}
+			}
+
+			int top = mid + static_cast<int>(maxv * scale);
+			int bottom = mid + static_cast<int>(minv * scale);
+			if (top > bottom)
+			{
+				const int tmp = top;
+				top = bottom;
+				bottom = tmp;
+			}
+			top = ClampI(top, text_h, H - 1);
+			bottom = ClampI(bottom, text_h, H - 1);
+			display.DrawLine(x, top, x, bottom, true);
+		}
+
+		const int top_y = text_h;
+		const int bottom_y = H - 1;
+		const int attack_x = ClampI(
+			static_cast<int>(perform_attack_norm * static_cast<float>(W - 1)),
+			0,
+			W - 1);
+		const int release_x = ClampI(
+			static_cast<int>((1.0f - perform_release_norm) * static_cast<float>(W - 1)),
+			0,
+			W - 1);
+		display.DrawLine(0, bottom_y, attack_x, top_y, true);
+		display.DrawLine(W - 1, bottom_y, release_x, top_y, true);
+
+		display.SetCursor(0, 0);
+		display.WriteString(waveform_title ? waveform_title : loaded_sample_name, Font_6x8, true);
+		display.Update();
+		return;
+	}
 
 	int start_x = (int)(trim_start * (W - 1));
 	int end_x   = (int)(trim_end   * (W - 1));
@@ -5478,10 +6112,14 @@ static void DrawRecordTargetScreen(int32_t selected)
 	display.Fill(false);
 	constexpr int kMargin = 2;
 	constexpr int kGap = 2;
-	const int box_h = (kDisplayH - (kMargin * 2) - kGap) / 2;
-	const int box_w = kDisplayW - (kMargin * 2);
+	const int top_h = (kDisplayH - (kMargin * 2) - kGap) / 2;
+	const int bottom_h = kDisplayH - (kMargin * 2) - kGap - top_h;
 	const int top_y = kMargin;
-	const int bottom_y = kMargin + box_h + kGap;
+	const int bottom_y = kMargin + top_h + kGap;
+	const int top_w = (kDisplayW - (kMargin * 2) - kGap) / 2;
+	const int left_x = kMargin;
+	const int right_x = kMargin + top_w + kGap;
+	const int bottom_w = kDisplayW - (kMargin * 2);
 
 	auto draw_box = [&](int x, int y, int w, int h, const char* label, bool highlight)
 	{
@@ -5507,8 +6145,9 @@ static void DrawRecordTargetScreen(int32_t selected)
 		DrawTinyString(label, text_x, text_y, !highlight);
 	};
 
-	draw_box(kMargin, top_y, box_w, box_h, "PLAY", selected == kRecordTargetPlay);
-	draw_box(kMargin, bottom_y, box_w, box_h, "PERFORM", selected == kRecordTargetPerform);
+	draw_box(left_x, top_y, top_w, top_h, "PLAY", selected == kRecordTargetPlay);
+	draw_box(right_x, top_y, top_w, top_h, "BAKE", selected == kRecordTargetBake);
+	draw_box(kMargin, bottom_y, bottom_w, bottom_h, "PERFORM", selected == kRecordTargetPerform);
 	display.Update();
 }
 
@@ -5524,6 +6163,11 @@ static void StartPlayback(uint8_t note)
 	}
 	size_t window_start = sample_play_start;
 	size_t window_end = sample_play_end;
+	if (perform_bake_active && ui_mode == UiMode::Play && baked_window_valid)
+	{
+		window_start = baked_play_start;
+		window_end = baked_play_end;
+	}
 	if (window_end > sample_length || window_end == 0)
 	{
 		window_end = sample_length;
@@ -5575,6 +6219,11 @@ static void StartPlayback(uint8_t note, bool apply_pitch)
 	}
 	size_t window_start = sample_play_start;
 	size_t window_end = sample_play_end;
+	if (perform_bake_active && ui_mode == UiMode::Play && baked_window_valid)
+	{
+		window_start = baked_play_start;
+		window_end = baked_play_end;
+	}
 	if (window_end > sample_length || window_end == 0)
 	{
 		window_end = sample_length;
@@ -5637,28 +6286,49 @@ static void StopPlayback(uint8_t note)
 	}
 }
 
-static void StartPerformVoice(int32_t note)
+static int BakeNoteIndexForMidi(int32_t note)
 {
+	if (note < kBakeFirstMidi || note > kBakeLastMidi)
+	{
+		return -1;
+	}
+	return note - kBakeFirstMidi;
+}
+
+static void StartPerformVoice(int32_t note, bool use_baked)
+{
+	int index = -1;
 	size_t window_start = 0;
 	size_t window_end = 0;
-	if (!sample_loaded || sample_length == 0)
+	if (use_baked)
 	{
-		return;
+		index = BakeNoteIndexForMidi(note);
+		if (index < 0 || !baked_ready || !baked_note_ready[index] || baked_length == 0)
+		{
+			return;
+		}
 	}
-	window_start = sample_play_start;
-	window_end = sample_play_end;
-	if (window_end > sample_length || window_end == 0)
+	else
 	{
-		window_end = sample_length;
-	}
-	if (window_end <= window_start)
-	{
-		window_start = 0;
-		window_end = sample_length;
-	}
-	if (window_end <= window_start)
-	{
-		return;
+		if (!sample_loaded || sample_length == 0)
+		{
+			return;
+		}
+		window_start = sample_play_start;
+		window_end = sample_play_end;
+		if (window_end > sample_length || window_end == 0)
+		{
+			window_end = sample_length;
+		}
+		if (window_end <= window_start)
+		{
+			window_start = 0;
+			window_end = sample_length;
+		}
+		if (window_end <= window_start)
+		{
+			return;
+		}
 	}
 
 	int voice_index = -1;
@@ -5702,11 +6372,20 @@ static void StartPerformVoice(int32_t note)
 	perform_lpf_r1[voice_index].Reset();
 	perform_lpf_r2[voice_index].Reset();
 	const float sr = (sample_rate == 0) ? 48000.0f : static_cast<float>(sample_rate);
-	const float semis = static_cast<float>(note - kBaseMidiNote);
-	const float pitch = powf(2.0f, semis / 12.0f);
-	voice.rate = pitch * (sr / hw.AudioSampleRate());
-	voice.offset = window_start;
-	voice.length = window_end - window_start;
+	if (use_baked)
+	{
+		voice.rate = sr / hw.AudioSampleRate();
+		voice.offset = baked_note_offsets[index];
+		voice.length = baked_length;
+	}
+	else
+	{
+		const float semis = static_cast<float>(note - kBaseMidiNote);
+		const float pitch = powf(2.0f, semis / 12.0f);
+		voice.rate = pitch * (sr / hw.AudioSampleRate());
+		voice.offset = window_start;
+		voice.length = window_end - window_start;
+	}
 }
 
 static void StopPerformVoice(int32_t note)
@@ -5742,6 +6421,7 @@ static void HandleMidiMessage(MidiEvent msg)
 	if (IsPerformUiMode(ui_mode))
 	{
 		const bool ignore_note_on = (System::GetNow() < midi_ignore_until_ms);
+		const bool use_baked = perform_bake_active && baked_ready;
 		switch (msg.type)
 		{
 			case NoteOn:
@@ -5757,7 +6437,35 @@ static void HandleMidiMessage(MidiEvent msg)
 				}
 				else
 				{
-					StartPerformVoice(note.note);
+					StartPerformVoice(note.note, use_baked);
+				}
+			}
+			break;
+			case NoteOff:
+			{
+				const NoteOffEvent note = msg.AsNoteOff();
+				StopPerformVoice(note.note);
+			}
+			break;
+			default:
+				break;
+		}
+		return;
+	}
+	if (perform_bake_active && baked_ready && ui_mode == UiMode::Play)
+	{
+		switch (msg.type)
+		{
+			case NoteOn:
+			{
+				const NoteOnEvent note = msg.AsNoteOn();
+				if (note.velocity == 0)
+				{
+					StopPerformVoice(note.note);
+				}
+				else
+				{
+					StartPerformVoice(note.note, true);
 				}
 			}
 			break;
@@ -5823,7 +6531,7 @@ static void ProcessUiControls(float out_sr, uint32_t now_ms)
 	{
 		LogLine("Encoder R delta=%ld", static_cast<long>(encoder_r_inc));
 	}
-	const bool ui_blocked = (sd_init_in_progress || save_in_progress);
+	const bool ui_blocked = (sd_init_in_progress || save_in_progress || bake_in_progress);
 	if (ui_mode == UiMode::FxDetail
 		&& fx_detail_index == kFxDelayIndex
 		&& delay_freeze >= 0.5f)
@@ -6075,6 +6783,68 @@ static void ProcessUiControls(float out_sr, uint32_t now_ms)
 			ui_mode = UiMode::Load;
 		}
 	}
+	else if (!ui_blocked && ui_mode == UiMode::ConfirmBake)
+	{
+		if (encoder_l_inc != 0)
+		{
+			int32_t next = confirm_bake_selected + encoder_l_inc;
+			while (next < 0)
+			{
+				next += 2;
+			}
+			while (next >= 2)
+			{
+				next -= 2;
+			}
+			confirm_bake_selected = next;
+			request_confirm_bake_redraw = true;
+		}
+		if (encoder_r_pressed)
+		{
+			if (confirm_bake_selected == 0 && sample_loaded)
+			{
+				size_t window_start = sample_play_start;
+				size_t window_end = sample_play_end;
+				if (window_end > sample_length || window_end == 0)
+				{
+					window_end = sample_length;
+				}
+				if (window_end <= window_start)
+				{
+					window_start = 0;
+					window_end = sample_length;
+				}
+				if (window_end > window_start)
+				{
+					baked_play_start = window_start;
+					baked_play_end = window_end;
+					baked_window_valid = true;
+					baked_ready = false;
+					baked_length = 0;
+					perform_bake_active = false;
+					request_bake_process = true;
+					bake_in_progress = true;
+				}
+				else
+				{
+					baked_window_valid = false;
+					perform_bake_active = false;
+					ui_mode = confirm_bake_prev_mode;
+				}
+				waveform_dirty = true;
+			}
+			else
+			{
+				ui_mode = confirm_bake_prev_mode;
+				waveform_dirty = true;
+			}
+		}
+		if (encoder_l_pressed)
+		{
+			ui_mode = confirm_bake_prev_mode;
+			waveform_dirty = true;
+		}
+	}
 	else if (!ui_blocked && ui_mode == UiMode::Record)
 	{
 		if (record_state == RecordState::SourceSelect)
@@ -6150,7 +6920,17 @@ static void ProcessUiControls(float out_sr, uint32_t now_ms)
 			}
 			else if (record_state == RecordState::Review && sample_loaded)
 			{
-				record_state = RecordState::TargetSelect;
+				if (waveform_from_recording)
+				{
+					record_state = RecordState::TargetSelect;
+				}
+				else
+				{
+					confirm_bake_prev_mode = ui_mode;
+					confirm_bake_selected = 0;
+					ui_mode = UiMode::ConfirmBake;
+					request_confirm_bake_redraw = true;
+				}
 			}
 			else if (record_state == RecordState::TargetSelect)
 			{
@@ -6169,6 +6949,13 @@ static void ProcessUiControls(float out_sr, uint32_t now_ms)
 					}
 					waveform_dirty = true;
 					request_length_redraw = true;
+				}
+				else
+				{
+					confirm_bake_prev_mode = UiMode::Record;
+					confirm_bake_selected = 0;
+					ui_mode = UiMode::ConfirmBake;
+					request_confirm_bake_redraw = true;
 				}
 			}
 		}
@@ -7043,6 +7830,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	}
 	size_t window_start = sample_play_start;
 	size_t window_end = sample_play_end;
+	if (perform_bake_active && ui_mode == UiMode::Play && baked_window_valid)
+	{
+		window_start = baked_play_start;
+		window_end = baked_play_end;
+	}
 	if (window_end > sample_length || window_end == 0)
 	{
 		window_end = sample_length;
@@ -7060,6 +7852,14 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		playback_release_active = false;
 		playback_release_pos = 0.0f;
 		playback_release_start = 0.0f;
+	}
+	const bool baked_valid = baked_ready && baked_length > 0;
+	if (perform_bake_active && !baked_valid)
+	{
+		for (auto &voice : perform_voices)
+		{
+			voice.active = false;
+		}
 	}
 	static float cached_sat_drive = 0.0f;
 	static float cached_sat_mix = 0.0f;
@@ -7361,6 +8161,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	const float amp_release_ms = AmpEnvMsFromFader(amp_release);
 	const float amp_attack_samples = amp_attack_ms * 0.001f * out_sr;
 	const float amp_release_samples = amp_release_ms * 0.001f * out_sr;
+	const bool play_baked_mode = perform_bake_active && ui_mode == UiMode::Play && baked_ready;
+	const bool use_baked = perform_bake_active && baked_ready && (perform_mode || play_baked_mode);
 	const bool play_seq_mode = IsPlayUiMode(ui_mode) && sample_loaded;
 	const bool play_master_fx = IsPlayUiMode(ui_mode);
 	const int32_t live_track = (perform_context == PerformContext::Track
@@ -7391,7 +8193,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		}
 	}
 	const bool use_poly = (record_state != RecordState::Recording)
-		&& ((perform_mode && sample_loaded) || play_seq_mode);
+		&& ((perform_mode && sample_loaded) || play_baked_mode || play_seq_mode);
 	const bool sample_stereo = (sample_channels == 2);
 	const float flt_cutoff_hz = FltCutoffFromFader(flt_cutoff, out_sr);
 	const float flt_q = FltQFromFader(flt_res);
@@ -7411,6 +8213,12 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	}
 	const float perform_attack = perform_attack_norm;
 	const float perform_release = perform_release_norm;
+	const float baked_attack_frames = (baked_valid && baked_length > 1)
+		? perform_attack * static_cast<float>(baked_length - 1)
+		: 0.0f;
+	const float baked_release_frames = (baked_valid && baked_length > 1)
+		? perform_release * static_cast<float>(baked_length - 1)
+		: 0.0f;
 
 	int32_t fx_order[kPerformFaderCount];
 	for (int i = 0; i < kPerformFaderCount; ++i)
@@ -7972,6 +8780,22 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 						env = static_cast<float>(voice.env_samples) / amp_attack_samples;
 					}
 				}
+				else
+				{
+					if (baked_attack_frames > 0.0f && voice.phase < baked_attack_frames)
+					{
+						env = voice.phase / baked_attack_frames;
+					}
+					if (baked_release_frames > 0.0f)
+					{
+						const float rel_pos = static_cast<float>(voice.length - 1) - voice.phase;
+						const float rel_env = rel_pos / baked_release_frames;
+						if (rel_env < env)
+						{
+							env = rel_env;
+						}
+					}
+				}
 				if (env > 1.0f)
 				{
 					env = 1.0f;
@@ -8003,11 +8827,19 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 					const float amp = voice.amp * env;
 					float samp_l = 0.0f;
 					float samp_r = 0.0f;
-					samp_l = static_cast<float>(sample_buffer_l[idx]) * kSampleScale * amp;
-					const float r = sample_stereo
-						? static_cast<float>(sample_buffer_r[idx])
-						: static_cast<float>(sample_buffer_l[idx]);
-					samp_r = r * kSampleScale * amp;
+					if (use_baked)
+					{
+						samp_l = static_cast<float>(baked_buffer_l[idx]) * kSampleScale * amp;
+						samp_r = static_cast<float>(baked_buffer_r[idx]) * kSampleScale * amp;
+					}
+					else
+					{
+						samp_l = static_cast<float>(sample_buffer_l[idx]) * kSampleScale * amp;
+						const float r = sample_stereo
+							? static_cast<float>(sample_buffer_r[idx])
+							: static_cast<float>(sample_buffer_l[idx]);
+						samp_r = r * kSampleScale * amp;
+					}
 					if (perform_mode)
 					{
 						samp_l = perform_lpf_l2[v].Process(perform_lpf_l1[v].Process(samp_l));
@@ -8035,17 +8867,27 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				float l1 = 0.0f;
 				float r0 = 0.0f;
 				float r1 = 0.0f;
-				l0 = static_cast<float>(sample_buffer_l[idx]);
-				l1 = static_cast<float>(sample_buffer_l[idx + 1]);
-				if (sample_stereo)
+				if (use_baked)
 				{
-					r0 = static_cast<float>(sample_buffer_r[idx]);
-					r1 = static_cast<float>(sample_buffer_r[idx + 1]);
+					l0 = static_cast<float>(baked_buffer_l[idx]);
+					l1 = static_cast<float>(baked_buffer_l[idx + 1]);
+					r0 = static_cast<float>(baked_buffer_r[idx]);
+					r1 = static_cast<float>(baked_buffer_r[idx + 1]);
 				}
 				else
 				{
-					r0 = l0;
-					r1 = l1;
+					l0 = static_cast<float>(sample_buffer_l[idx]);
+					l1 = static_cast<float>(sample_buffer_l[idx + 1]);
+					if (sample_stereo)
+					{
+						r0 = static_cast<float>(sample_buffer_r[idx]);
+						r1 = static_cast<float>(sample_buffer_r[idx + 1]);
+					}
+					else
+					{
+						r0 = l0;
+						r1 = l1;
+					}
 				}
 				const float amp = voice.amp * env;
 				float samp_l = (l0 + (l1 - l0) * frac) * kSampleScale * amp;
@@ -8413,7 +9255,7 @@ int main(void)
 			LogLine("Encoder R button pressed");
 		}
 	}
-	const bool ui_blocked = (sd_init_in_progress || save_in_progress);
+	const bool ui_blocked = (sd_init_in_progress || save_in_progress || bake_in_progress);
 	if (button2_press)
 	{
 		button2_press = false;
@@ -8459,7 +9301,8 @@ int main(void)
 				}
 				if (IsPerformUiMode(ui_mode))
 				{
-					StartPerformVoice(kBaseMidiNote);
+					const bool use_baked = perform_bake_active && baked_ready;
+					StartPerformVoice(kBaseMidiNote, use_baked);
 				}
 				else
 				{
@@ -8526,6 +9369,13 @@ int main(void)
 						LogLine("Load success, entering TRACK menu");
 						ui_mode = UiMode::PlayTrack;
 						request_perform_redraw = true;
+					}
+					else if (dest == LoadDestination::Bake)
+					{
+						LogLine("Load success, entering BAKE (trim review)");
+						ui_mode = UiMode::Record;
+						record_state = RecordState::Review;
+						request_length_redraw = true;
 					}
 					else if (dest == LoadDestination::Perform)
 					{
@@ -8634,6 +9484,30 @@ int main(void)
 				}
 			}
 		}
+		if (request_bake_process)
+		{
+			request_bake_process = false;
+			const bool ok = ProcessBakedBank();
+			bake_in_progress = false;
+				if (ok)
+				{
+					perform_bake_active = true;
+					perform_attack_norm = 0.0f;
+					perform_release_norm = 0.0f;
+					menu_index = 3;
+					ui_mode = UiMode::Play;
+					waveform_dirty = true;
+				}
+			else
+			{
+				baked_ready = false;
+				baked_length = 0;
+				baked_window_valid = false;
+				perform_bake_active = false;
+				ui_mode = confirm_bake_prev_mode;
+			}
+		}
+
 		if (sd_init_in_progress)
 		{
 			if (!sd_init_done)
@@ -8865,5 +9739,295 @@ int main(void)
 							LoadDestinationName(load_target_selected));
 				}
 			else if (mode == UiMode::ConfirmB
-LowCPUSeq.cpp
-Displaying LowCPUSeq.cpp.
+ake)
+			{
+				DrawConfirmBakeScreen(confirm_bake_selected);
+			}
+			else if (mode == UiMode::Shift)
+			{
+				DrawShiftMenu(shift_menu_index);
+				last_shift_menu = shift_menu_index;
+			}
+			else
+			{
+				if (record_state == RecordState::SourceSelect)
+				{
+					DrawRecordSourceScreen();
+				}
+				else if (record_state == RecordState::Armed)
+				{
+					DrawRecordArmed();
+				}
+				else if (record_state == RecordState::Countdown)
+				{
+					DrawRecordCountdown();
+				}
+				else if (record_state == RecordState::Recording)
+				{
+					DrawRecordRecording();
+				}
+				else
+				{
+					if (sample_loaded && sample_length > 0)
+					{
+						ComputeWaveform();
+						waveform_ready = true;
+						waveform_dirty = true;
+						UpdateTrimFrames();
+					}
+					DrawRecordReview();
+				}
+			}
+				last_mode = mode;
+				last_menu = menu_index;
+				last_scroll = load_scroll;
+				last_selected = load_selected;
+				last_file_count = wav_file_count;
+				last_sd_mounted = sd_mounted;
+				last_record_state = record_state;
+				last_load_target = load_target_selected;
+				last_perform_index = perform_index;
+			}
+			else if (mode == UiMode::Main)
+			{
+				const int32_t current = menu_index;
+			if (current != last_menu)
+			{
+				LogLine("Menu highlight: %s (%ld)",
+						MenuLabelForIndex(current),
+						static_cast<long>(current));
+				DrawMenu(current);
+					last_menu = current;
+				}
+			}
+			else if (mode == UiMode::Perform || mode == UiMode::PlayTrack)
+			{
+				const int32_t current = perform_index;
+				if (request_perform_redraw || current != last_perform_index)
+				{
+					request_perform_redraw = false;
+					const bool fx_select_active = (current == kPerformFxIndex)
+						&& fx_window_active;
+					const bool amp_select_active = (current == kPerformAmpIndex)
+						&& amp_window_active;
+					const bool flt_select_active = (current == kPerformFltIndex)
+						&& flt_window_active;
+					DrawPerformScreen(current,
+									  fx_select_active,
+									  fx_fader_index,
+									  amp_select_active,
+									  amp_fader_index,
+									  flt_select_active,
+									  flt_fader_index);
+					last_perform_index = current;
+				}
+			}
+			else if (mode == UiMode::FxDetail)
+			{
+				if (request_fx_detail_redraw
+					|| fx_detail_index != last_fx_detail_index
+					|| fx_detail_param_index != last_fx_detail_param_index)
+				{
+					request_fx_detail_redraw = false;
+					DrawFxDetailScreen(fx_detail_index);
+					last_fx_detail_index = fx_detail_index;
+					last_fx_detail_param_index = fx_detail_param_index;
+				}
+			}
+			else if (mode == UiMode::Shift)
+			{
+				if (!ui_blocked)
+				{
+				const int32_t current = shift_menu_index;
+				if (current != last_shift_menu)
+				{
+					DrawShiftMenu(current);
+					last_shift_menu = current;
+				}
+			}
+		}
+		else if (mode == UiMode::Load)
+		{
+			if (delete_mode && delete_confirm)
+			{
+				if (request_delete_redraw)
+				{
+					request_delete_redraw = false;
+					DrawDeleteConfirm(delete_confirm_name);
+				}
+			}
+			else
+			{
+				const int32_t current_scroll = load_scroll;
+				const int32_t current_count = wav_file_count;
+				const int32_t current_selected = load_selected;
+				if (request_delete_redraw
+					|| current_scroll != last_scroll
+					|| current_selected != last_selected
+					|| current_count != last_file_count
+					|| sd_mounted != last_sd_mounted)
+				{
+					request_delete_redraw = false;
+					DrawLoadMenu(current_scroll, current_selected);
+					if (current_selected != last_selected || current_count != last_file_count)
+					{
+						LogLine("Load menu: selected=%ld name=%s",
+								static_cast<long>(current_selected),
+								(current_selected >= 0 && current_selected < current_count)
+									? wav_files[current_selected]
+									: "UNKNOWN");
+					}
+					last_scroll = current_scroll;
+					last_selected = current_selected;
+					last_file_count = current_count;
+					last_sd_mounted = sd_mounted;
+				}
+			}
+		}
+		else if (mode == UiMode::LoadTarget)
+		{
+			const LoadDestination current_target = load_target_selected;
+			if (current_target != last_load_target)
+			{
+				DrawLoadTargetMenu(current_target);
+				last_load_target = current_target;
+			}
+		}
+		else if (mode == UiMode::ConfirmBake)
+		{
+			if (request_confirm_bake_redraw)
+			{
+				request_confirm_bake_redraw = false;
+				DrawConfirmBakeScreen(confirm_bake_selected);
+			}
+		}
+		else if (mode == UiMode::Record)
+		{
+			const RecordState current_state = record_state;
+			if (current_state != last_record_state)
+			{
+				if (current_state == RecordState::SourceSelect)
+				{
+					DrawRecordSourceScreen();
+				}
+				else if (current_state == RecordState::Armed)
+				{
+					record_anim_start_ms = NowMs();
+					DrawRecordArmed();
+				}
+				else if (current_state == RecordState::Countdown)
+				{
+					DrawRecordCountdown();
+				}
+				else if (current_state == RecordState::Recording)
+				{
+					DrawRecordRecording();
+				}
+				else if (current_state == RecordState::TargetSelect)
+				{
+					DrawRecordTargetScreen(record_target_index);
+				}
+				else
+				{
+					DrawRecordReview();
+				}
+				last_record_state = current_state;
+			}
+		}
+		if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::Recording)
+		{
+			if (live_wave_dirty)
+			{
+				live_wave_dirty = false;
+				DrawRecordRecording();
+			}
+		}
+		else if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::SourceSelect)
+		{
+			DrawRecordSourceScreen();
+		}
+		else if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::Armed)
+		{
+			DrawRecordReadyScreen();
+		}
+		else if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::Countdown)
+		{
+			DrawRecordCountdown();
+		}
+		else if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::TargetSelect)
+		{
+			DrawRecordTargetScreen(record_target_index);
+		}
+		if (!ui_blocked && (request_playhead_redraw || (playback_active != last_playback_active)))
+		{
+			request_playhead_redraw = false;
+			if (mode == UiMode::Play
+				|| (mode == UiMode::Edt)
+				|| (mode == UiMode::Record && record_state == RecordState::Review))
+			{
+				if (mode == UiMode::Play)
+				{
+					DrawPlayScreen();
+				}
+				else if (mode == UiMode::Edt)
+				{
+					DrawEdtScreen();
+				}
+				else
+				{
+					DrawRecordReview();
+				}
+			}
+		}
+		last_playback_active = playback_active;
+		if (request_playback_stop_log)
+		{
+			request_playback_stop_log = false;
+			if (UiLogEnabled())
+			{
+				LogLine("Playback: stopped (win=[%lu,%lu) phase=%.3f)",
+						static_cast<unsigned long>(sample_play_start),
+						static_cast<unsigned long>(sample_play_end),
+						static_cast<double>(playback_phase));
+			}
+		}
+		if (IsPlayUiMode(ui_mode))
+		{
+			led1_phase_ms = 0.0f;
+			led1_level = 0.0f;
+			if (playhead_running)
+			{
+				hw.led1.Set(1.0f, 0.0f, 0.0f);
+			}
+			else
+			{
+				hw.led1.Set(0.0f, 1.0f, 0.0f);
+			}
+		}
+		else
+		{
+				if ((ui_mode == UiMode::Record && record_state == RecordState::Review)
+					|| (ui_mode == UiMode::Load && !delete_mode)
+					|| (IsPerformUiMode(ui_mode) && sample_loaded)
+					|| (ui_mode == UiMode::FxDetail && sample_loaded)
+					|| (ui_mode == UiMode::Edt && sample_loaded))
+			{
+				led1_phase_ms += 10.0f;
+				if (led1_phase_ms >= kLedBlinkPeriodMs)
+				{
+					led1_phase_ms -= kLedBlinkPeriodMs;
+				}
+				const float on_time = kLedBlinkDuty * kLedBlinkPeriodMs;
+				led1_level = (led1_phase_ms < on_time) ? 1.0f : 0.0f;
+			}
+			else
+			{
+				led1_phase_ms = 0.0f;
+				led1_level = 0.0f;
+			}
+			hw.led1.Set(0.0f, led1_level, 0.0f);
+		}
+		hw.UpdateLeds();
+		hw.DelayMs(10);
+	}
+}
