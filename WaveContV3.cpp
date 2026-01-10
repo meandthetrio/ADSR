@@ -20,8 +20,8 @@ constexpr int32_t kMenuCount = 4;
 constexpr int32_t kShiftMenuCount = 2;
 constexpr int32_t kLoadTargetCount = 2;
 constexpr int32_t kRecordTargetCount = 2;
-constexpr int32_t kRecordTargetSave = 0;
-constexpr int32_t kRecordTargetDiscard = 1;
+constexpr int32_t kRecordTargetPerform = 0;
+constexpr int32_t kRecordTargetPlay = 1;
 constexpr int32_t kPerformBoxCount = 4;
 constexpr int32_t kPerformEdtIndex = 0;
 constexpr int32_t kPerformFaderCount = 4;
@@ -42,20 +42,20 @@ constexpr uint32_t kSdInitRetryMs = 300;
 constexpr uint32_t kSdInitResultMs = 1500;
 constexpr int32_t kSdInitAttempts = 3;
 constexpr uint32_t kSaveResultMs = 1500;
-constexpr uint32_t kSaveStepBudgetMs = 20;
+constexpr uint32_t kSaveStepBudgetMs = 3;
+constexpr uint32_t kControlTickMs = 10;
 constexpr int32_t kMaxWavFiles = 32;
 constexpr size_t kMaxWavNameLen = 32;
 constexpr int32_t kLoadFontScale = 1;
-constexpr size_t kMaxSampleSamples = 240000;
+constexpr size_t kMaxSampleSamples = 2 * 1024 * 1024;
 constexpr int32_t kRecordMaxSeconds = 5;
 constexpr size_t kSampleChunkFrames = 256;
-constexpr size_t kSaveChunkFrames = 8192;
+constexpr size_t kSaveChunkFrames = 2048;
 constexpr int32_t kBaseMidiNote = 60;
 constexpr float kSampleScale = 1.0f / 32768.0f;
 constexpr int32_t kLoadProgressStep = 5;
 constexpr float kLedBlinkPeriodMs = 25.0f;
 constexpr float kLedBlinkDuty = 0.5f;
-constexpr uint32_t kPerformPlayheadIntervalMs = 33;
 constexpr bool kPlaybackVerboseLog = false;
 constexpr float kPi = 3.14159265f;
 constexpr float kTwoPi = 6.2831853f;
@@ -69,233 +69,6 @@ constexpr int kPlayStepCount = 16;
 constexpr uint32_t kPreviewReadBudgetMs = 2;
 constexpr size_t kPreviewBufferFrames = 4096;
 constexpr size_t kPreviewReadFrames = 256;
-
-static const char* kSaveColors[] =
-{
-	"Red",
-	"White",
-	"Orange",
-	"Amber",
-	"Gold",
-	"Yellow",
-	"Lime",
-	"Green",
-	"Emerald",
-	"Teal",
-	"Cyan",
-	"Azure",
-	"Blue",
-	"Indigo",
-	"Violet",
-	"Magenta",
-	"Pink",
-	"Rose",
-	"Crimson",
-	"Scarlet",
-	"Maroon",
-	"Purple",
-	"Plum",
-	"Lavender",
-	"Lemon",
-	"Sage",
-	"Olive",
-	"Brown",
-	"Umber",
-	"Slate",
-	"Black",
-};
-
-static const char* kSaveAdjectives[] =
-{
-	"Calm",
-	"Quiet",
-	"Soft",
-	"Still",
-	"Dream",
-	"Wish",
-	"Sigh",
-	"Hush",
-	"Ashen",
-	"Chill",
-	"Lunar",
-	"Solar",
-	"Aura",
-	"Chord",
-	"Tempo",
-	"Pulse",
-	"Reflect",
-	"Vibe",
-	"Tone",
-	"Hum",
-	"Fern",
-	"Moss",
-	"Briar",
-	"Grove",
-	"Shade",
-	"River",
-	"Raw",
-	"Shore",
-	"Tidal",
-	"Wave",
-	"Spray",
-	"Rain",
-	"Cloud",
-	"Spark",
-	"Smoke",
-	"Snow",
-	"Ice",
-	"Orbit",
-	"Nova",
-	"Comet",
-	"Star",
-	"Sky",
-	"Void",
-	"Ether",
-	"Zen",
-	"Thin",
-	"Cliff",
-	"Ridge",
-	"Peak",
-	"Vale",
-	"Field",
-	"Path",
-	"Trail",
-	"Omni",
-	"Sad",
-	"Harp",
-	"Viola",
-	"Bass",
-	"Organ",
-	"Flute",
-	"Drone",
-	"Scale",
-	"Note",
-	"Desert",
-	"Heath",
-	"Cove",
-	"Delta",
-	"Bland",
-	"Reef",
-	"Loam",
-	"Glint",
-	"Fable",
-	"Verse",
-	"Rhyme",
-	"Psalm",
-	"Chant",
-	"Veil",
-	"Glow",
-	"Curve",
-	"Fragile",
-	"Cursed",
-	"Magic",
-	"Holy",
-	"Fever",
-};
-
-static const char* kSaveNouns[] =
-{
-	"Mist",
-	"Horizon",
-	"Ember",
-	"Drift",
-	"Canopy",
-	"Echo",
-	"Mound",
-	"Stillness",
-	"Moonlight",
-	"Ash",
-	"Breeze",
-	"Meadow",
-	"Shadow",
-	"Tides",
-	"Sorrow",
-	"Thicket",
-	"Dew",
-	"Lumins",
-	"Dusk",
-	"Frost",
-	"Hollow",
-	"Murmur",
-	"Storm",
-	"Feather",
-	"Veil",
-	"Ripple",
-	"Retro",
-	"Bloom",
-	"Stone",
-	"Whisper",
-	"Dawn",
-	"Drip",
-	"Current",
-	"Glimmer",
-	"Hammer",
-	"Soil",
-	"Flame",
-	"Canter",
-	"Fogbank",
-	"Reflection",
-	"Raindrop",
-	"Skyward",
-	"Tempest",
-	"Arrow",
-	"Leaf",
-	"Glow",
-	"Thunderhead",
-	"Pathway",
-	"Snowdrift",
-	"Again",
-	"Breath",
-	"Overcast",
-	"Pool",
-	"Petal",
-	"Lilt",
-	"Club",
-	"Cradle",
-	"Moonrise",
-	"Erosion",
-	"Sunshower",
-	"Branch",
-	"Gales",
-	"Pool",
-	"Shimmer",
-	"Silence",
-	"Lineman",
-	"Brother",
-	"Solstice",
-	"Driftwood",
-	"Clearing",
-	"Glowfly",
-	"Buffalo",
-	"Carnage",
-	"Basin",
-	"Frostline",
-	"Skyscape",
-	"Undertone",
-	"Wreckage",
-	"Lichen",
-	"Daybreak",
-	"Haze",
-	"Bramble",
-	"Rainlight",
-	"Snowmelt",
-	"Stones",
-	"Backwind",
-	"Twilight",
-	"Stream",
-	"Overhang",
-	"Quiver",
-	"Shadowland",
-	"Fieldnote",
-	"Softrain",
-	"String",
-	"Sundown",
-	"Nightmoves",
-	"Tiger",
-	"Mother",
-	"Lowtide",
-	"Earthsong",
-};
 constexpr int kPerformVoiceCount = 5;
 constexpr float kReverbFeedback = 0.85f;
 constexpr float kReverbLpFreq = 12000.0f;
@@ -334,7 +107,6 @@ constexpr float kDelayTimeMaxMs = 2000.0f;
 constexpr float kDelayTimeSlewMs = 180.0f;
 constexpr float kDelayParamSlewMs = 120.0f;
 constexpr float kDelayFeedbackMax = 0.98f;
-constexpr bool kLoadPresetsPlaceholder = true;
 constexpr float kDelayDefaultWet = 0.0f;
 constexpr float kDelayWetStep = 0.02f;
 constexpr float kDelayParamStep = 0.02f;
@@ -353,8 +125,6 @@ enum class UiMode : int32_t
 {
 	Main,
 	Load,
-	LoadModeSelect,
-	LoadStub,
 	LoadTarget,
 	Perform,
 	Edt,
@@ -362,7 +132,6 @@ enum class UiMode : int32_t
 	Play,
 	PlayTrack,
 	Record,
-	PresetSaveStub,
 	Shift,
 };
 
@@ -370,12 +139,6 @@ enum class LoadDestination : int32_t
 {
 	Play = 0,
 	Perform = 1,
-};
-
-enum class LoadStubMode : int32_t
-{
-	Presets = 0,
-	Bake = 1,
 };
 
 enum class RecordState : int32_t
@@ -386,7 +149,6 @@ enum class RecordState : int32_t
 	Recording,
 	Review,
 	TargetSelect,
-	BackConfirm,
 };
 
 enum class RecordInput : int32_t
@@ -842,36 +604,8 @@ int32_t load_lines = 1;
 int32_t load_line_height = 1;
 int32_t load_chars_per_line = 1;
 
-enum class SampleContext : int32_t
-{
-	Perform,
-	Play,
-};
-
-struct SampleState
-{
-	char name[kMaxWavNameLen] = {};
-	size_t length = 0;
-	size_t play_start = 0;
-	size_t play_end = 0;
-	uint32_t rate = 48000;
-	uint16_t channels = 1;
-	bool loaded = false;
-	float trim_start = 0.0f;
-	float trim_end = 1.0f;
-	bool from_recording = false;
-};
-
-static SampleState perform_sample_state;
-static SampleState play_sample_state;
-static SampleContext current_sample_context = SampleContext::Perform;
-
-DSY_SDRAM_BSS int16_t perform_sample_buffer_l[kMaxSampleSamples];
-DSY_SDRAM_BSS int16_t perform_sample_buffer_r[kMaxSampleSamples];
-DSY_SDRAM_BSS int16_t play_sample_buffer_l[kMaxSampleSamples];
-DSY_SDRAM_BSS int16_t play_sample_buffer_r[kMaxSampleSamples];
-static int16_t* sample_buffer_l = perform_sample_buffer_l;
-static int16_t* sample_buffer_r = perform_sample_buffer_r;
+DSY_SDRAM_BSS int16_t sample_buffer_l[kMaxSampleSamples];
+DSY_SDRAM_BSS int16_t sample_buffer_r[kMaxSampleSamples];
 volatile size_t sample_length = 0;
 volatile size_t sample_play_start = 0;
 volatile size_t sample_play_end = 0;
@@ -899,6 +633,7 @@ struct PerformVoice
 	float release_start = 0.0f;
 	float release_pos = 0.0f;
 	int32_t note = -1;
+	int32_t track = -1;
 	size_t offset = 0;
 	size_t length = 0;
 	uint32_t env_samples = 0;
@@ -968,23 +703,18 @@ enum class LoadContext : int32_t
 {
 	Main,
 	Track,
-	Edt,
 };
 
 static PerformState main_perform_state;
-static PerformState play_perform_state;
 static PerformState track_perform_state[kPlayTrackCount];
 static PerformContext perform_context = PerformContext::Main;
 static int32_t perform_context_track = 0;
 static TrackSampleState track_samples[kPlayTrackCount];
 static UiMode edt_prev_mode = UiMode::Perform;
-static SampleContext edt_sample_context = SampleContext::Perform;
 static UiMode fx_detail_prev_mode = UiMode::Perform;
 static UiMode load_prev_mode = UiMode::Main;
 static LoadContext load_context = LoadContext::Main;
 static int32_t load_context_track = 0;
-static int32_t load_mode_index = 0;
-static LoadStubMode load_stub_mode = LoadStubMode::Presets;
 static volatile bool request_track_sample_load = false;
 static volatile int32_t request_track_sample_index = -1;
 
@@ -1001,17 +731,6 @@ static int16_t waveform_min[128];
 static int16_t waveform_max[128];
 static bool waveform_ready = false;
 static bool waveform_dirty = false;
-
-struct WaveformCache
-{
-	int16_t min[128] = {};
-	int16_t max[128] = {};
-	bool ready = false;
-	bool dirty = false;
-};
-
-static WaveformCache perform_waveform_cache;
-static WaveformCache play_waveform_cache;
 static bool waveform_from_recording = false;
 static volatile float perform_attack_norm = 0.0f;
 static volatile float perform_release_norm = 0.0f;
@@ -1026,27 +745,49 @@ constexpr size_t kRecordMaxFrames = static_cast<size_t>(kRecordMaxSeconds) * 480
 constexpr uint32_t kRecordCountdownMs = 4000;
 volatile RecordState record_state = RecordState::Armed;
 volatile int32_t record_source_index = 0;
-volatile int32_t record_target_index = kRecordTargetSave;
+volatile int32_t record_target_index = kRecordTargetPlay;
 volatile uint32_t record_countdown_start_ms = 0;
 volatile size_t record_pos = 0;
 volatile bool record_waveform_pending = false;
-volatile int32_t encoder_r_accum = 0;
+volatile int32_t enc_l_delta_latched = 0;
+volatile int32_t enc_r_delta_latched = 0;
 volatile bool encoder_r_button_press = false;
+volatile bool enc_l_press_latched = false;
+volatile bool enc_r_press_latched = false;
+volatile bool btn1_press_latched = false;
+volatile bool btn2_press_latched = false;
+volatile bool btn1_down_latched = false;
+volatile bool shift_down_latched = false;
 volatile bool request_length_redraw = false;
 static int32_t play_bpm = kPlayBpm;
-static uint32_t play_step_ms = 0;
+static volatile float play_samples_per_step = 0.0f;
+static volatile float play_step_phase = 0.0f;
+static volatile float cpu_load_pct = 0.0f;
+static volatile float cpu_load_peak_pct = 0.0f;
+static float cpu_load_ema = 0.0f;
 static PlaySelectMode play_select_mode = PlaySelectMode::Bpm;
 static int32_t play_select_row = 0;
 static int32_t play_select_col = 0;
 static bool play_screen_dirty = true;
-static bool playhead_running = false;
-static int32_t playhead_step = 0;
-static uint32_t playhead_last_step_ms = 0;
+static volatile bool playhead_running = false;
+static volatile int32_t playhead_step = 0;
 static bool play_steps[kPlayTrackCount][kPlayStepCount] = {};
 volatile bool request_playhead_redraw = false;
 volatile bool button1_press = false;
 volatile bool button2_press = false;
 volatile bool request_playback_stop_log = false;
+static volatile float fx_chain_fade_gain = 1.0f;
+static volatile float fx_chain_fade_target = 1.0f;
+static volatile int32_t fx_chain_fade_samples_left = 0;
+static volatile bool fx_chain_pause_pending = false;
+static volatile bool fx_chain_paused = false;
+static volatile uint32_t fx_chain_last_move_ms = 0;
+static uint32_t master_mod_hold = 0;
+static uint32_t master_delay_hold = 0;
+static uint32_t master_reverb_hold = 0;
+static uint32_t master_mod_tail_samples = 0;
+static uint32_t master_delay_tail_samples = 0;
+static uint32_t master_reverb_tail_samples = 0;
 volatile float reverb_wet = kReverbDefaultWet;
 volatile float reverb_pre = 0.5f;
 volatile float reverb_damp = 0.5f;
@@ -1109,7 +850,6 @@ static bool request_perform_redraw = false;
 static bool request_fx_detail_redraw = false;
 static uint32_t delay_snow_next_ms = 0;
 static uint32_t midi_ignore_until_ms = 0;
-
 static inline bool UiLogEnabled()
 {
 	if (!kUiLogsEnabled)
@@ -1122,8 +862,6 @@ static inline bool UiLogEnabled()
 	}
 	return true;
 }
-
-static void ComputeWaveform();
 
 static double NowMs()
 {
@@ -1283,7 +1021,7 @@ static int32_t NextMenuIndex(int32_t current, int32_t delta)
 	}
 	return order[pos];
 }
-const char* kShiftMenuLabels[kShiftMenuCount] = {"SAVE PRESET", "DELETE"};
+const char* kShiftMenuLabels[kShiftMenuCount] = {"SAVE", "DELETE"};
 
 template <typename... Va>
 static void LogLine(const char* format, Va... va)
@@ -1333,8 +1071,6 @@ static const char* UiModeName(UiMode mode)
 	{
 		case UiMode::Main: return "MAIN";
 		case UiMode::Load: return "LOAD";
-		case UiMode::LoadModeSelect: return "LOAD_MODE";
-		case UiMode::LoadStub: return "LOAD_STUB";
 		case UiMode::LoadTarget: return "LOAD_TARGET";
 		case UiMode::Perform: return "PERFORM";
 		case UiMode::Edt: return "EDT";
@@ -1342,7 +1078,6 @@ static const char* UiModeName(UiMode mode)
 		case UiMode::Play: return "PLAY";
 		case UiMode::PlayTrack: return "PLAY_TRACK";
 		case UiMode::Record: return "RECORD";
-		case UiMode::PresetSaveStub: return "PRESET_SAVE_STUB";
 		case UiMode::Shift: return "SHIFT";
 		default: return "UNKNOWN";
 	}
@@ -1672,12 +1407,6 @@ static int32_t LoadVisibleLines()
 	return load_lines;
 }
 
-template <size_t N>
-constexpr size_t ArraySize(const char* const (&)[N])
-{
-	return N;
-}
-
 static void MountSd()
 {
 	if (sd_mounted)
@@ -1706,77 +1435,6 @@ static bool BuildNextSaveName(char* out_name, size_t out_len)
 	{
 		return false;
 	}
-	static uint32_t save_name_seed = 0;
-	if (save_name_seed == 0)
-	{
-		save_name_seed = static_cast<uint32_t>(System::GetNow()) ^ 0xA5A5A5A5u;
-	}
-	auto next_rand = [&]()
-	{
-		save_name_seed = (save_name_seed * 1664525u) + 1013904223u;
-		return save_name_seed;
-	};
-
-	const size_t color_count = ArraySize(kSaveColors);
-	const size_t adj_count = ArraySize(kSaveAdjectives);
-	const size_t noun_count = ArraySize(kSaveNouns);
-
-	for (int attempt = 0; attempt < 5000; ++attempt)
-	{
-		const char* adj = kSaveAdjectives[next_rand() % adj_count];
-		const char* color = kSaveColors[next_rand() % color_count];
-		const char* noun = kSaveNouns[next_rand() % noun_count];
-
-		char base[64];
-		const int base_len = snprintf(base, sizeof(base), "%s%s%s", adj, color, noun);
-		if (base_len <= 0)
-		{
-			continue;
-		}
-		if (static_cast<size_t>(base_len) + 4 >= out_len)
-		{
-			continue;
-		}
-		if (base_len >= static_cast<int>(sizeof(base) - 1))
-		{
-			continue;
-		}
-
-		for (int suffix = 0; suffix < 100; ++suffix)
-		{
-			char name[64];
-			if (suffix == 0)
-			{
-				if (static_cast<size_t>(base_len) + 4 >= sizeof(name))
-				{
-					continue;
-				}
-				snprintf(name, sizeof(name), "%s.wav", base);
-			}
-			else
-			{
-				if (static_cast<size_t>(base_len) + 6 >= sizeof(name))
-				{
-					continue;
-				}
-				snprintf(name, sizeof(name), "%s%02d.wav", base, suffix);
-			}
-			if (StrLen(name) >= out_len)
-			{
-				continue;
-			}
-			char path[64];
-			BuildFilePath(name, path, sizeof(path));
-			FILINFO finfo;
-			const FRESULT res = f_stat(path, &finfo);
-			if (res != FR_OK)
-			{
-				CopyString(out_name, name, out_len);
-				return true;
-			}
-		}
-	}
-
 	for (int i = 1; i <= 9999; ++i)
 	{
 		char name[16];
@@ -2224,100 +1882,17 @@ static bool IsPerformUiMode(UiMode mode)
 	return (mode == UiMode::Perform || mode == UiMode::PlayTrack);
 }
 
-static bool AnyPerformVoiceActive()
+static inline void UpdateSamplesPerStep(float sample_rate, float bpm)
 {
-	for (int v = 0; v < kPerformVoiceCount; ++v)
+	// 16th notes: 4 steps per quarter.
+	if (bpm < 1.0f)
 	{
-		if (perform_voices[v].active)
-		{
-			return true;
-		}
+		bpm = 1.0f;
 	}
-	return false;
-}
-
-static SampleState& SampleStateForContext(SampleContext ctx)
-{
-	return (ctx == SampleContext::Perform) ? perform_sample_state : play_sample_state;
-}
-
-static WaveformCache& WaveformCacheForContext(SampleContext ctx)
-{
-	return (ctx == SampleContext::Perform) ? perform_waveform_cache : play_waveform_cache;
-}
-
-static void SaveWaveformCache(SampleContext ctx)
-{
-	WaveformCache& cache = WaveformCacheForContext(ctx);
-	std::memcpy(cache.min, waveform_min, sizeof(waveform_min));
-	std::memcpy(cache.max, waveform_max, sizeof(waveform_max));
-	cache.ready = waveform_ready;
-	cache.dirty = waveform_dirty;
-}
-
-static void LoadWaveformCache(SampleContext ctx)
-{
-	WaveformCache& cache = WaveformCacheForContext(ctx);
-	std::memcpy(waveform_min, cache.min, sizeof(waveform_min));
-	std::memcpy(waveform_max, cache.max, sizeof(waveform_max));
-	waveform_ready = cache.ready;
-	waveform_dirty = cache.dirty;
-}
-
-static void SaveSampleState(SampleState& state)
-{
-	CopyString(state.name, loaded_sample_name, kMaxWavNameLen);
-	state.length = sample_length;
-	state.play_start = sample_play_start;
-	state.play_end = sample_play_end;
-	state.rate = sample_rate;
-	state.channels = sample_channels;
-	state.loaded = sample_loaded;
-	state.trim_start = trim_start;
-	state.trim_end = trim_end;
-	state.from_recording = waveform_from_recording;
-}
-
-static void LoadSampleState(const SampleState& state)
-{
-	CopyString(loaded_sample_name, state.name, kMaxWavNameLen);
-	sample_length = state.length;
-	sample_play_start = state.play_start;
-	sample_play_end = state.play_end;
-	sample_rate = state.rate;
-	sample_channels = state.channels;
-	sample_loaded = state.loaded;
-	trim_start = state.trim_start;
-	trim_end = state.trim_end;
-	waveform_from_recording = state.from_recording;
-}
-
-static void SetSampleContext(SampleContext ctx)
-{
-	if (current_sample_context == ctx)
+	play_samples_per_step = (sample_rate * 60.0f) / (bpm * 4.0f);
+	if (play_samples_per_step < 1.0f)
 	{
-		return;
-	}
-	SaveWaveformCache(current_sample_context);
-	SaveSampleState(SampleStateForContext(current_sample_context));
-	current_sample_context = ctx;
-	if (ctx == SampleContext::Perform)
-	{
-		sample_buffer_l = perform_sample_buffer_l;
-		sample_buffer_r = perform_sample_buffer_r;
-	}
-	else
-	{
-		sample_buffer_l = play_sample_buffer_l;
-		sample_buffer_r = play_sample_buffer_r;
-	}
-	LoadSampleState(SampleStateForContext(ctx));
-	LoadWaveformCache(ctx);
-	if (!waveform_ready && sample_loaded)
-	{
-		ComputeWaveform();
-		waveform_ready = true;
-		waveform_dirty = true;
+		play_samples_per_step = 1.0f;
 	}
 }
 
@@ -2331,11 +1906,29 @@ static void UpdatePlayStepMs()
 	{
 		play_bpm = kPlayBpmMax;
 	}
-	const uint32_t bpm = static_cast<uint32_t>(play_bpm);
-	play_step_ms = (bpm > 0) ? (60000U / (bpm * 4U)) : 0;
-	if (play_step_ms == 0)
+	UpdateSamplesPerStep(hw.AudioSampleRate(), static_cast<float>(play_bpm));
+}
+
+static void UpdateMasterFxTailSamples(float sample_rate)
+{
+	if (sample_rate < 1.0f)
 	{
-		play_step_ms = 1;
+		sample_rate = 1.0f;
+	}
+	master_mod_tail_samples = static_cast<uint32_t>(sample_rate * 0.05f);
+	if (master_mod_tail_samples < 1)
+	{
+		master_mod_tail_samples = 1;
+	}
+	master_delay_tail_samples = static_cast<uint32_t>(sample_rate * 0.50f);
+	if (master_delay_tail_samples < 1)
+	{
+		master_delay_tail_samples = 1;
+	}
+	master_reverb_tail_samples = static_cast<uint32_t>(sample_rate * 1.00f);
+	if (master_reverb_tail_samples < 1)
+	{
+		master_reverb_tail_samples = 1;
 	}
 }
 
@@ -2413,7 +2006,7 @@ static bool ComputeTrimWindowFrames(float trim_start_in,
 	return (out_end > out_start);
 }
 
-static void StartSequencerVoiceWindow(size_t window_start, size_t window_end)
+static void StartSequencerVoiceWindow(size_t window_start, size_t window_end, int32_t track)
 {
 	if (!sample_loaded || sample_length < 1)
 	{
@@ -2451,6 +2044,7 @@ static void StartSequencerVoiceWindow(size_t window_start, size_t window_end)
 	voice.active = true;
 	voice.releasing = false;
 	voice.note = -1;
+	voice.track = (track >= 0 && track < kPlayTrackCount) ? track : -1;
 	voice.phase = 0.0f;
 	voice.amp = 1.0f;
 	voice.env = 0.0f;
@@ -2494,7 +2088,7 @@ static void TriggerSequencerStep(int32_t step)
 		{
 			continue;
 		}
-		StartSequencerVoiceWindow(window_start, window_end);
+		StartSequencerVoiceWindow(window_start, window_end, track);
 	}
 }
 
@@ -2593,69 +2187,6 @@ static void ApplyPerformState(const PerformState& state)
 	fx_params_dirty = true;
 }
 
-enum class FxContext : int32_t
-{
-	Perform,
-	Play,
-	Track,
-};
-
-static FxContext fx_context = FxContext::Perform;
-
-static void SaveFxContext()
-{
-	switch (fx_context)
-	{
-		case FxContext::Perform:
-			CapturePerformState(main_perform_state);
-			break;
-		case FxContext::Play:
-			CapturePerformState(play_perform_state);
-			break;
-		case FxContext::Track:
-			if (perform_context_track >= 0 && perform_context_track < kPlayTrackCount)
-			{
-				CapturePerformState(track_perform_state[perform_context_track]);
-			}
-			break;
-		default:
-			break;
-	}
-}
-
-static void SetFxContext(FxContext ctx, int32_t track = 0)
-{
-	if (fx_context == ctx)
-	{
-		if (ctx != FxContext::Track || track == perform_context_track)
-		{
-			return;
-		}
-	}
-	SaveFxContext();
-	fx_context = ctx;
-	if (ctx == FxContext::Perform)
-	{
-		perform_context = PerformContext::Main;
-		ApplyPerformState(main_perform_state);
-	}
-	else if (ctx == FxContext::Play)
-	{
-		perform_context = PerformContext::Main;
-		ApplyPerformState(play_perform_state);
-	}
-	else
-	{
-		if (track < 0 || track >= kPlayTrackCount)
-		{
-			return;
-		}
-		perform_context = PerformContext::Track;
-		perform_context_track = track;
-		ApplyPerformState(track_perform_state[track]);
-	}
-}
-
 static void StoreTrackSampleState(int32_t track)
 {
 	if (track < 0 || track >= kPlayTrackCount)
@@ -2671,7 +2202,6 @@ static void StoreTrackSampleState(int32_t track)
 static void InitTrackStates()
 {
 	CapturePerformState(main_perform_state);
-	play_perform_state = main_perform_state;
 	for (int t = 0; t < kPlayTrackCount; ++t)
 	{
 		track_perform_state[t] = main_perform_state;
@@ -2688,8 +2218,10 @@ static void EnterPlayTrack(int32_t track)
 	{
 		return;
 	}
-	SetSampleContext(SampleContext::Play);
-	SetFxContext(FxContext::Track, track);
+	CapturePerformState(main_perform_state);
+	ApplyPerformState(track_perform_state[track]);
+	perform_context = PerformContext::Track;
+	perform_context_track = track;
 	request_track_sample_load = true;
 	request_track_sample_index = track;
 	ui_mode = UiMode::PlayTrack;
@@ -2702,8 +2234,9 @@ static void ExitPlayTrack()
 	{
 		CapturePerformState(track_perform_state[perform_context_track]);
 		StoreTrackSampleState(perform_context_track);
+		ApplyPerformState(main_perform_state);
+		perform_context = PerformContext::Main;
 	}
-	SetFxContext(FxContext::Play);
 	ui_mode = UiMode::Play;
 	play_screen_dirty = true;
 	request_playhead_redraw = true;
@@ -2722,6 +2255,7 @@ static void ResetPerformVoices()
 		voice.release_start = 0.0f;
 		voice.release_pos = 0.0f;
 		voice.note = -1;
+		voice.track = -1;
 		voice.offset = 0;
 		voice.length = 0;
 		voice.env_samples = 0;
@@ -3653,15 +3187,6 @@ static void DrawPerformScreen(int32_t selected,
 	{
 		if (!sample_loaded || sample_length == 0)
 		{
-			const char* line1 = "SELECT";
-			const char* line2 = "WAV";
-			const int text_w1 = TinyStringWidth(line1);
-			const int text_w2 = TinyStringWidth(line2);
-			const int text_x1 = box.x + (kBoxW - text_w1) / 2;
-			const int text_x2 = box.x + (kBoxW - text_w2) / 2;
-			const int text_y = box.y + (kBoxH - (Font5x7::H * 2) - 2) / 2;
-			DrawTinyString(line1, text_x1, text_y, !is_selected);
-			DrawTinyString(line2, text_x2, text_y + Font5x7::H + 2, !is_selected);
 			return;
 		}
 		const int preview_x0 = box.x + kLabelPadX + Font5x7::W + 4;
@@ -3705,63 +3230,6 @@ static void DrawPerformScreen(int32_t selected,
 				bottom = preview_y1;
 			}
 			display.DrawLine(preview_x0 + x, top, preview_x0 + x, bottom, on);
-		}
-
-		if (sample_length > 1)
-		{
-			bool has_playhead = false;
-			float norm = 0.0f;
-			if (playback_active)
-			{
-				norm = playback_phase / static_cast<float>(sample_length - 1);
-				has_playhead = true;
-			}
-			else
-			{
-				for (int v = 0; v < kPerformVoiceCount; ++v)
-				{
-					const auto& voice = perform_voices[v];
-					if (voice.active && voice.length > 0)
-					{
-						const float pos = static_cast<float>(voice.offset) + voice.phase;
-						norm = pos / static_cast<float>(sample_length - 1);
-						has_playhead = true;
-						break;
-					}
-				}
-			}
-			if (has_playhead)
-			{
-				if (norm < 0.0f)
-				{
-					norm = 0.0f;
-				}
-				else if (norm > 1.0f)
-				{
-					norm = 1.0f;
-				}
-				int trim_x0 = preview_x0
-					+ static_cast<int>(trim_start * static_cast<float>(preview_w - 1) + 0.5f);
-				int trim_x1 = preview_x0
-					+ static_cast<int>(trim_end * static_cast<float>(preview_w - 1) + 0.5f);
-				if (trim_x0 > trim_x1)
-				{
-					const int tmp = trim_x0;
-					trim_x0 = trim_x1;
-					trim_x1 = tmp;
-				}
-				int play_x = preview_x0
-					+ static_cast<int>(norm * static_cast<float>(preview_w - 1) + 0.5f);
-				if (play_x < trim_x0)
-				{
-					play_x = trim_x0;
-				}
-				else if (play_x > trim_x1)
-				{
-					play_x = trim_x1;
-				}
-				display.DrawLine(play_x, preview_y0, play_x, preview_y1, on);
-			}
 		}
 	};
 
@@ -3888,11 +3356,6 @@ static void DrawLoadMenu(int32_t top_index, int32_t selected)
 {
 	const FontDef font = Font_6x8;
 	display.Fill(false);
-	if (kLoadPresetsPlaceholder && load_context == LoadContext::Main && !delete_mode)
-	{
-		DrawLoadMessage("PRESETS", "COMING SOON");
-		return;
-	}
 
 	if (!BSP_SD_IsDetected() || BSP_SD_GetCardState() != SD_TRANSFER_OK)
 	{
@@ -3988,11 +3451,10 @@ static void DrawLoadTargetMenu(LoadDestination selected)
 	display.Fill(false);
 	constexpr int kMargin = 2;
 	constexpr int kGap = 2;
-	const int top_h = (kDisplayH - (kMargin * 2) - kGap) / 2;
-	const int bottom_h = kDisplayH - (kMargin * 2) - kGap - top_h;
-	const int top_y = kMargin;
-	const int bottom_y = kMargin + top_h + kGap;
+	const int box_h = (kDisplayH - (kMargin * 2) - kGap) / 2;
 	const int box_w = kDisplayW - (kMargin * 2);
+	const int top_y = kMargin;
+	const int bottom_y = kMargin + box_h + kGap;
 
 	auto draw_box = [&](int x, int y, int w, int h, const char* label, bool highlight)
 	{
@@ -4018,8 +3480,8 @@ static void DrawLoadTargetMenu(LoadDestination selected)
 		DrawTinyString(label, text_x, text_y, !highlight);
 	};
 
-	draw_box(kMargin, top_y, box_w, top_h, "PLAY", selected_idx == 0);
-	draw_box(kMargin, bottom_y, box_w, bottom_h, "PERFORM", selected_idx == 1);
+	draw_box(kMargin, top_y, box_w, box_h, "PLAY", selected_idx == 0);
+	draw_box(kMargin, bottom_y, box_w, box_h, "PERFORM", selected_idx == 1);
 	display.Update();
 }
 
@@ -4395,23 +3857,7 @@ static void DrawDeleteConfirm(const char* name)
 		DrawScaledString(name, 0, font.FontHeight + 2, font, kLoadFontScale, true, load_chars_per_line);
 	}
 	display.SetCursor(0, (font.FontHeight + 2) * 3);
-	display.WriteString("L=NO  R=YES", font, true);
-	display.Update();
-}
-
-static void DrawRecordBackConfirm()
-{
-	const FontDef font = Font_6x8;
-
-	display.Fill(false);
-	display.SetCursor(0, 0);
-	display.WriteString("ARE YOU SURE?", font, true);
-	display.SetCursor(0, font.FontHeight + 2);
-	display.WriteString("REC WILL", font, true);
-	display.SetCursor(0, (font.FontHeight + 2) * 2);
-	display.WriteString("BE LOST", font, true);
-	display.SetCursor(0, (font.FontHeight + 2) * 4);
-	display.WriteString("L=NO  R=YES", font, true);
+	display.WriteString("R=YES L=NO", font, true);
 	display.Update();
 }
 
@@ -4922,6 +4368,35 @@ static void DrawPlayScreen()
 		DrawPlayTinyText(label_x, label_y, label, true);
 	}
 
+	char cpu_label[12];
+	int cpu_pct = static_cast<int>(cpu_load_pct + 0.5f);
+	if (cpu_pct < 0)
+	{
+		cpu_pct = 0;
+	}
+	if (cpu_pct > 999)
+	{
+		cpu_pct = 999;
+	}
+	snprintf(cpu_label, sizeof(cpu_label), "CPU %d%%", cpu_pct);
+	const int cpu_len = static_cast<int>(StrLen(cpu_label));
+	const int cpu_w = (cpu_len > 0)
+		? (cpu_len * kPlayTinyW + (cpu_len - 1) * kPlayTinySpacing)
+		: 0;
+	if (cpu_w > 0)
+	{
+		int cpu_x = label_x + label_w + 6;
+		if (cpu_x + cpu_w >= kDisplayW)
+		{
+			cpu_x = kDisplayW - cpu_w - 1;
+		}
+		if (cpu_x < 0)
+		{
+			cpu_x = 0;
+		}
+		DrawPlayTinyText(cpu_x, label_y, cpu_label, true);
+	}
+
 	const int line_y2 = label_y + kPlayTinyH + 2;
 	if (line_y2 < kDisplayH)
 	{
@@ -5201,6 +4676,20 @@ static void DrawPlayScreen()
 
 static void DrawWaveform()
 {
+	if(!sample_loaded || sample_length == 0)
+	{
+		display.Fill(false);
+		display.SetCursor(0, 0);
+		display.WriteString("NO SAMPLE LOADED", Font_6x8, true);
+		display.SetCursor(0, (Font_6x8.FontHeight + 1) * 2);
+		display.WriteString("PLEASE LOAD A", Font_6x8, true);
+		display.SetCursor(0, (Font_6x8.FontHeight + 1) * 3);
+		display.WriteString("SAMPLE FROM", Font_6x8, true);
+		display.SetCursor(0, (Font_6x8.FontHeight + 1) * 4);
+		display.WriteString("THE MAIN MENU", Font_6x8, true);
+		display.Update();
+		return;
+	}
 	if(!waveform_ready || !waveform_dirty)
 		return;
 
@@ -5984,80 +5473,42 @@ static void DrawFxDetailScreen(int32_t index)
 	display.Update();
 }
 
-static void DrawLoadModeSelect(int32_t selected)
+static void DrawRecordTargetScreen(int32_t selected)
 {
 	display.Fill(false);
 	constexpr int kMargin = 2;
-	constexpr int kGap = 4;
+	constexpr int kGap = 2;
 	const int box_h = (kDisplayH - (kMargin * 2) - kGap) / 2;
 	const int box_w = kDisplayW - (kMargin * 2);
 	const int top_y = kMargin;
 	const int bottom_y = kMargin + box_h + kGap;
-	const int x = kMargin;
 
-	auto draw_box = [&](int y, const char* label, bool highlight)
+	auto draw_box = [&](int x, int y, int w, int h, const char* label, bool highlight)
 	{
-		display.DrawRect(x, y, x + box_w - 1, y + box_h - 1, true, highlight);
-		const int text_w = static_cast<int>(StrLen(label)) * (Font5x7::W + 1);
-		int text_x = x + (box_w - text_w) / 2;
+		display.DrawRect(x, y, x + w - 1, y + h - 1, true, highlight);
+		const int len = static_cast<int>(StrLen(label));
+		if (len <= 0)
+		{
+			return;
+		}
+		const int char_w = Font5x7::W + 1;
+		const int text_w = (len - 1) * char_w + Font5x7::W;
+		const int text_h = Font5x7::H;
+		int text_x = x + (w - text_w) / 2;
+		int text_y = y + (h - text_h) / 2;
 		if (text_x < x + 1)
 		{
 			text_x = x + 1;
 		}
-		const int text_y = y + (box_h - Font5x7::H) / 2;
+		if (text_y < y + 1)
+		{
+			text_y = y + 1;
+		}
 		DrawTinyString(label, text_x, text_y, !highlight);
 	};
 
-	draw_box(top_y, "PRESETS", selected == 0);
-	draw_box(bottom_y, "BAKE", selected == 1);
-	display.Update();
-}
-
-static void DrawLoadStubScreen(LoadStubMode mode)
-{
-	display.Fill(false);
-	const char* line1 = (mode == LoadStubMode::Presets) ? "PRESETS" : "BAKE";
-	const char* line2 = "COMING SOON";
-	const int text_w1 = TinyStringWidth(line1);
-	const int text_w2 = TinyStringWidth(line2);
-	const int x1 = (kDisplayW - text_w1) / 2;
-	const int x2 = (kDisplayW - text_w2) / 2;
-	const int y1 = (kDisplayH / 2) - Font5x7::H - 2;
-	const int y2 = y1 + Font5x7::H + 4;
-	DrawTinyString(line1, x1, y1, true);
-	DrawTinyString(line2, x2, y2, true);
-	display.Update();
-}
-
-static void DrawPresetSaveStub()
-{
-	display.Fill(false);
-	const char* line1 = "ABILITY TO";
-	const char* line2 = "SAVE PRESETS";
-	const char* line3 = "COMING SOON";
-	const int w1 = TinyStringWidth(line1);
-	const int w2 = TinyStringWidth(line2);
-	const int w3 = TinyStringWidth(line3);
-	const int x1 = (kDisplayW - w1) / 2;
-	const int x2 = (kDisplayW - w2) / 2;
-	const int x3 = (kDisplayW - w3) / 2;
-	const int y1 = (kDisplayH / 2) - Font5x7::H - 6;
-	const int y2 = y1 + Font5x7::H + 4;
-	const int y3 = y2 + Font5x7::H + 4;
-	DrawTinyString(line1, x1, y1, true);
-	DrawTinyString(line2, x2, y2, true);
-	DrawTinyString(line3, x3, y3, true);
-	display.Update();
-}
-
-static void DrawRecordTargetScreen(int32_t selected)
-{
-	const FontDef font = Font_6x8;
-	display.Fill(false);
-	display.SetCursor(0, 0);
-	display.WriteString("SAVE SAMPLE?", font, true);
-	display.SetCursor(0, (font.FontHeight + 2) * 2);
-	display.WriteString("L=NO  R=YES", font, true);
+	draw_box(kMargin, top_y, box_w, box_h, "PLAY", selected == kRecordTargetPlay);
+	draw_box(kMargin, bottom_y, box_w, box_h, "PERFORM", selected == kRecordTargetPerform);
 	display.Update();
 }
 
@@ -6239,6 +5690,7 @@ static void StartPerformVoice(int32_t note)
 	voice.active = true;
 	voice.releasing = false;
 	voice.note = note;
+	voice.track = -1;
 	voice.phase = 0.0f;
 	voice.amp = 1.0f;
 	voice.env = 0.0f;
@@ -6346,45 +5798,42 @@ static void HandleMidiMessage(MidiEvent msg)
 	}
 }
 
-void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size)
+static void ProcessUiControls(float out_sr, uint32_t now_ms)
 {
-	hw.ProcessAllControls();
-	const int32_t encoder_l_inc = hw.encoder.Increment();
-	const bool encoder_l_pressed = hw.encoder.RisingEdge();
-	encoder_r.Debounce();
-	const int32_t encoder_r_inc = encoder_r.Increment();
-	if (encoder_r_inc != 0)
-	{
-		encoder_r_accum += encoder_r_inc;
-	}
-	const bool encoder_r_pressed = encoder_r.RisingEdge();
+	const int32_t encoder_l_inc = enc_l_delta_latched;
+	enc_l_delta_latched = 0;
+	const int32_t encoder_r_inc = enc_r_delta_latched;
+	enc_r_delta_latched = 0;
+	const bool encoder_l_pressed = enc_l_press_latched;
+	enc_l_press_latched = false;
+	const bool encoder_r_pressed = enc_r_press_latched;
+	enc_r_press_latched = false;
+	const bool b1_pressed = btn1_press_latched;
+	btn1_press_latched = false;
+	const bool b2_pressed = btn2_press_latched;
+	btn2_press_latched = false;
+	const bool shift_held = shift_down_latched;
+	const bool button1_down = btn1_down_latched;
 	bool encoder_r_consumed = false;
 	if (encoder_r_pressed)
 	{
 		encoder_r_button_press = true;
 	}
-	static float fx_chain_fade_gain = 1.0f;
-	static float fx_chain_fade_target = 1.0f;
-	static int32_t fx_chain_fade_samples_left = 0;
-	static bool fx_chain_pause_pending = false;
-	static bool fx_chain_paused = false;
-	static uint32_t fx_chain_last_move_ms = 0;
-	const float out_sr = hw.AudioSampleRate();
-	const uint32_t now_ms = System::GetNow();
+	if (encoder_r_inc != 0 && UiLogEnabled())
+	{
+		LogLine("Encoder R delta=%ld", static_cast<long>(encoder_r_inc));
+	}
 	const bool ui_blocked = (sd_init_in_progress || save_in_progress);
 	if (ui_mode == UiMode::FxDetail
 		&& fx_detail_index == kFxDelayIndex
 		&& delay_freeze >= 0.5f)
 	{
-		const uint32_t now = System::GetNow();
-		if (now >= delay_snow_next_ms)
+		if (now_ms >= delay_snow_next_ms)
 		{
-			delay_snow_next_ms = now + 100;
+			delay_snow_next_ms = now_ms + 100;
 			request_fx_detail_redraw = true;
 		}
 	}
-	shift_button.Debounce();
-	const bool shift_pressed = shift_button.Pressed();
 	const bool perform_ui = IsPerformUiMode(ui_mode);
 	if (!perform_ui && ui_mode != UiMode::FxDetail)
 	{
@@ -6395,18 +5844,15 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		amp_window_active = false;
 		flt_window_active = false;
 	}
-	if (hw.button1.RisingEdge())
+	if (b1_pressed)
 	{
 		button1_press = true;
 	}
-	if (hw.button2.RisingEdge())
+	if (b2_pressed)
 	{
 		button2_press = true;
 	}
-	preview_hold = (ui_mode == UiMode::Load
-		&& !(kLoadPresetsPlaceholder && load_context == LoadContext::Main && !delete_mode))
-		? hw.button1.Pressed()
-		: false;
+	preview_hold = (ui_mode == UiMode::Load && !delete_mode) ? button1_down : false;
 	if (!sd_init_in_progress && ui_mode == UiMode::Shift)
 	{
 		if (encoder_l_inc != 0)
@@ -6428,20 +5874,34 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			LogLine("Shift menu select: %s", kShiftMenuLabels[shift_menu_index]);
 			if (shift_menu_index == 0)
 			{
-				ui_mode = UiMode::PresetSaveStub;
+				save_in_progress = true;
+				save_done = false;
+				save_success = false;
+				save_started = false;
+				save_prev_mode = shift_prev_mode;
+				save_start_ms = System::GetNow();
+				save_result_until_ms = 0;
+				save_draw_next_ms = 0;
+				save_filename[0] = '\0';
+				ResetSaveState();
 			}
-				else if (shift_menu_index == 1)
-				{
-					delete_mode = true;
-					delete_confirm = false;
-					delete_prev_mode = shift_prev_mode;
-					load_context = LoadContext::Main;
-					load_prev_mode = delete_prev_mode;
-					ui_mode = UiMode::Load;
-					load_selected = 0;
-					load_scroll = 0;
+			else if (shift_menu_index == 1)
+			{
+				delete_mode = true;
+				delete_confirm = false;
+				delete_prev_mode = shift_prev_mode;
+				load_context = LoadContext::Main;
+				load_prev_mode = delete_prev_mode;
+				ui_mode = UiMode::Load;
+				load_selected = 0;
+				load_scroll = 0;
 				request_delete_scan = true;
 				request_delete_redraw = true;
+			}
+			if (!sd_init_in_progress && shift_menu_index == 0)
+			{
+				ui_mode = shift_prev_mode;
+				request_shift_redraw = true;
 			}
 		}
 		if (encoder_l_pressed)
@@ -6459,18 +5919,19 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		{
 			menu_index = NextMenuIndex(menu_index, encoder_l_inc);
 		}
-			if (encoder_r_pressed && menu_index == 0)
-			{
-				delete_mode = false;
-				delete_confirm = false;
-				load_context = LoadContext::Main;
-				load_prev_mode = UiMode::Main;
-				load_mode_index = 0;
-				ui_mode = UiMode::LoadModeSelect;
+		if (encoder_r_pressed && menu_index == 0)
+		{
+			delete_mode = false;
+			delete_confirm = false;
+			load_context = LoadContext::Main;
+			load_prev_mode = UiMode::Main;
+			ui_mode = UiMode::Load;
+			load_selected = 0;
+			load_scroll = 0;
+			request_load_scan = true;
 		}
 		else if (encoder_r_pressed && menu_index == 1)
 		{
-			SetSampleContext(SampleContext::Play);
 			ui_mode = UiMode::Record;
 			record_source_index = (record_input == RecordInput::Mic) ? 1 : 0;
 			record_state = RecordState::SourceSelect;
@@ -6487,7 +5948,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		}
 		else if (encoder_r_pressed && menu_index == 3)
 		{
-			SetSampleContext(SampleContext::Play);
 			ui_mode = UiMode::Play;
 			if(sample_loaded && sample_length > 0)
 			{
@@ -6499,15 +5959,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	}
 	else if (!ui_blocked && ui_mode == UiMode::Load)
 	{
-		if (kLoadPresetsPlaceholder && load_context == LoadContext::Main && !delete_mode)
-		{
-			if (encoder_l_pressed)
-			{
-				ui_mode = load_prev_mode;
-				load_context = LoadContext::Main;
-			}
-		}
-		else if (delete_mode && delete_confirm)
+		if (delete_mode && delete_confirm)
 		{
 			if (encoder_r_pressed)
 			{
@@ -6532,11 +5984,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				while (next < 0)
 				{
 					next += count;
-			}
-			while (next >= count)
-			{
-				next -= count;
-			}
+				}
+				while (next >= count)
+				{
+					next -= count;
+				}
 				load_selected = next;
 				int32_t max_top = count - visible_lines;
 				if (max_top < 0)
@@ -6560,87 +6012,41 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 					load_scroll = max_top;
 				}
 			}
-				if (encoder_r_pressed && wav_file_count > 0)
+			if (encoder_r_pressed && wav_file_count > 0)
+			{
+				if (delete_mode)
 				{
-					if (delete_mode)
-					{
-						delete_confirm = true;
-						CopyString(delete_confirm_name, wav_files[load_selected], kMaxWavNameLen);
-						request_delete_redraw = true;
-					}
-					else if (load_context == LoadContext::Edt)
-					{
-						request_load_destination = LoadDestination::Perform;
-						request_load_sample = true;
-						request_load_index = load_selected;
-					}
-					else if (load_context == LoadContext::Track)
-					{
-						request_load_destination = LoadDestination::Play;
-						request_load_sample = true;
-						request_load_index = load_selected;
-					}
-					else
-					{
-						load_target_selected = LoadDestination::Play;
-						load_target_index = load_selected;
-						ui_mode = UiMode::LoadTarget;
-					}
-			}
-				if (encoder_l_pressed)
-				{
-					if (delete_mode)
-					{
-						delete_mode = false;
-						delete_confirm = false;
-						ui_mode = delete_prev_mode;
-					}
-					else
-					{
-						ui_mode = load_prev_mode;
-						load_context = LoadContext::Main;
-					}
+					delete_confirm = true;
+					CopyString(delete_confirm_name, wav_files[load_selected], kMaxWavNameLen);
+					request_delete_redraw = true;
 				}
-		}
-	}
-	else if (!ui_blocked && ui_mode == UiMode::LoadModeSelect)
-	{
-		if (encoder_l_inc != 0)
-		{
-			int32_t next = load_mode_index + encoder_l_inc;
-			while (next < 0)
-			{
-				next += 2;
+				else if (load_context == LoadContext::Track)
+				{
+					request_load_destination = LoadDestination::Play;
+					request_load_sample = true;
+					request_load_index = load_selected;
+				}
+				else
+				{
+					load_target_selected = LoadDestination::Play;
+					load_target_index = load_selected;
+					ui_mode = UiMode::LoadTarget;
+				}
 			}
-			while (next >= 2)
+			if (encoder_l_pressed)
 			{
-				next -= 2;
+				if (delete_mode)
+				{
+					delete_mode = false;
+					delete_confirm = false;
+					ui_mode = delete_prev_mode;
+				}
+				else
+				{
+					ui_mode = load_prev_mode;
+					load_context = LoadContext::Main;
+				}
 			}
-			load_mode_index = next;
-		}
-		if (encoder_r_pressed)
-		{
-			load_stub_mode = (load_mode_index == 0) ? LoadStubMode::Presets : LoadStubMode::Bake;
-			ui_mode = UiMode::LoadStub;
-		}
-		if (encoder_l_pressed)
-		{
-			ui_mode = load_prev_mode;
-		}
-	}
-	else if (!ui_blocked && ui_mode == UiMode::LoadStub)
-	{
-		if (encoder_l_pressed || encoder_r_pressed)
-		{
-			ui_mode = UiMode::LoadModeSelect;
-		}
-	}
-	else if (!ui_blocked && ui_mode == UiMode::PresetSaveStub)
-	{
-		if (encoder_l_pressed || encoder_r_pressed)
-		{
-			ui_mode = UiMode::Shift;
-			request_shift_redraw = true;
 		}
 	}
 	else if (!ui_blocked && ui_mode == UiMode::LoadTarget)
@@ -6717,7 +6123,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			if (record_state == RecordState::Armed)
 			{
 				record_state = RecordState::Countdown;
-				record_countdown_start_ms = System::GetNow();
+				record_countdown_start_ms = now_ms;
 				request_length_redraw = true;
 			}
 			else if (record_state == RecordState::Recording)
@@ -6744,34 +6150,26 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			}
 			else if (record_state == RecordState::Review && sample_loaded)
 			{
-				record_target_index = kRecordTargetSave;
 				record_state = RecordState::TargetSelect;
 			}
 			else if (record_state == RecordState::TargetSelect)
 			{
-				save_in_progress = true;
-				save_done = false;
-				save_success = false;
-				save_started = false;
-				save_prev_mode = UiMode::Main;
-				save_start_ms = System::GetNow();
-				save_result_until_ms = 0;
-				save_draw_next_ms = 0;
-				save_filename[0] = '\0';
-				ResetSaveState();
-				record_state = RecordState::Review;
-			}
-			else if (record_state == RecordState::BackConfirm)
-			{
-				sample_loaded = false;
-				sample_length = 0;
-				loaded_sample_name[0] = '\0';
-				waveform_ready = false;
-				waveform_dirty = true;
-				waveform_from_recording = false;
-				playback_active = false;
-				record_state = RecordState::SourceSelect;
-				request_length_redraw = true;
+				if (record_target_index == kRecordTargetPerform)
+				{
+					ui_mode = UiMode::Perform;
+					midi_ignore_until_ms = now_ms + 200;
+					request_perform_redraw = true;
+				}
+				else if (record_target_index == kRecordTargetPlay)
+				{
+					ui_mode = UiMode::Play;
+					if (sample_loaded && sample_length > 0)
+					{
+						waveform_ready = true;
+					}
+					waveform_dirty = true;
+					request_length_redraw = true;
+				}
 			}
 		}
 		if (encoder_l_pressed)
@@ -6780,27 +6178,10 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			{
 				record_state = RecordState::Review;
 				waveform_dirty = true;
-				request_length_redraw = true;
-			}
-			else if (record_state == RecordState::SourceSelect)
-			{
-				ui_mode = UiMode::Main;
-				playback_active = false;
-				record_anim_start_ms = -1.0;
-			}
-			else if (record_state == RecordState::BackConfirm)
-			{
-				record_state = RecordState::Review;
-				waveform_dirty = true;
-				request_length_redraw = true;
-			}
-			else if (record_state == RecordState::Review && waveform_from_recording)
-			{
-				record_state = RecordState::BackConfirm;
-				request_length_redraw = true;
 			}
 			else
 			{
+				ui_mode = UiMode::Main;
 				record_state = RecordState::SourceSelect;
 				playback_active = false;
 				record_anim_start_ms = -1.0;
@@ -6812,14 +6193,14 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			{
 				int32_t dl = encoder_l_inc;
 				int32_t dr = encoder_r_inc;
-				if (shift_button.Pressed())
+				if (shift_held)
 				{
 					if (dl > 0) dl = 1;
 					else if (dl < 0) dl = -1;
 					if (dr > 0) dr = 1;
 					else if (dr < 0) dr = -1;
 				}
-				AdjustTrimNormalized(dl, dr, shift_button.Pressed());
+				AdjustTrimNormalized(dl, dr, shift_held);
 			}
 		}
 	}
@@ -6829,7 +6210,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		const bool fx_select_active = (perform_index == kPerformFxIndex && fx_window_active);
 		const bool amp_select_active = (perform_index == kPerformAmpIndex && amp_window_active);
 		const bool flt_select_active = (perform_index == kPerformFltIndex && flt_window_active);
-		const bool fx_reorder_active = fx_select_active && shift_pressed;
+		const bool fx_reorder_active = fx_select_active && shift_held;
 		const bool has_sample = (sample_loaded && sample_length > 0);
 		if (encoder_l_inc != 0)
 		{
@@ -6963,10 +6344,10 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 							fx_params_dirty = true;
 						}
 					}
-						fx_detail_prev_mode = ui_mode;
-						ui_mode = UiMode::FxDetail;
-						request_fx_detail_redraw = true;
-					}
+					fx_detail_prev_mode = ui_mode;
+					ui_mode = UiMode::FxDetail;
+					request_fx_detail_redraw = true;
+				}
 			}
 			else if (perform_index == kPerformAmpIndex)
 			{
@@ -7001,24 +6382,14 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 					load_scroll = 0;
 					request_load_scan = true;
 				}
-				else if (!has_sample)
-				{
-					delete_mode = false;
-					delete_confirm = false;
-					edt_sample_context = SampleContext::Perform;
-					load_context = LoadContext::Edt;
-					load_prev_mode = UiMode::Perform;
-					ui_mode = UiMode::Load;
-					load_selected = 0;
-					load_scroll = 0;
-					request_load_scan = true;
-				}
 				else
 				{
 					edt_prev_mode = ui_mode;
-					edt_sample_context = IsPlayUiMode(ui_mode) ? SampleContext::Play : SampleContext::Perform;
 					ui_mode = UiMode::Edt;
-					waveform_ready = true;
+					if (has_sample)
+					{
+						waveform_ready = true;
+					}
 					waveform_dirty = true;
 					request_length_redraw = true;
 				}
@@ -7123,51 +6494,49 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				request_perform_redraw = true;
 			}
 		}
-			if (encoder_l_pressed)
+		if (encoder_l_pressed)
+		{
+			if (fx_select_active || amp_select_active || flt_select_active)
 			{
-				if (fx_select_active || amp_select_active || flt_select_active)
-				{
-					fx_window_active = false;
-					amp_window_active = false;
-					flt_window_active = false;
-					request_perform_redraw = true;
-				}
-				else if (track_mode)
-				{
-					ExitPlayTrack();
-				}
-				else
-				{
-					ui_mode = UiMode::Main;
-				}
+				fx_window_active = false;
+				amp_window_active = false;
+				flt_window_active = false;
+				request_perform_redraw = true;
 			}
+			else if (track_mode)
+			{
+				ExitPlayTrack();
+			}
+			else
+			{
+				ui_mode = UiMode::Main;
+			}
+		}
 	}
 	else if (!ui_blocked && ui_mode == UiMode::Edt)
 	{
-		if (encoder_l_inc != 0 || encoder_r_inc != 0)
+	if (encoder_l_inc != 0 || encoder_r_inc != 0)
+	{
+		int32_t dl = encoder_l_inc;
+		int32_t dr = encoder_r_inc;
+		if (shift_held)
 		{
-			int32_t dl = encoder_l_inc;
-			int32_t dr = encoder_r_inc;
-			if (shift_button.Pressed())
-			{
-				if (dl > 0) dl = 1;
-				else if (dl < 0) dl = -1;
-				if (dr > 0) dr = 1;
-				else if (dr < 0) dr = -1;
-			}
-			AdjustTrimNormalized(dl, dr, shift_button.Pressed());
-			if (perform_context == PerformContext::Track)
-			{
-				StoreTrackSampleState(perform_context_track);
-			}
+			if (dl > 0) dl = 1;
+			else if (dl < 0) dl = -1;
+			if (dr > 0) dr = 1;
+			else if (dr < 0) dr = -1;
 		}
-		if (encoder_r_pressed)
+		AdjustTrimNormalized(dl, dr, shift_held);
+		if (perform_context == PerformContext::Track)
 		{
-			delete_mode = false;
-			delete_confirm = false;
-			edt_sample_context = current_sample_context;
-			load_context = LoadContext::Edt;
-			load_prev_mode = edt_prev_mode;
+			StoreTrackSampleState(perform_context_track);
+		}
+		}
+		if (encoder_r_pressed && edt_prev_mode == UiMode::PlayTrack)
+		{
+			load_context = LoadContext::Track;
+			load_context_track = perform_context_track;
+			load_prev_mode = UiMode::PlayTrack;
 			ui_mode = UiMode::Load;
 			load_selected = 0;
 			load_scroll = 0;
@@ -7609,12 +6978,69 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 
 	if (record_state == RecordState::Countdown)
 	{
-		if ((System::GetNow() - record_countdown_start_ms) >= kRecordCountdownMs)
+		if ((now_ms - record_countdown_start_ms) >= kRecordCountdownMs)
 		{
 			StartRecording();
 		}
 	}
+}
 
+void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size)
+{
+	const uint32_t cyc_start = DWT->CYCCNT;
+	hw.ProcessAllControls();
+	const int32_t enc_l_inc = hw.encoder.Increment();
+	const bool enc_l_pressed = hw.encoder.RisingEdge();
+	encoder_r.Debounce();
+	const int32_t enc_r_inc = encoder_r.Increment();
+	const bool enc_r_pressed = encoder_r.RisingEdge();
+	shift_button.Debounce();
+	const bool shift_down = shift_button.Pressed();
+	const bool btn1_pressed = hw.button1.RisingEdge();
+	const bool btn2_pressed = hw.button2.RisingEdge();
+	const bool btn1_down = hw.button1.Pressed();
+	if (enc_l_inc != 0)
+	{
+		enc_l_delta_latched += enc_l_inc;
+	}
+	if (enc_r_inc != 0)
+	{
+		enc_r_delta_latched += enc_r_inc;
+	}
+	if (enc_l_pressed)
+	{
+		enc_l_press_latched = true;
+	}
+	if (enc_r_pressed)
+	{
+		enc_r_press_latched = true;
+	}
+	if (btn1_pressed)
+	{
+		btn1_press_latched = true;
+	}
+	if (btn2_pressed)
+	{
+		btn2_press_latched = true;
+	}
+	btn1_down_latched = btn1_down;
+	shift_down_latched = shift_down;
+	const float out_sr = hw.AudioSampleRate();
+	if (playhead_running && IsPlayUiMode(ui_mode))
+	{
+		const float samples_per_step = play_samples_per_step;
+		if (samples_per_step > 0.0f)
+		{
+			float phase = play_step_phase + static_cast<float>(size);
+			while (phase >= samples_per_step)
+			{
+				phase -= samples_per_step;
+				playhead_step = (playhead_step + 1) % kPlayStepCount;
+				TriggerSequencerStep(playhead_step);
+			}
+			play_step_phase = phase;
+		}
+	}
 	size_t window_start = sample_play_start;
 	size_t window_end = sample_play_end;
 	if (window_end > sample_length || window_end == 0)
@@ -7635,18 +7061,18 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		playback_release_pos = 0.0f;
 		playback_release_start = 0.0f;
 	}
-static float cached_sat_drive = 0.0f;
-static float cached_sat_mix = 0.0f;
-static float cached_sat_bump = 0.0f;
-static float cached_sat_smpl = 0.0f;
-static float cached_sat_reso = 0.0f;
-static int32_t cached_sat_mode = 0;
-static float cached_chorus_depth = 0.0f;
-static float cached_chorus_mix = 0.0f;
-static float cached_chorus_rate = 0.0f;
-static int32_t cached_chorus_mode = 0;
-static float cached_chorus_wow = 0.0f;
-static float cached_tape_rate = 0.0f;
+	static float cached_sat_drive = 0.0f;
+	static float cached_sat_mix = 0.0f;
+	static float cached_sat_bump = 0.0f;
+	static float cached_sat_smpl = 0.0f;
+	static float cached_sat_reso = 0.0f;
+	static int32_t cached_sat_mode = 0;
+	static float cached_chorus_depth = 0.0f;
+	static float cached_chorus_mix = 0.0f;
+	static float cached_chorus_rate = 0.0f;
+	static int32_t cached_chorus_mode = 0;
+	static float cached_chorus_wow = 0.0f;
+	static float cached_tape_rate = 0.0f;
 	static float cached_delay_wet = 0.0f;
 	static float cached_delay_time = 0.0f;
 	static float cached_delay_feedback = 0.0f;
@@ -7663,12 +7089,12 @@ static float cached_tape_rate = 0.0f;
 	static float cached_reverb_gain = 1.0f;
 	static float cached_reverb_release = 1.0f;
 	static float cached_reverb_predelay_samples = 0.0f;
-static float last_sat_drive = -1.0f;
-static float last_sat_bump = -1.0f;
-static int32_t last_sat_mode = -1;
-static float last_chorus_depth = -1.0f;
-static float last_chorus_rate = -1.0f;
-static float last_chorus_wow = -1.0f;
+	static float last_sat_drive = -1.0f;
+	static float last_sat_bump = -1.0f;
+	static int32_t last_sat_mode = -1;
+	static float last_chorus_depth = -1.0f;
+	static float last_chorus_rate = -1.0f;
+	static float last_chorus_wow = -1.0f;
 	static float last_delay_wet = -1.0f;
 	static float last_delay_time = -1.0f;
 	static float last_delay_feedback = -1.0f;
@@ -7887,6 +7313,7 @@ static float last_chorus_wow = -1.0f;
 	const int32_t chorus_mode_local = cached_chorus_mode;
 	const float chorus_mix = cached_chorus_mix;
 	const float delay_mix = cached_delay_wet;
+	const bool sat_active = (sat_mix > kFxParamEpsilon);
 	const float rev_shimmer = cached_reverb_shimmer;
 	const float dt = static_cast<float>(size) / out_sr;
 	const float time_tau = kDelayTimeSlewMs * 0.001f;
@@ -7929,14 +7356,40 @@ static float last_chorus_wow = -1.0f;
 		last_delay_time = delay_time_smoothed;
 	}
 	const bool perform_mode = IsPerformUiMode(ui_mode);
-	const bool main_mode = (ui_mode == UiMode::Main);
-	const bool fx_allowed = perform_mode || IsPlayUiMode(ui_mode) || ui_mode == UiMode::FxDetail;
 	const bool amp_env_active = perform_mode;
 	const float amp_attack_ms = AmpEnvMsFromFader(amp_attack);
 	const float amp_release_ms = AmpEnvMsFromFader(amp_release);
 	const float amp_attack_samples = amp_attack_ms * 0.001f * out_sr;
 	const float amp_release_samples = amp_release_ms * 0.001f * out_sr;
 	const bool play_seq_mode = IsPlayUiMode(ui_mode) && sample_loaded;
+	const bool play_master_fx = IsPlayUiMode(ui_mode);
+	const int32_t live_track = (perform_context == PerformContext::Track
+		&& perform_context_track >= 0
+		&& perform_context_track < kPlayTrackCount)
+		? perform_context_track
+		: -1;
+	float track_mod_send[kPlayTrackCount] = {};
+	float track_delay_send[kPlayTrackCount] = {};
+	float track_reverb_send[kPlayTrackCount] = {};
+	if (play_master_fx)
+	{
+		for (int t = 0; t < kPlayTrackCount; ++t)
+		{
+			const bool use_live = (t == live_track);
+			float mod_send = use_live ? fx_c_wet : track_perform_state[t].fx_c_wet;
+			float delay_send = use_live ? delay_wet : track_perform_state[t].delay_wet;
+			float reverb_send = use_live ? reverb_wet : track_perform_state[t].reverb_wet;
+			if (mod_send < 0.0f) mod_send = 0.0f;
+			if (mod_send > 1.0f) mod_send = 1.0f;
+			if (delay_send < 0.0f) delay_send = 0.0f;
+			if (delay_send > 1.0f) delay_send = 1.0f;
+			if (reverb_send < 0.0f) reverb_send = 0.0f;
+			if (reverb_send > 1.0f) reverb_send = 1.0f;
+			track_mod_send[t] = mod_send;
+			track_delay_send[t] = delay_send;
+			track_reverb_send[t] = reverb_send;
+		}
+	}
 	const bool use_poly = (record_state != RecordState::Recording)
 		&& ((perform_mode && sample_loaded) || play_seq_mode);
 	const bool sample_stereo = (sample_channels == 2);
@@ -7956,6 +7409,9 @@ static float last_chorus_wow = -1.0f;
 		last_flt_cutoff = flt_cutoff_hz;
 		last_flt_q = flt_q;
 	}
+	const float perform_attack = perform_attack_norm;
+	const float perform_release = perform_release_norm;
+
 	int32_t fx_order[kPerformFaderCount];
 	for (int i = 0; i < kPerformFaderCount; ++i)
 	{
@@ -7964,6 +7420,10 @@ static float last_chorus_wow = -1.0f;
 
 	auto apply_saturation = [&](float &l, float &r)
 	{
+		if (sat_mix <= kFxParamEpsilon)
+		{
+			return;
+		}
 		const float dry_l = l;
 		const float dry_r = r;
 		float wet_l = l;
@@ -8004,7 +7464,7 @@ static float last_chorus_wow = -1.0f;
 		r = (dry_r * (1.0f - sat_mix)) + (wet_r * sat_mix);
 	};
 
-	auto apply_chorus = [&](float &l, float &r)
+	auto apply_chorus = [&](float &l, float &r, float mix)
 	{
 		const float dry_l = l;
 		const float dry_r = r;
@@ -8080,11 +7540,11 @@ static float last_chorus_wow = -1.0f;
 			wet_l = mid + (side * width);
 			wet_r = mid - (side * width);
 		}
-		l = (dry_l * (1.0f - chorus_mix)) + (wet_l * chorus_mix);
-		r = (dry_r * (1.0f - chorus_mix)) + (wet_r * chorus_mix);
+		l = (dry_l * (1.0f - mix)) + (wet_l * mix);
+		r = (dry_r * (1.0f - mix)) + (wet_r * mix);
 	};
 
-	auto apply_delay = [&](float &l, float &r)
+	auto apply_delay = [&](float &l, float &r, float mix)
 	{
 		const float freeze = (cached_delay_freeze >= 0.5f) ? 1.0f : 0.0f;
 		float feedback = delay_feedback_smoothed;
@@ -8121,14 +7581,13 @@ static float last_chorus_wow = -1.0f;
 			delay_l = mid + (side * width);
 			delay_r = mid - (side * width);
 		}
-		const float mix = delay_mix;
 		const float delay_mix_l = (l * (1.0f - mix)) + (delay_l * mix);
 		const float delay_mix_r = (r * (1.0f - mix)) + (delay_r * mix);
 		l = delay_mix_l;
 		r = delay_mix_r;
 	};
 
-	auto apply_reverb = [&](float &l, float &r)
+	auto apply_reverb = [&](float &l, float &r, float wet_amount)
 	{
 		float rev_in_l = 0.0f;
 		float rev_in_r = 0.0f;
@@ -8237,17 +7696,16 @@ static float last_chorus_wow = -1.0f;
 		shimmer_buf_l[shimmer_write_idx] = rev_l;
 		shimmer_buf_r[shimmer_write_idx] = rev_r;
 		shimmer_write_idx = (shimmer_write_idx + 1) % kShimmerBufferSize;
-		const float wet = cached_reverb_wet;
-		float wet_mix = wet;
-		float dry_mix = 1.0f - wet;
-		if (wet < 0.5f)
+		float wet_mix = wet_amount;
+		float dry_mix = 1.0f - wet_amount;
+		if (wet_amount < 0.5f)
 		{
-			wet_mix = 2.0f * wet * wet;
+			wet_mix = 2.0f * wet_amount * wet_amount;
 			dry_mix = 1.0f - wet_mix;
 		}
 		else
 		{
-			dry_mix = 2.0f * (1.0f - wet) * (1.0f - wet);
+			dry_mix = 2.0f * (1.0f - wet_amount) * (1.0f - wet_amount);
 			wet_mix = 1.0f - dry_mix;
 		}
 		wet_mix *= 1.12f;
@@ -8255,7 +7713,7 @@ static float last_chorus_wow = -1.0f;
 		{
 			wet_mix = 1.0f;
 		}
-		if (wet >= 0.999f)
+		if (wet_amount >= 0.999f)
 		{
 			wet_mix = 1.0f;
 			dry_mix = 0.0f;
@@ -8270,15 +7728,37 @@ static float last_chorus_wow = -1.0f;
 		? (fx_chain_fade_target - fx_gain) / static_cast<float>(fade_samples_left)
 		: 0.0f;
 
+	const float kSendEps = 1e-7f;
 	for (size_t i = 0; i < size; i++)
 	{
 		float sig_l = 0.0f;
 		float sig_r = 0.0f;
+		float mod_send_l = 0.0f;
+		float mod_send_r = 0.0f;
+		float delay_send_l = 0.0f;
+		float delay_send_r = 0.0f;
+		float reverb_send_l = 0.0f;
+		float reverb_send_r = 0.0f;
+		auto add_voice = [&](float v_l, float v_r, int32_t track)
+		{
+			sig_l += v_l;
+			sig_r += v_r;
+			if (play_master_fx && track >= 0 && track < kPlayTrackCount)
+			{
+				const float mod_send = track_mod_send[track];
+				const float delay_send = track_delay_send[track];
+				const float reverb_send = track_reverb_send[track];
+				mod_send_l += v_l * mod_send;
+				mod_send_r += v_r * mod_send;
+				delay_send_l += v_l * delay_send;
+				delay_send_r += v_r * delay_send;
+				reverb_send_l += v_l * reverb_send;
+				reverb_send_r += v_r * reverb_send;
+			}
+		};
 		const bool monitor_active =
 			(ui_mode == UiMode::Record
 				&& record_state != RecordState::Review
-				&& record_state != RecordState::SourceSelect
-				&& record_state != RecordState::BackConfirm
 				&& record_state != RecordState::TargetSelect);
 		float monitor_l = 0.0f;
 		float monitor_r = 0.0f;
@@ -8533,8 +8013,7 @@ static float last_chorus_wow = -1.0f;
 						samp_l = perform_lpf_l2[v].Process(perform_lpf_l1[v].Process(samp_l));
 						samp_r = perform_lpf_r2[v].Process(perform_lpf_r1[v].Process(samp_r));
 					}
-					sig_l += samp_l;
-					sig_r += samp_r;
+					add_voice(samp_l, samp_r, voice.track);
 					voice.active = false;
 					voice.releasing = false;
 					voice.release_pos = 0.0f;
@@ -8576,8 +8055,7 @@ static float last_chorus_wow = -1.0f;
 					samp_l = perform_lpf_l2[v].Process(perform_lpf_l1[v].Process(samp_l));
 					samp_r = perform_lpf_r2[v].Process(perform_lpf_r1[v].Process(samp_r));
 				}
-				sig_l += samp_l;
-				sig_r += samp_r;
+				add_voice(samp_l, samp_r, voice.track);
 				voice.phase += voice.rate;
 				if (!voice.releasing)
 				{
@@ -8650,29 +8128,91 @@ static float last_chorus_wow = -1.0f;
 			out[1][i] = 0.0f;
 			continue;
 		}
-		if (main_mode)
-		{
-			out[0][i] = 0.0f;
-			out[1][i] = 0.0f;
-			continue;
-		}
-		if (!fx_allowed)
-		{
-			out[0][i] = sig_l;
-			out[1][i] = sig_r;
-			continue;
-		}
 		float fx_l = sig_l;
 		float fx_r = sig_r;
-		for (int stage = 0; stage < kPerformFaderCount; ++stage)
+		if (play_master_fx)
 		{
-			switch (fx_order[stage])
+			const float mod_in_mag = fabsf(mod_send_l) + fabsf(mod_send_r);
+			const float delay_in_mag = fabsf(delay_send_l) + fabsf(delay_send_r);
+			const float reverb_in_mag = fabsf(reverb_send_l) + fabsf(reverb_send_r);
+			if (mod_in_mag > kSendEps)
 			{
-				case kFxSatIndex: apply_saturation(fx_l, fx_r); break;
-				case kFxChorusIndex: apply_chorus(fx_l, fx_r); break;
-				case kFxDelayIndex: apply_delay(fx_l, fx_r); break;
-				case kFxReverbIndex: apply_reverb(fx_l, fx_r); break;
-				default: break;
+				master_mod_hold = master_mod_tail_samples;
+			}
+			else if (master_mod_hold > 0)
+			{
+				--master_mod_hold;
+			}
+			if (delay_in_mag > kSendEps)
+			{
+				master_delay_hold = master_delay_tail_samples;
+			}
+			else if (master_delay_hold > 0)
+			{
+				--master_delay_hold;
+			}
+			if (reverb_in_mag > kSendEps)
+			{
+				master_reverb_hold = master_reverb_tail_samples;
+			}
+			else if (master_reverb_hold > 0)
+			{
+				--master_reverb_hold;
+			}
+			const bool mod_active = (master_mod_hold > 0);
+			const bool delay_active = (master_delay_hold > 0);
+			const bool reverb_active = (master_reverb_hold > 0);
+			const float dry_mag = fabsf(fx_l) + fabsf(fx_r);
+			if (!(dry_mag < kSendEps
+				  && !sat_active
+				  && !mod_active
+				  && !delay_active
+				  && !reverb_active))
+			{
+				if (sat_active)
+				{
+					apply_saturation(fx_l, fx_r);
+				}
+				float mod_out_l = 0.0f;
+				float mod_out_r = 0.0f;
+				if (mod_active)
+				{
+					mod_out_l = mod_send_l;
+					mod_out_r = mod_send_r;
+					apply_chorus(mod_out_l, mod_out_r, 1.0f);
+				}
+				float delay_out_l = 0.0f;
+				float delay_out_r = 0.0f;
+				if (delay_active)
+				{
+					delay_out_l = delay_send_l;
+					delay_out_r = delay_send_r;
+					apply_delay(delay_out_l, delay_out_r, 1.0f);
+				}
+				float reverb_out_l = 0.0f;
+				float reverb_out_r = 0.0f;
+				if (reverb_active)
+				{
+					reverb_out_l = reverb_send_l;
+					reverb_out_r = reverb_send_r;
+					apply_reverb(reverb_out_l, reverb_out_r, 1.0f);
+				}
+				fx_l += mod_out_l + delay_out_l + reverb_out_l;
+				fx_r += mod_out_r + delay_out_r + reverb_out_r;
+			}
+		}
+		else
+		{
+			for (int stage = 0; stage < kPerformFaderCount; ++stage)
+			{
+				switch (fx_order[stage])
+				{
+					case kFxSatIndex: apply_saturation(fx_l, fx_r); break;
+					case kFxChorusIndex: apply_chorus(fx_l, fx_r, chorus_mix); break;
+					case kFxDelayIndex: apply_delay(fx_l, fx_r, delay_mix); break;
+					case kFxReverbIndex: apply_reverb(fx_l, fx_r, cached_reverb_wet); break;
+					default: break;
+				}
 			}
 		}
 		out[0][i] = fx_l * fx_gain;
@@ -8688,14 +8228,40 @@ static float last_chorus_wow = -1.0f;
 		fx_chain_pause_pending = false;
 		fx_chain_fade_gain = 0.0f;
 	}
-	request_playhead_redraw = true;
+	const uint32_t cyc_end = DWT->CYCCNT;
+	const uint32_t cyc_used = cyc_end - cyc_start;
+	const float cycles_per_block = (static_cast<float>(SystemCoreClock) / out_sr)
+		* static_cast<float>(size);
+	float load_pct = 0.0f;
+	if (cycles_per_block > 0.0f)
+	{
+		load_pct = 100.0f * (static_cast<float>(cyc_used) / cycles_per_block);
+	}
+	cpu_load_ema = (cpu_load_ema * 0.95f) + (load_pct * 0.05f);
+	cpu_load_pct = cpu_load_ema;
+	if (load_pct > cpu_load_peak_pct)
+	{
+		cpu_load_peak_pct = load_pct;
+	}
+	else
+	{
+		cpu_load_peak_pct *= 0.995f;
+		if (cpu_load_peak_pct < 0.0f)
+		{
+			cpu_load_peak_pct = 0.0f;
+		}
+	}
 }
 
 int main(void)
 {
 	hw.Init();
+	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+	DWT->CYCCNT = 0;
+	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 	hw.SetAudioBlockSize(16); // number of samples handled per callback
 	hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
+	UpdateMasterFxTailSamples(hw.AudioSampleRate());
 	hw.seed.StartLog(false);
 	LogLine("Logger started");
 
@@ -8763,7 +8329,6 @@ int main(void)
 	reverb_predelay_l.SetDelay(0.0f);
 	reverb_predelay_r.SetDelay(0.0f);
 
-	UpdatePlayStepMs();
 	InitTrackStates();
 
 	encoder_r.Init(seed::D7, seed::D8, seed::D22, hw.AudioSampleRate());
@@ -8788,6 +8353,7 @@ int main(void)
 
 	hw.StartAdc();
 	hw.StartAudio(AudioCallback);
+	UpdatePlayStepMs();
 	hw.midi.StartReceive();
 	UiMode last_mode = UiMode::Main;
 	int32_t last_menu = -1;
@@ -8801,11 +8367,10 @@ int main(void)
 	bool last_sd_mounted = false;
 	RecordState last_record_state = RecordState::Armed;
 	bool last_playback_active = false;
-	uint32_t last_perform_playhead_ms = 0;
-	bool last_perform_playhead_active = false;
-	uint32_t last_edt_playhead_ms = 0;
-	bool last_edt_playhead_active = false;
+	int32_t last_playhead_step = -1;
+	uint8_t last_cpu_pct = 0;
 	LoadDestination last_load_target = LoadDestination::Play;
+	uint32_t last_control_ms = 0;
 	while(1)
 	{
 		hw.midi.Listen();
@@ -8813,15 +8378,32 @@ int main(void)
 		{
 			HandleMidiMessage(hw.midi.PopEvent());
 		}
-		int32_t aux_delta = 0;
-		if (encoder_r_accum != 0)
+		const uint32_t now_ms = System::GetNow();
+		if ((now_ms - last_control_ms) >= kControlTickMs)
 		{
-			aux_delta = encoder_r_accum;
-			encoder_r_accum = 0;
+			last_control_ms = now_ms;
+			ProcessUiControls(hw.AudioSampleRate(), now_ms);
 		}
-		if (aux_delta != 0 && UiLogEnabled())
+		const bool play_ui = IsPlayUiMode(ui_mode);
+		const int32_t current_step = playhead_step;
+		const uint8_t cpu_pct_ui = static_cast<uint8_t>(cpu_load_pct + 0.5f);
+		if (play_ui)
 		{
-			LogLine("Encoder R delta=%ld", static_cast<long>(aux_delta));
+			if (current_step != last_playhead_step || cpu_pct_ui != last_cpu_pct)
+			{
+				last_playhead_step = current_step;
+				last_cpu_pct = cpu_pct_ui;
+				play_screen_dirty = true;
+			}
+			if (play_screen_dirty)
+			{
+				request_playhead_redraw = true;
+			}
+		}
+		else
+		{
+			last_playhead_step = current_step;
+			last_cpu_pct = cpu_pct_ui;
 		}
 		if (encoder_r_button_press)
 		{
@@ -8851,16 +8433,17 @@ int main(void)
 					if (!playhead_running)
 					{
 						playhead_running = true;
-						playhead_step = 0;
-						playhead_last_step_ms = System::GetNow();
+						playhead_step = kPlayStepCount - 1;
+						play_step_phase = (play_samples_per_step > 0.0f)
+							? play_samples_per_step
+							: 0.0f;
 						play_screen_dirty = true;
 						request_playhead_redraw = true;
-						TriggerSequencerStep(playhead_step);
 					}
 					else
 					{
 						playhead_running = false;
-						playhead_last_step_ms = 0;
+						play_step_phase = 0.0f;
 					play_screen_dirty = true;
 					request_playhead_redraw = true;
 				}
@@ -8885,46 +8468,13 @@ int main(void)
 				request_playhead_redraw = true;
 			}
 		}
-			if (!ui_blocked && IsPlayUiMode(ui_mode) && playhead_running)
-		{
-		const uint32_t now = System::GetNow();
-			if (playhead_last_step_ms == 0)
-			{
-				playhead_last_step_ms = now;
-			}
-			if (play_step_ms > 0)
-			{
-				const uint32_t elapsed = now - playhead_last_step_ms;
-				if (elapsed >= play_step_ms)
-				{
-					const uint32_t steps = elapsed / play_step_ms;
-					playhead_last_step_ms += steps * play_step_ms;
-					const int32_t start_step = playhead_step;
-					for (uint32_t s = 0; s < steps; ++s)
-					{
-						const int32_t step = (start_step + static_cast<int32_t>(s) + 1) % kPlayStepCount;
-						TriggerSequencerStep(step);
-					}
-					playhead_step = (start_step + static_cast<int32_t>(steps)) % kPlayStepCount;
-					play_screen_dirty = true;
-					request_playhead_redraw = true;
-				}
-			}
-		}
 		if (request_load_scan)
 		{
 			if (!ui_blocked)
 			{
-				if (kLoadPresetsPlaceholder && load_context == LoadContext::Main && !delete_mode)
-				{
-					request_load_scan = false;
-				}
-				else
-				{
-					request_load_scan = false;
-					LogLine("Load menu: scan requested");
-					ScanSdFiles(true);
-				}
+				request_load_scan = false;
+				LogLine("Load menu: scan requested");
+				ScanSdFiles(true);
 			}
 		}
 		if (request_delete_scan)
@@ -8944,32 +8494,12 @@ int main(void)
 				request_load_index = -1;
 				LogLine("Load menu: sample request ignored during UI block");
 			}
-			else if (kLoadPresetsPlaceholder && load_context == LoadContext::Main && !delete_mode)
-			{
-				request_load_sample = false;
-				request_load_index = -1;
-				LogLine("Load menu: sample request ignored (presets placeholder)");
-			}
 			else
 			{
 				request_load_sample = false;
 				const int32_t index = request_load_index;
 				request_load_index = -1;
 				const LoadDestination dest = request_load_destination;
-				SampleContext target_ctx = SampleContext::Play;
-				if (load_context == LoadContext::Edt)
-				{
-					target_ctx = edt_sample_context;
-				}
-				else if (load_context == LoadContext::Track)
-				{
-					target_ctx = SampleContext::Play;
-				}
-				else if (dest == LoadDestination::Perform)
-				{
-					target_ctx = SampleContext::Perform;
-				}
-				SetSampleContext(target_ctx);
 				LogLine("Load menu: sample request index=%ld target=%s",
 						static_cast<long>(index),
 						LoadDestinationName(dest));
@@ -8996,17 +8526,6 @@ int main(void)
 						LogLine("Load success, entering TRACK menu");
 						ui_mode = UiMode::PlayTrack;
 						request_perform_redraw = true;
-					}
-					else if (load_context == LoadContext::Edt)
-					{
-						LogLine("Load success, returning to EDT");
-						ui_mode = UiMode::Edt;
-						if (sample_loaded && sample_length > 0)
-						{
-							waveform_ready = true;
-						}
-						waveform_dirty = true;
-						request_length_redraw = true;
 					}
 					else if (dest == LoadDestination::Perform)
 					{
@@ -9055,9 +8574,7 @@ int main(void)
 
 		if (!ui_blocked)
 		{
-			const bool preview_allowed = (ui_mode == UiMode::Load
-				&& !(kLoadPresetsPlaceholder && load_context == LoadContext::Main && !delete_mode)
-				&& wav_file_count > 0);
+			const bool preview_allowed = (ui_mode == UiMode::Load && !delete_mode && wav_file_count > 0);
 			if (preview_hold && preview_allowed)
 			{
 				if (!preview_active || preview_index != load_selected)
@@ -9117,7 +8634,6 @@ int main(void)
 				}
 			}
 		}
-
 		if (sd_init_in_progress)
 		{
 			if (!sd_init_done)
@@ -9263,54 +8779,8 @@ int main(void)
 			{
 				playhead_running = false;
 				playhead_step = 0;
-				playhead_last_step_ms = 0;
+				play_step_phase = 0.0f;
 				play_screen_dirty = true;
-			}
-			if (mode == UiMode::FxDetail)
-			{
-				if (IsPlayUiMode(fx_detail_prev_mode))
-				{
-					SetSampleContext(SampleContext::Play);
-					if (fx_detail_prev_mode == UiMode::PlayTrack)
-					{
-						SetFxContext(FxContext::Track, perform_context_track);
-					}
-					else
-					{
-						SetFxContext(FxContext::Play);
-					}
-				}
-				else
-				{
-					SetSampleContext(SampleContext::Perform);
-					SetFxContext(FxContext::Perform);
-				}
-			}
-			else if (mode == UiMode::Edt)
-			{
-				SetSampleContext(edt_sample_context);
-				SetFxContext((edt_sample_context == SampleContext::Play)
-					? FxContext::Play
-					: FxContext::Perform);
-			}
-			else if (mode == UiMode::Perform)
-			{
-				SetSampleContext(SampleContext::Perform);
-				SetFxContext(FxContext::Perform);
-			}
-			else if (mode == UiMode::Play)
-			{
-				SetSampleContext(SampleContext::Play);
-				SetFxContext(FxContext::Play);
-			}
-			else if (mode == UiMode::PlayTrack)
-			{
-				SetSampleContext(SampleContext::Play);
-				SetFxContext(FxContext::Track, perform_context_track);
-			}
-			if (IsPerformUiMode(last_mode) && !IsPerformUiMode(mode))
-			{
-				ResetPerformVoices();
 			}
 			if (mode == UiMode::Record)
 			{
@@ -9353,19 +8823,11 @@ int main(void)
 								: "UNKNOWN");
 				}
 			}
-			else if (mode == UiMode::LoadModeSelect)
-			{
-				DrawLoadModeSelect(load_mode_index);
-			}
-			else if (mode == UiMode::LoadStub)
-			{
-				DrawLoadStubScreen(load_stub_mode);
-			}
-			else if (mode == UiMode::Play)
-			{
-				play_screen_dirty = true;
-				DrawPlayScreen();
-			}
+				else if (mode == UiMode::Play)
+				{
+					play_screen_dirty = true;
+					DrawPlayScreen();
+				}
 				else if (mode == UiMode::PlayTrack)
 				{
 					request_perform_redraw = true;
@@ -9402,359 +8864,6 @@ int main(void)
 					LogLine("Load target: %s",
 							LoadDestinationName(load_target_selected));
 				}
-			else if (mode == UiMode::Shift)
-			{
-				DrawShiftMenu(shift_menu_index);
-				last_shift_menu = shift_menu_index;
-			}
-			else if (mode == UiMode::PresetSaveStub)
-			{
-				DrawPresetSaveStub();
-			}
-			else
-			{
-				if (record_state == RecordState::BackConfirm)
-				{
-					DrawRecordBackConfirm();
-				}
-				else if (record_state == RecordState::SourceSelect)
-				{
-					DrawRecordSourceScreen();
-				}
-				else if (record_state == RecordState::Armed)
-				{
-					DrawRecordArmed();
-				}
-				else if (record_state == RecordState::Countdown)
-				{
-					DrawRecordCountdown();
-				}
-				else if (record_state == RecordState::Recording)
-				{
-					DrawRecordRecording();
-				}
-				else
-				{
-					if (sample_loaded && sample_length > 0)
-					{
-						ComputeWaveform();
-						waveform_ready = true;
-						waveform_dirty = true;
-						UpdateTrimFrames();
-					}
-					DrawRecordReview();
-				}
-			}
-				last_mode = mode;
-				last_menu = menu_index;
-				last_scroll = load_scroll;
-				last_selected = load_selected;
-				last_file_count = wav_file_count;
-				last_sd_mounted = sd_mounted;
-				last_record_state = record_state;
-				last_load_target = load_target_selected;
-				last_perform_index = perform_index;
-			}
-			else if (mode == UiMode::Main)
-			{
-				const int32_t current = menu_index;
-			if (current != last_menu)
-			{
-				LogLine("Menu highlight: %s (%ld)",
-						MenuLabelForIndex(current),
-						static_cast<long>(current));
-				DrawMenu(current);
-					last_menu = current;
-				}
-			}
-			else if (mode == UiMode::Perform || mode == UiMode::PlayTrack)
-			{
-				const int32_t current = perform_index;
-				if (request_perform_redraw || current != last_perform_index)
-				{
-					request_perform_redraw = false;
-					const bool fx_select_active = (current == kPerformFxIndex)
-						&& fx_window_active;
-					const bool amp_select_active = (current == kPerformAmpIndex)
-						&& amp_window_active;
-					const bool flt_select_active = (current == kPerformFltIndex)
-						&& flt_window_active;
-					DrawPerformScreen(current,
-									  fx_select_active,
-									  fx_fader_index,
-									  amp_select_active,
-									  amp_fader_index,
-									  flt_select_active,
-									  flt_fader_index);
-					last_perform_index = current;
-				}
-			}
-			else if (mode == UiMode::FxDetail)
-			{
-				if (request_fx_detail_redraw
-					|| fx_detail_index != last_fx_detail_index
-					|| fx_detail_param_index != last_fx_detail_param_index)
-				{
-					request_fx_detail_redraw = false;
-					DrawFxDetailScreen(fx_detail_index);
-					last_fx_detail_index = fx_detail_index;
-					last_fx_detail_param_index = fx_detail_param_index;
-				}
-			}
-			else if (mode == UiMode::Shift)
-			{
-				if (!ui_blocked)
-				{
-				const int32_t current = shift_menu_index;
-				if (current != last_shift_menu)
-				{
-					DrawShiftMenu(current);
-					last_shift_menu = current;
-				}
-			}
-		}
-		else if (mode == UiMode::PresetSaveStub)
-		{
-			DrawPresetSaveStub();
-		}
-		else if (mode == UiMode::Load)
-		{
-			if (delete_mode && delete_confirm)
-			{
-				if (request_delete_redraw)
-				{
-					request_delete_redraw = false;
-					DrawDeleteConfirm(delete_confirm_name);
-				}
-			}
-			else
-			{
-				const int32_t current_scroll = load_scroll;
-				const int32_t current_count = wav_file_count;
-				const int32_t current_selected = load_selected;
-				if (request_delete_redraw
-					|| current_scroll != last_scroll
-					|| current_selected != last_selected
-					|| current_count != last_file_count
-					|| sd_mounted != last_sd_mounted)
-				{
-					request_delete_redraw = false;
-					DrawLoadMenu(current_scroll, current_selected);
-					if (current_selected != last_selected || current_count != last_file_count)
-					{
-						LogLine("Load menu: selected=%ld name=%s",
-								static_cast<long>(current_selected),
-								(current_selected >= 0 && current_selected < current_count)
-									? wav_files[current_selected]
-									: "UNKNOWN");
-					}
-					last_scroll = current_scroll;
-					last_selected = current_selected;
-					last_file_count = current_count;
-					last_sd_mounted = sd_mounted;
-				}
-			}
-		}
-		else if (mode == UiMode::LoadTarget)
-		{
-			const LoadDestination current_target = load_target_selected;
-			if (current_target != last_load_target)
-			{
-				DrawLoadTargetMenu(current_target);
-				last_load_target = current_target;
-			}
-		}
-		else if (mode == UiMode::LoadModeSelect)
-		{
-			DrawLoadModeSelect(load_mode_index);
-		}
-		else if (mode == UiMode::LoadStub)
-		{
-			DrawLoadStubScreen(load_stub_mode);
-		}
-		else if (mode == UiMode::Record)
-		{
-			const RecordState current_state = record_state;
-			if (current_state != last_record_state)
-			{
-				if (current_state == RecordState::BackConfirm)
-				{
-					DrawRecordBackConfirm();
-				}
-				else if (current_state == RecordState::SourceSelect)
-				{
-					DrawRecordSourceScreen();
-				}
-				else if (current_state == RecordState::Armed)
-				{
-					record_anim_start_ms = NowMs();
-					DrawRecordArmed();
-				}
-				else if (current_state == RecordState::Countdown)
-				{
-					DrawRecordCountdown();
-				}
-				else if (current_state == RecordState::Recording)
-				{
-					DrawRecordRecording();
-				}
-				else if (current_state == RecordState::TargetSelect)
-				{
-					DrawRecordTargetScreen(record_target_index);
-				}
-				else
-				{
-					DrawRecordReview();
-				}
-				last_record_state = current_state;
-			}
-		}
-		if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::Recording)
-		{
-			if (live_wave_dirty)
-			{
-				live_wave_dirty = false;
-				DrawRecordRecording();
-			}
-		}
-		else if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::SourceSelect)
-		{
-			DrawRecordSourceScreen();
-		}
-		else if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::Armed)
-		{
-			DrawRecordReadyScreen();
-		}
-		else if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::Countdown)
-		{
-			DrawRecordCountdown();
-		}
-		else if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::TargetSelect)
-		{
-			DrawRecordTargetScreen(record_target_index);
-		}
-		else if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::BackConfirm)
-		{
-			DrawRecordBackConfirm();
-		}
-		const bool perform_playhead_active = (!ui_blocked
-			&& (mode == UiMode::Perform || mode == UiMode::PlayTrack)
-			&& perform_index == kPerformEdtIndex
-			&& (playback_active || AnyPerformVoiceActive()));
-		if (perform_playhead_active)
-		{
-			const uint32_t now = System::GetNow();
-			if (!last_perform_playhead_active)
-			{
-				last_perform_playhead_ms = now;
-				request_perform_redraw = true;
-			}
-			else if ((now - last_perform_playhead_ms) >= kPerformPlayheadIntervalMs)
-			{
-				last_perform_playhead_ms = now;
-				request_perform_redraw = true;
-			}
-		}
-		else
-		{
-			last_perform_playhead_ms = 0;
-		}
-		last_perform_playhead_active = perform_playhead_active;
-		const bool edt_playhead_active = (!ui_blocked
-			&& mode == UiMode::Edt
-			&& playback_active);
-		if (edt_playhead_active)
-		{
-			const uint32_t now = System::GetNow();
-			if (!last_edt_playhead_active)
-			{
-				last_edt_playhead_ms = now;
-				waveform_dirty = true;
-				request_playhead_redraw = true;
-			}
-			else if ((now - last_edt_playhead_ms) >= kPerformPlayheadIntervalMs)
-			{
-				last_edt_playhead_ms = now;
-				waveform_dirty = true;
-				request_playhead_redraw = true;
-			}
-		}
-		else
-		{
-			last_edt_playhead_ms = 0;
-		}
-		last_edt_playhead_active = edt_playhead_active;
-		if (!ui_blocked && (request_playhead_redraw || (playback_active != last_playback_active)))
-		{
-			request_playhead_redraw = false;
-			if (mode == UiMode::Play
-				|| (mode == UiMode::Edt)
-				|| (mode == UiMode::Record && record_state == RecordState::Review))
-			{
-				if (mode == UiMode::Play)
-				{
-					DrawPlayScreen();
-				}
-				else if (mode == UiMode::Edt)
-				{
-					DrawEdtScreen();
-				}
-				else
-				{
-					DrawRecordReview();
-				}
-			}
-		}
-		last_playback_active = playback_active;
-		if (request_playback_stop_log)
-		{
-			request_playback_stop_log = false;
-			if (UiLogEnabled())
-			{
-				LogLine("Playback: stopped (win=[%lu,%lu) phase=%.3f)",
-						static_cast<unsigned long>(sample_play_start),
-						static_cast<unsigned long>(sample_play_end),
-						static_cast<double>(playback_phase));
-			}
-		}
-		if (IsPlayUiMode(ui_mode))
-		{
-			led1_phase_ms = 0.0f;
-			led1_level = 0.0f;
-			if (playhead_running)
-			{
-				hw.led1.Set(1.0f, 0.0f, 0.0f);
-			}
-			else
-			{
-				hw.led1.Set(0.0f, 1.0f, 0.0f);
-			}
-		}
-		else
-		{
-				if ((ui_mode == UiMode::Record && record_state == RecordState::Review)
-					|| (IsPerformUiMode(ui_mode) && sample_loaded)
-					|| (ui_mode == UiMode::FxDetail && sample_loaded)
-					|| (ui_mode == UiMode::Edt && sample_loaded)
-					|| (ui_mode == UiMode::Load && load_context == LoadContext::Edt)
-					|| (ui_mode == UiMode::Load && delete_mode))
-			{
-				led1_phase_ms += 10.0f;
-				if (led1_phase_ms >= kLedBlinkPeriodMs)
-				{
-					led1_phase_ms -= kLedBlinkPeriodMs;
-				}
-				const float on_time = kLedBlinkDuty * kLedBlinkPeriodMs;
-				led1_level = (led1_phase_ms < on_time) ? 1.0f : 0.0f;
-			}
-			else
-			{
-				led1_phase_ms = 0.0f;
-				led1_level = 0.0f;
-			}
-			hw.led1.Set(0.0f, led1_level, 0.0f);
-		}
-		hw.UpdateLeds();
-		hw.DelayMs(10);
-	}
-}
+			else if (mode == UiMode::ConfirmB
+LowCPUSeq.cpp
+Displaying LowCPUSeq.cpp.

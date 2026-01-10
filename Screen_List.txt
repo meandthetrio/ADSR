@@ -15,7 +15,7 @@ LOAD MENU
   - "NO FILES" when there are no files (delete mode).
 
 LOAD TARGET
-- Three equal rectangles with diagonal labels: PERFORM, PLAY, BAKE.
+- Two equal rectangles with diagonal labels: PERFORM, PLAY.
 - Encoder L selects target; Encoder R confirms.
 
 DELETE CONFIRM
@@ -38,18 +38,16 @@ RECORD REVIEW
 
 RECORD TARGET SELECT
 - Appears after Record Review for recorded samples.
-- Three equal rectangles with diagonal labels: PERFORM, PLAY, BAKE.
+- Two equal rectangles with diagonal labels: PERFORM, PLAY.
 - Encoder L selects target; Encoder R confirms.
 - PERFORM loads the sample to PERFORM and enters PERFORM mode.
 - PLAY loads the sample to PLAY and enters PLAY mode.
-- BAKE goes to the CONFIRM BAKE screen.
 
 PERFORM
 - 2x2 grid of rectangles.
 - Vertical labels on the left side of each box: EDT (top left), AMP (top right), FLT (bottom left), FX (bottom right).
 - EDT box shows a mini waveform preview of the loaded sample.
 - When a sample is loaded to PERFORM, playback is 5-voice polyphonic resampling (pitch follows speed).
-- When a sample is baked, PERFORM uses 5-voice multisample playback.
 - AMP box shows four vertical faders labeled A, D, S, R.
 - AMP A/R faders map to 5-1000 ms fades (20 ms steps) at the start/end of the sample.
 - AMP R release starts when a MIDI note-off is received for a voice.
@@ -85,9 +83,6 @@ PLAY SEQUENCER
 
 NO SAMPLE LOADED
 - Message: NO SAMPLE LOADED / PLEASE LOAD A / SAMPLE FROM / THE MAIN MENU.
-
-CONFIRM BAKE
-- "Confirm Bake?" with YES/NO options.
 
 SD INIT
 - "INITIALIZING SD" with animated dots and attempt counter.

@@ -8,7 +8,7 @@ Cuz reworked Sample saving screen
 # 1/9/26 4:06pm
 Cuz completey redesigned HOME screen UI
 - PERFORM/PLAY now completely independent engines loading into their own buffers
-- LOAD screen is staging ground for PERF&PLAY Presets - and BAKE feature
+- LOAD screen is staging ground for PERF&PLAY Presets
 - EDT now loads a file (can preview dry signal here)
 - Waveform viewer now accurate across both modes and within every track of sampler
 - FX engines no longer crossing over in modes
@@ -18,7 +18,6 @@ Cuz completey redesigned HOME screen UI
 - Added DELETE menu sample preview so users can hear a sample before deleting it to validate.
 - RECORD screen audio wavform viewer is accurate when loading to PERFORM - before it would only show previosly loaded sample visually.(add options to record to specific slot in PLAY?)
 - Updated playback head animation in EDT quick view and Waveform View trim section.
-- Removed all BAKE features within RECORD for now (left staging area in LOAD for future dev)
 - Increased SAVE speed. kSaveChunkFrames increased to 8192 & Removed the per‑step time budget so StepSaveRecordedSample writes the full file in one go. (do this before loading to PERF or PLAY)
 
 
@@ -94,26 +93,7 @@ Cuz revamped entire Reverb Algo
 ### 2/2/26 2:08am
 # Post TUNE/ADSR removal updates
 
-___CREATED A NEW BRANCH TO WORK ON THE BASICS OF THE BAKE FEATURE, MAINLY CREATING MULTIPLE SAMPLES FROM A SINGLE SAMPLE, REPITCHING THEM AND PLACING THEM ON THEIR RELATIVE NOTE #_______
-
-BUGS:
-1.) THERE IS NO BAKE PROGRESS WHEN BAKING, CURRENTLY TAKES AROUND 20 SECONDS AND TRANSPORTS DIRECTLY TO PERFORM SUBMENU
-2.) EVERYTHING FROM A3 AND HIGHER SOUNDS OUT OF TUNE?
-3.) THE ADDED FADE INS / FADE OUTS WHICH CAN BE CONTROLLED WITH THE ENCODERS ON THE PERFORM SUBMENU WILL BE DELETED FOR SOMETHING BETTER
-
 -Removed TUNE and ADSR SELECT screens.
-
--Added CONFIRM BAKE screen (ENCODER R) with YES/NO boxes from START/END SELECT.
-
--BAKE now uses only the selected START/END window; PERFORM shows and plays only that window.
-
--BAKE runs offline once and stores a per-note bank in SDRAM for C2-C4: C3 is the original window, other notes are phase-vocoder pitch-shifted with duration preserved (phase locking + transient handling to reduce artifacts).
-
--Perform is MIDI-only for baked content: only notes C2-C4 play from the baked bank.
-
--Added 5-voice polyphony for baked Perform playback.
-
--Added global attack/release fades in Perform (L/R encoders; Shift = fine). The waveform overlay shows the fade lines moving inward as fades increase.
 
 # 1/1/26 EDGE
 
@@ -136,8 +116,6 @@ feature/Record2 Branch
 <!-- EDGE -->
 
 ## Description
-
-// Added BAKE feature
 
 
 // Updated main menu to Load, Record, Perform, Play. Perform is meant to be used with Midi, and Play will eventually be the sequencer.
