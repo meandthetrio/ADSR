@@ -750,6 +750,13 @@ private:
 	float x1_ = 0.0f;
 };
 
+struct BitCrushState
+{
+	int hold = 0;
+	float hold_l = 0.0f;
+	float hold_r = 0.0f;
+};
+
 DaisyPod    hw;
 PodDisplay  display;
 static bool g_display_update_pending = false;
@@ -797,6 +804,8 @@ ChorusEngine chorus_l;
 ChorusEngine chorus_r;
 TapeSaturator sat_l;
 TapeSaturator sat_r;
+static BitCrushState g_sat_bit_state;
+static BitCrushState g_sat_bit_state_tracks[kPlayTrackCount];
 BiquadLp perform_lpf_l1[kPerformVoiceCount];
 BiquadLp perform_lpf_l2[kPerformVoiceCount];
 BiquadLp perform_lpf_r1[kPerformVoiceCount];
@@ -8706,6 +8715,11 @@ static float cached_sat_bump = 0.0f;
 static float cached_sat_smpl = 0.0f;
 static float cached_sat_reso = 0.0f;
 static int32_t cached_sat_mode = 0;
+static float cached_bit_step = 1.0f;
+static float cached_bit_inv_step = 1.0f;
+static float cached_bit_reso = -1.0f;
+static float cached_bit_smpl = -1.0f;
+static int cached_bit_hold_samples = 1;
 static float cached_chorus_depth = 0.0f;
 static float cached_chorus_mix = 0.0f;
 static float cached_chorus_rate = 0.0f;
@@ -8831,6 +8845,34 @@ static float last_chorus_wow = -1.0f;
 		if (cached_sat_mode != last_sat_mode)
 		{
 			last_sat_mode = cached_sat_mode;
+			cached_bit_reso = -1.0f;
+			cached_bit_smpl = -1.0f;
+		}
+		if (cached_sat_mode == 1)
+		{
+			const float reso = cached_sat_reso;
+			const float smpl = cached_sat_smpl;
+			if (fabsf(reso - cached_bit_reso) > 1e-6f
+				|| fabsf(smpl - cached_bit_smpl) > 1e-6f)
+			{
+				const int bits_idx = BitResoIndexFromValue(reso);
+				int bits = kBitResoSteps[bits_idx];
+				if (bits < 2) bits = 2;
+				if (bits > 16) bits = 16;
+				cached_bit_step = ldexpf(1.0f, -(bits - 1));
+				cached_bit_inv_step = (cached_bit_step > 0.0f)
+					? (1.0f / cached_bit_step)
+					: 1.0f;
+				int hold_samples = 1
+					+ static_cast<int>(smpl * static_cast<float>(kBitcrushMaxHold - 1));
+				if (hold_samples < 1)
+				{
+					hold_samples = 1;
+				}
+				cached_bit_hold_samples = hold_samples;
+				cached_bit_reso = reso;
+				cached_bit_smpl = smpl;
+			}
 		}
 		if (cached_sat_mode == 0)
 		{
@@ -8940,16 +8982,11 @@ static float last_chorus_wow = -1.0f;
 	static float drop_target = 1.0f;
 	static int drop_hold = 0;
 	static uint32_t drop_rng = 0x12345678;
-	static int bit_hold = 0;
-	static float bit_hold_l = 0.0f;
-	static float bit_hold_r = 0.0f;
 	static float reverb_tail_gain = 0.0f;
 
 	const int32_t sat_mode_local = cached_sat_mode;
 	const float sat_mix = cached_sat_mix;
 	const bool sat_active = (sat_mix > kFxParamEpsilon);
-	const float bit_reso = cached_sat_reso;
-	const float bit_smpl = cached_sat_smpl;
 	const int32_t chorus_mode_local = cached_chorus_mode;
 	const float chorus_mix = cached_chorus_mix;
 	const float delay_mix = cached_delay_wet;
@@ -9056,7 +9093,7 @@ static float last_chorus_wow = -1.0f;
 		fx_order[i] = fx_chain_order[i];
 	}
 
-	auto apply_saturation = [&](float &l, float &r)
+	auto apply_saturation = [&](float &l, float &r, int32_t track)
 	{
 		if (sat_mix <= kFxParamEpsilon)
 		{
@@ -9073,26 +9110,24 @@ static float last_chorus_wow = -1.0f;
 		}
 		else
 		{
-			int hold_samples = 1 + static_cast<int>(bit_smpl * static_cast<float>(kBitcrushMaxHold - 1));
-			if (hold_samples < 1)
+			BitCrushState* state = &g_sat_bit_state;
+			if (track >= 0 && track < kPlayTrackCount)
 			{
-				hold_samples = 1;
+				state = &g_sat_bit_state_tracks[track];
 			}
-			if (bit_hold <= 0)
+			if (state->hold <= 0)
 			{
-				bit_hold = hold_samples;
-				bit_hold_l = l;
-				bit_hold_r = r;
+				state->hold = cached_bit_hold_samples;
+				state->hold_l = l;
+				state->hold_r = r;
 			}
 			else
 			{
-				--bit_hold;
+				--state->hold;
 			}
-			const int bits_idx = BitResoIndexFromValue(bit_reso);
-			const int bits = kBitResoSteps[bits_idx];
-			const float step = 1.0f / powf(2.0f, static_cast<float>(bits - 1));
-			wet_l = roundf(bit_hold_l / step) * step;
-			wet_r = roundf(bit_hold_r / step) * step;
+			// Do not call powf in sample loop; cached params only.
+			wet_l = roundf(state->hold_l * cached_bit_inv_step) * cached_bit_step;
+			wet_r = roundf(state->hold_r * cached_bit_inv_step) * cached_bit_step;
 			if (wet_l > 1.0f) wet_l = 1.0f;
 			if (wet_l < -1.0f) wet_l = -1.0f;
 			if (wet_r > 1.0f) wet_r = 1.0f;
@@ -9100,6 +9135,10 @@ static float last_chorus_wow = -1.0f;
 		}
 		l = (dry_l * (1.0f - sat_mix)) + (wet_l * sat_mix);
 		r = (dry_r * (1.0f - sat_mix)) + (wet_r * sat_mix);
+	};
+	auto apply_saturation_master = [&](float &l, float &r)
+	{
+		apply_saturation(l, r, -1);
 	};
 
 	auto apply_chorus = [&](float &l, float &r)
@@ -9820,7 +9859,7 @@ static float last_chorus_wow = -1.0f;
 			{
 				if (sat_active)
 				{
-					apply_saturation(fx_l, fx_r);
+					apply_saturation_master(fx_l, fx_r);
 				}
 				float mod_out_l = 0.0f;
 				float mod_out_r = 0.0f;
@@ -9856,7 +9895,7 @@ static float last_chorus_wow = -1.0f;
 			{
 				switch (fx_order[stage])
 				{
-					case kFxSatIndex: apply_saturation(fx_l, fx_r); break;
+					case kFxSatIndex: apply_saturation_master(fx_l, fx_r); break;
 					case kFxChorusIndex: apply_chorus(fx_l, fx_r); break;
 					case kFxDelayIndex: apply_delay(fx_l, fx_r); break;
 					case kFxReverbIndex: apply_reverb(fx_l, fx_r); break;
