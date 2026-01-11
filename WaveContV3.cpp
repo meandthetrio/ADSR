@@ -761,7 +761,10 @@ DaisyPod    hw;
 PodDisplay  display;
 static bool g_display_update_pending = false;
 static uint32_t g_last_draw_ms = 0;
-constexpr uint32_t kDrawIntervalMs = 16;
+constexpr uint32_t kDrawIntervalMs = 33;
+static uint32_t g_midi_poll_last_ms = 0;
+static uint32_t g_midi_poll_window_start_ms = 0;
+static uint32_t g_midi_poll_max_ms = 0;
 static daisy::TimerHandle g_ctrl_timer;
 static volatile bool g_ctrl_timer_running = false;
 
@@ -4705,6 +4708,20 @@ static void DrawPerformScreen(int32_t selected,
 						false);
 		}
 	}
+	{
+		const FontDef font = Font_6x8;
+		char midi_label[12];
+		snprintf(midi_label, sizeof(midi_label), "M %lums",
+			static_cast<unsigned long>(g_midi_poll_max_ms));
+		const int text_w = static_cast<int>(StrLen(midi_label)) * font.FontWidth;
+		int x = kDisplayW - text_w - 1;
+		if (x < 0)
+		{
+			x = 0;
+		}
+		display.SetCursor(x, 0);
+		display.WriteString(midi_label, font, true);
+	}
 	RequestDisplayUpdate();
 }
 
@@ -5835,6 +5852,28 @@ static void DrawPlayScreen()
 			cpu_x = 0;
 		}
 		DrawPlayTinyText(cpu_x, label_y, cpu_label, true);
+
+		char midi_label[12];
+		snprintf(midi_label, sizeof(midi_label), "M %lums",
+			static_cast<unsigned long>(g_midi_poll_max_ms));
+		const int midi_len = static_cast<int>(StrLen(midi_label));
+		const int midi_w = (midi_len > 0)
+			? (midi_len * kPlayTinyW + (midi_len - 1) * kPlayTinySpacing)
+			: 0;
+		if (midi_w > 0)
+		{
+			int midi_x = cpu_x + cpu_w + 4;
+			const int max_x = kDisplayW - midi_w - 1;
+			if (midi_x > max_x)
+			{
+				midi_x = max_x;
+			}
+			if (midi_x < 0)
+			{
+				midi_x = 0;
+			}
+			DrawPlayTinyText(midi_x, label_y, midi_label, true);
+		}
 	}
 
 	const int line_y2 = label_y + kPlayTinyH + 2;
@@ -10095,10 +10134,43 @@ int main(void)
 	uint32_t last_ui_ms = System::GetNow();
 	while(1)
 	{
-		hw.midi.Listen();
-		while(hw.midi.HasEvents())
+		const uint32_t midi_now = System::GetNow();
+		if (g_midi_poll_last_ms != 0)
 		{
-			HandleMidiMessage(hw.midi.PopEvent());
+			const uint32_t dt = midi_now - g_midi_poll_last_ms;
+			if (dt > g_midi_poll_max_ms)
+			{
+				g_midi_poll_max_ms = dt;
+			}
+		}
+		g_midi_poll_last_ms = midi_now;
+		if (g_midi_poll_window_start_ms == 0)
+		{
+			g_midi_poll_window_start_ms = midi_now;
+		}
+		if ((uint32_t)(midi_now - g_midi_poll_window_start_ms) >= 1000U)
+		{
+			g_midi_poll_window_start_ms = midi_now;
+			g_midi_poll_max_ms = 0;
+		}
+		hw.midi.Listen();
+		while (true)
+		{
+			MidiEvent ev;
+			bool has = false;
+			{
+				daisy::ScopedIrqBlocker irq;
+				if (hw.midi.HasEvents())
+				{
+					ev = hw.midi.PopEvent();
+					has = true;
+				}
+			}
+			if (!has)
+			{
+				break;
+			}
+			HandleMidiMessage(ev);
 		}
 		// Service pending waveform computation (from audio callback)
 		if (waveform_compute_pending
@@ -11186,6 +11258,6 @@ int main(void)
 			FlushDisplayIfDue(draw_now);
 		}
 		hw.UpdateLeds();
-		hw.DelayMs(10);
+		hw.DelayMs(1);
 	}
 }
