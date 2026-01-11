@@ -1291,6 +1291,9 @@ enum AudioFlagBits : uint32_t
 };
 
 static volatile uint32_t g_audio_flags_bits = 0;
+static volatile uint32_t g_play_bpm = kPlayBpm;
+static volatile uint8_t g_play_step_for_ui = 0;
+static volatile bool g_play_step_dirty_for_ui = false;
 
 volatile RecordState record_state = RecordState::Armed;
 volatile int32_t record_source_index = 0;
@@ -1302,7 +1305,6 @@ volatile int32_t encoder_r_accum = 0;
 volatile bool encoder_r_button_press = false;
 volatile bool request_length_redraw = false;
 static int32_t play_bpm = kPlayBpm;
-static uint32_t play_step_ms = 0;
 static volatile float cpu_load_pct = 0.0f;
 static volatile float cpu_load_peak_pct = 0.0f;
 static float cpu_load_ema = 0.0f;
@@ -1312,7 +1314,6 @@ static int32_t play_select_col = 0;
 static bool play_screen_dirty = true;
 static bool playhead_running = false;
 static int32_t playhead_step = 0;
-static uint32_t playhead_last_step_ms = 0;
 static bool play_steps[kPlayTrackCount][kPlayStepCount] = {};
 volatile bool request_playhead_redraw = false;
 volatile bool button1_press = false;
@@ -3156,22 +3157,20 @@ static void ApplyContextSwitchAudioSafe(SampleContext ctx)
 	SetSampleContext(ctx);
 }
 
-static void UpdatePlayStepMs()
+static inline uint32_t SamplesPerStep(uint32_t bpm, float sample_rate_hz)
 {
-	if (play_bpm < kPlayBpmMin)
+	if (bpm < static_cast<uint32_t>(kPlayBpmMin))
 	{
-		play_bpm = kPlayBpmMin;
+		bpm = static_cast<uint32_t>(kPlayBpmMin);
 	}
-	if (play_bpm > kPlayBpmMax)
+	if (bpm > static_cast<uint32_t>(kPlayBpmMax))
 	{
-		play_bpm = kPlayBpmMax;
+		bpm = static_cast<uint32_t>(kPlayBpmMax);
 	}
-	const uint32_t bpm = static_cast<uint32_t>(play_bpm);
-	play_step_ms = (bpm > 0) ? (60000U / (bpm * 4U)) : 0;
-	if (play_step_ms == 0)
-	{
-		play_step_ms = 1;
-	}
+	const float spf = (sample_rate_hz * 60.0f) / static_cast<float>(bpm * 4U);
+	uint32_t s = static_cast<uint32_t>(spf + 0.5f);
+	if (s < 1U) s = 1U;
+	return s;
 }
 
 static void UpdateMasterFxTailSamples(float sample_rate)
@@ -8507,8 +8506,11 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			if (next_bpm != play_bpm)
 			{
 				play_bpm = next_bpm;
-				UpdatePlayStepMs();
 				play_screen_dirty = true;
+				{
+					daisy::ScopedIrqBlocker irq;
+					g_play_bpm = static_cast<uint32_t>(play_bpm);
+				}
 			}
 		}
 		else if (encoder_r_inc != 0)
@@ -8620,12 +8622,13 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	{
 		playhead_running = true;
 		playhead_step = 0;
+		g_play_step_for_ui = 0;
+		g_play_step_dirty_for_ui = true;
 		TriggerSequencerStep(0);
 	}
 	if (cmd & kCmdPlayStop)
 	{
 		playhead_running = false;
-		playhead_last_step_ms = 0;
 	}
 	if (cmd & kCmdTriggerStep0)
 	{
@@ -8660,6 +8663,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		daisy::ScopedIrqBlocker irq;
 		std::memcpy(&params, &g_audio_params, sizeof(AudioParams));
 	}
+	static uint32_t step_phase_samples = 0;
 
 	const float out_sr = hw.AudioSampleRate();
 	size_t window_start = sample_play_start;
@@ -8681,6 +8685,20 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		playback_release_active = false;
 		playback_release_pos = 0.0f;
 		playback_release_start = 0.0f;
+	}
+
+	if (playhead_running && (flags_bits & kFlagInPlayMode))
+	{
+		step_phase_samples += static_cast<uint32_t>(size);
+		const uint32_t sps = SamplesPerStep(g_play_bpm, out_sr);
+		while (step_phase_samples >= sps)
+		{
+			step_phase_samples -= sps;
+			playhead_step = (playhead_step + 1) % kPlayStepCount;
+			TriggerSequencerStep(playhead_step);
+			g_play_step_for_ui = static_cast<uint8_t>(playhead_step);
+			g_play_step_dirty_for_ui = true;
+		}
 	}
 static float cached_sat_drive = 0.0f;
 static float cached_sat_mix = 0.0f;
@@ -9961,7 +9979,6 @@ int main(void)
 	reverb_predelay_l.SetDelay(0.0f);
 	reverb_predelay_r.SetDelay(0.0f);
 
-	UpdatePlayStepMs();
 	InitTrackStates();
 	InitSmoothers();
 	UpdateSmoothedParamsPerTick();
@@ -10174,7 +10191,16 @@ int main(void)
 			LogLine("Encoder R delta=%ld", static_cast<long>(aux_delta));
 		}
 		const bool play_ui = IsPlayUiMode(ui_mode);
-		const int32_t current_step = playhead_step;
+		int32_t current_step = playhead_step;
+		{
+			daisy::ScopedIrqBlocker irq;
+			if (g_play_step_dirty_for_ui)
+			{
+				current_step = static_cast<int32_t>(g_play_step_for_ui);
+				playhead_step = current_step;
+				g_play_step_dirty_for_ui = false;
+			}
+		}
 		const uint8_t cpu_pct_ui = static_cast<uint8_t>(cpu_load_pct + 0.5f);
 		if (play_ui)
 		{
@@ -10219,24 +10245,22 @@ int main(void)
 			button1_press = false;
 			if (!ui_blocked && IsPlayUiMode(ui_mode))
 			{
-				if (!playhead_running)
-				{
-					playhead_running = true;
-					playhead_step = 0;
-					playhead_last_step_ms = System::GetNow();
-					play_screen_dirty = true;
-					request_playhead_redraw = true;
-					RequestAudioCmd(kCmdPlayStart);
-				}
-				else
-				{
-					playhead_running = false;
-					playhead_last_step_ms = 0;
-					play_screen_dirty = true;
-					request_playhead_redraw = true;
-					RequestAudioCmd(kCmdPlayStop);
-				}
+			if (!playhead_running)
+			{
+				playhead_running = true;
+				playhead_step = 0;
+				play_screen_dirty = true;
+				request_playhead_redraw = true;
+				RequestAudioCmd(kCmdPlayStart);
 			}
+			else
+			{
+				playhead_running = false;
+				play_screen_dirty = true;
+				request_playhead_redraw = true;
+				RequestAudioCmd(kCmdPlayStop);
+			}
+		}
 			else if (!IsPlayUiMode(ui_mode)
 					 && sample_loaded
 					 && ui_mode != UiMode::Load
@@ -10257,32 +10281,7 @@ int main(void)
 				request_playhead_redraw = true;
 			}
 		}
-		if (!ui_blocked && IsPlayUiMode(ui_mode) && playhead_running)
-		{
-			const uint32_t now = System::GetNow();
-			if (playhead_last_step_ms == 0)
-			{
-				playhead_last_step_ms = now;
-			}
-			if (play_step_ms > 0)
-			{
-				const uint32_t elapsed = now - playhead_last_step_ms;
-				if (elapsed >= play_step_ms)
-				{
-					const uint32_t steps = elapsed / play_step_ms;
-					playhead_last_step_ms += steps * play_step_ms;
-					const int32_t start_step = playhead_step;
-					for (uint32_t s = 0; s < steps; ++s)
-					{
-						const int32_t step = (start_step + static_cast<int32_t>(s) + 1) % kPlayStepCount;
-						TriggerSequencerStep(step);
-					}
-					playhead_step = (start_step + static_cast<int32_t>(steps)) % kPlayStepCount;
-					play_screen_dirty = true;
-					request_playhead_redraw = true;
-				}
-			}
-		}
+		// Step advance is audio-clocked in AudioCallback.
 		if (request_load_scan)
 		{
 			request_load_scan = false;
@@ -10642,7 +10641,6 @@ int main(void)
 			{
 				playhead_running = false;
 				playhead_step = 0;
-				playhead_last_step_ms = 0;
 				play_screen_dirty = true;
 			}
 			if (mode == UiMode::FxDetail)
