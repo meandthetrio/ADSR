@@ -762,9 +762,51 @@ PodDisplay  display;
 static bool g_display_update_pending = false;
 static uint32_t g_last_draw_ms = 0;
 constexpr uint32_t kDrawIntervalMs = 33;
-static uint32_t g_midi_poll_last_ms = 0;
-static uint32_t g_midi_poll_window_start_ms = 0;
-static uint32_t g_midi_poll_max_ms = 0;
+constexpr uint8_t kMidiCmdQSize = 16; // power of two
+enum MidiCmdKind : uint8_t { kMidiCmdNoteOn = 1, kMidiCmdNoteOff = 2 };
+
+struct MidiCmd
+{
+	uint8_t kind;
+	uint8_t note;
+	uint8_t vel;
+	uint32_t t_ms;
+};
+
+static MidiCmd g_midi_cmd_q[kMidiCmdQSize];
+static volatile uint8_t g_midi_cmd_wr = 0;
+static volatile uint8_t g_midi_cmd_rd = 0;
+
+static uint32_t g_midi_note_latency_max_ms = 0;
+static uint32_t g_midi_note_latency_window_start_ms = 0;
+
+static inline void MidiCmdPushIsr(uint8_t kind, uint8_t note, uint8_t vel)
+{
+	const uint8_t wr = g_midi_cmd_wr;
+	const uint8_t next = (uint8_t)((wr + 1) & (kMidiCmdQSize - 1));
+	if (next == g_midi_cmd_rd)
+	{
+		return;
+	}
+
+	g_midi_cmd_q[wr].kind = kind;
+	g_midi_cmd_q[wr].note = note;
+	g_midi_cmd_q[wr].vel = vel;
+	g_midi_cmd_q[wr].t_ms = System::GetNow();
+	g_midi_cmd_wr = next;
+}
+
+static inline bool MidiCmdPopAudio(MidiCmd &out)
+{
+	daisy::ScopedIrqBlocker irq;
+	if (g_midi_cmd_rd == g_midi_cmd_wr)
+	{
+		return false;
+	}
+	out = g_midi_cmd_q[g_midi_cmd_rd];
+	g_midi_cmd_rd = (uint8_t)((g_midi_cmd_rd + 1) & (kMidiCmdQSize - 1));
+	return true;
+}
 static daisy::TimerHandle g_ctrl_timer;
 static volatile bool g_ctrl_timer_running = false;
 
@@ -4712,7 +4754,7 @@ static void DrawPerformScreen(int32_t selected,
 		const FontDef font = Font_6x8;
 		char midi_label[12];
 		snprintf(midi_label, sizeof(midi_label), "M %lums",
-			static_cast<unsigned long>(g_midi_poll_max_ms));
+			static_cast<unsigned long>(g_midi_note_latency_max_ms));
 		const int text_w = static_cast<int>(StrLen(midi_label)) * font.FontWidth;
 		int x = kDisplayW - text_w - 1;
 		if (x < 0)
@@ -5855,7 +5897,7 @@ static void DrawPlayScreen()
 
 		char midi_label[12];
 		snprintf(midi_label, sizeof(midi_label), "M %lums",
-			static_cast<unsigned long>(g_midi_poll_max_ms));
+			static_cast<unsigned long>(g_midi_note_latency_max_ms));
 		const int midi_len = static_cast<int>(StrLen(midi_label));
 		const int midi_w = (midi_len > 0)
 			? (midi_len * kPlayTinyW + (midi_len - 1) * kPlayTinySpacing)
@@ -7237,7 +7279,7 @@ static void StopPerformVoice(int32_t note)
 	}
 }
 
-static void HandleMidiMessage(MidiEvent msg)
+static void __attribute__((unused)) HandleMidiMessage(MidiEvent msg)
 {
 	if (ui_mode == UiMode::Record && record_state == RecordState::Recording)
 	{
@@ -7315,6 +7357,40 @@ static void CtrlTimerCb(void* /*data*/)
 
 	const int32_t enc_l_inc = hw.encoder.Increment();
 	const int32_t enc_r_inc = encoder_r.Increment();
+
+	hw.midi.Listen();
+	while (hw.midi.HasEvents())
+	{
+		MidiEvent msg = hw.midi.PopEvent();
+		switch (msg.type)
+		{
+			case NoteOn:
+			{
+				const NoteOnEvent n = msg.AsNoteOn();
+				if (n.velocity == 0)
+				{
+					MidiCmdPushIsr(kMidiCmdNoteOff, (uint8_t)n.note, 0);
+				}
+				else
+				{
+					if (IsPerformUiMode(ui_mode) && (System::GetNow() < midi_ignore_until_ms))
+					{
+						break;
+					}
+					MidiCmdPushIsr(kMidiCmdNoteOn, (uint8_t)n.note, (uint8_t)n.velocity);
+				}
+			}
+			break;
+			case NoteOff:
+			{
+				const NoteOffEvent n = msg.AsNoteOff();
+				MidiCmdPushIsr(kMidiCmdNoteOff, (uint8_t)n.note, 0);
+			}
+			break;
+			default:
+				break;
+		}
+	}
 
 	uint32_t ev = 0;
 	if (hw.encoder.RisingEdge())      ev |= kEncLPress;
@@ -8705,6 +8781,53 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	{
 		daisy::ScopedIrqBlocker irq;
 		flags_bits = g_audio_flags_bits;
+	}
+	// Apply queued MIDI note commands in audio thread (low latency).
+	MidiCmd c;
+	const uint32_t now_ms = System::GetNow();
+	if (g_midi_note_latency_window_start_ms == 0)
+	{
+		g_midi_note_latency_window_start_ms = now_ms;
+	}
+	if ((uint32_t)(now_ms - g_midi_note_latency_window_start_ms) >= 1000U)
+	{
+		g_midi_note_latency_window_start_ms = now_ms;
+		g_midi_note_latency_max_ms = 0;
+	}
+	while (MidiCmdPopAudio(c))
+	{
+		const uint32_t lat = now_ms - c.t_ms;
+		if (lat > g_midi_note_latency_max_ms)
+		{
+			g_midi_note_latency_max_ms = lat;
+		}
+		if (record_state == RecordState::Recording)
+		{
+			continue;
+		}
+		const bool in_perform = (flags_bits & kFlagInPerformMode) != 0;
+		if (in_perform)
+		{
+			if (c.kind == kMidiCmdNoteOn)
+			{
+				StartPerformVoice((int32_t)c.note);
+			}
+			else
+			{
+				StopPerformVoice((int32_t)c.note);
+			}
+		}
+		else
+		{
+			if (c.kind == kMidiCmdNoteOn)
+			{
+				StartPlayback((uint8_t)c.note);
+			}
+			else
+			{
+				StopPlayback((uint8_t)c.note);
+			}
+		}
 	}
 	AudioParams params = {};
 	{
@@ -10134,44 +10257,6 @@ int main(void)
 	uint32_t last_ui_ms = System::GetNow();
 	while(1)
 	{
-		const uint32_t midi_now = System::GetNow();
-		if (g_midi_poll_last_ms != 0)
-		{
-			const uint32_t dt = midi_now - g_midi_poll_last_ms;
-			if (dt > g_midi_poll_max_ms)
-			{
-				g_midi_poll_max_ms = dt;
-			}
-		}
-		g_midi_poll_last_ms = midi_now;
-		if (g_midi_poll_window_start_ms == 0)
-		{
-			g_midi_poll_window_start_ms = midi_now;
-		}
-		if ((uint32_t)(midi_now - g_midi_poll_window_start_ms) >= 1000U)
-		{
-			g_midi_poll_window_start_ms = midi_now;
-			g_midi_poll_max_ms = 0;
-		}
-		hw.midi.Listen();
-		while (true)
-		{
-			MidiEvent ev;
-			bool has = false;
-			{
-				daisy::ScopedIrqBlocker irq;
-				if (hw.midi.HasEvents())
-				{
-					ev = hw.midi.PopEvent();
-					has = true;
-				}
-			}
-			if (!has)
-			{
-				break;
-			}
-			HandleMidiMessage(ev);
-		}
 		// Service pending waveform computation (from audio callback)
 		if (waveform_compute_pending
 			&& !playhead_running
