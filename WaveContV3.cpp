@@ -776,6 +776,7 @@ struct MidiCmd
 static MidiCmd g_midi_cmd_q[kMidiCmdQSize];
 static volatile uint8_t g_midi_cmd_wr = 0;
 static volatile uint8_t g_midi_cmd_rd = 0;
+static volatile bool g_midi_rx_started = false;
 
 static uint32_t g_midi_note_latency_max_ms = 0;
 static uint32_t g_midi_note_latency_window_start_ms = 0;
@@ -7358,37 +7359,41 @@ static void CtrlTimerCb(void* /*data*/)
 	const int32_t enc_l_inc = hw.encoder.Increment();
 	const int32_t enc_r_inc = encoder_r.Increment();
 
-	hw.midi.Listen();
-	while (hw.midi.HasEvents())
+	if (g_midi_rx_started)
 	{
-		MidiEvent msg = hw.midi.PopEvent();
-		switch (msg.type)
+		// Listen() is only for overrun recovery; safe to call once RX is started.
+		hw.midi.Listen();
+		while (hw.midi.HasEvents())
 		{
-			case NoteOn:
+			MidiEvent msg = hw.midi.PopEvent();
+			switch (msg.type)
 			{
-				const NoteOnEvent n = msg.AsNoteOn();
-				if (n.velocity == 0)
+				case NoteOn:
 				{
+					const NoteOnEvent n = msg.AsNoteOn();
+					if (n.velocity == 0)
+					{
+						MidiCmdPushIsr(kMidiCmdNoteOff, (uint8_t)n.note, 0);
+					}
+					else
+					{
+						if (IsPerformUiMode(ui_mode) && (System::GetNow() < midi_ignore_until_ms))
+						{
+							break;
+						}
+						MidiCmdPushIsr(kMidiCmdNoteOn, (uint8_t)n.note, (uint8_t)n.velocity);
+					}
+				}
+				break;
+				case NoteOff:
+				{
+					const NoteOffEvent n = msg.AsNoteOff();
 					MidiCmdPushIsr(kMidiCmdNoteOff, (uint8_t)n.note, 0);
 				}
-				else
-				{
-					if (IsPerformUiMode(ui_mode) && (System::GetNow() < midi_ignore_until_ms))
-					{
-						break;
-					}
-					MidiCmdPushIsr(kMidiCmdNoteOn, (uint8_t)n.note, (uint8_t)n.velocity);
-				}
-			}
-			break;
-			case NoteOff:
-			{
-				const NoteOffEvent n = msg.AsNoteOff();
-				MidiCmdPushIsr(kMidiCmdNoteOff, (uint8_t)n.note, 0);
-			}
-			break;
-			default:
 				break;
+				default:
+					break;
+			}
 		}
 	}
 
@@ -10235,6 +10240,7 @@ int main(void)
 	hw.StartAdc();
 	hw.StartAudio(AudioCallback);
 	hw.midi.StartReceive();
+	g_midi_rx_started = true;
 	UiMode last_mode = UiMode::Main;
 	int32_t last_menu = -1;
 	int32_t last_shift_menu = -1;
