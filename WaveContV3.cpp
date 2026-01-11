@@ -9891,7 +9891,7 @@ int main(void)
 	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
 	DWT->CYCCNT = 0;
 	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-	hw.SetAudioBlockSize(16); // number of samples handled per callback
+	hw.SetAudioBlockSize(48); // number of samples handled per callback
 	hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 	UpdateMasterFxTailSamples(hw.AudioSampleRate());
 	hw.seed.StartLog(false);
