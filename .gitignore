@@ -8,5 +8,7 @@ out/
 *.hex
 *.map
 .DS_Store
+WaveContV3.cpp-f
+WaveContV3.cpp.bak
 .vscode/*
 !.vscode/tasks.json

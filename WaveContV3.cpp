@@ -2,8 +2,10 @@
 #include "daisysp.h"
 #include "dev/oled_ssd130x.h"
 #include "fatfs.h"
+#include "per/tim.h"
 #include "util/wav_format.h"
 #include "util/bsp_sd_diskio.h"
+#include "util/scopedirqblocker.h"
 #include <cmath>
 #include <initializer_list>
 #include <math.h>
@@ -750,6 +752,31 @@ private:
 
 DaisyPod    hw;
 PodDisplay  display;
+static bool g_display_update_pending = false;
+static uint32_t g_last_draw_ms = 0;
+constexpr uint32_t kDrawIntervalMs = 16;
+static daisy::TimerHandle g_ctrl_timer;
+static volatile bool g_ctrl_timer_running = false;
+
+static inline void RequestDisplayUpdate()
+{
+	g_display_update_pending = true;
+}
+
+static inline void FlushDisplayIfDue(uint32_t now)
+{
+	if (!g_display_update_pending)
+	{
+		return;
+	}
+	if ((uint32_t)(now - g_last_draw_ms) < kDrawIntervalMs)
+	{
+		return;
+	}
+	g_last_draw_ms = now;
+	display.Update();
+	g_display_update_pending = false;
+}
 SdmmcHandler   sdcard;
 FatFSInterface fsi;
 Encoder      encoder_r;
@@ -792,6 +819,7 @@ volatile RecordInput record_input = RecordInput::LineIn;
 volatile int32_t load_selected = 0;
 volatile int32_t load_scroll = 0;
 volatile bool request_load_scan = false;
+static volatile bool list_build_pending = false;
 volatile bool request_load_sample = false;
 volatile int32_t request_load_index = -1;
 volatile LoadDestination request_load_destination = LoadDestination::Play;
@@ -1003,6 +1031,10 @@ static int16_t waveform_max[128];
 static bool waveform_ready = false;
 static bool waveform_dirty = false;
 
+// Waveform computation request (from audio callback to main loop)
+static volatile bool waveform_compute_pending = false;
+static volatile SampleContext waveform_compute_ctx = SampleContext::Perform;
+
 struct WaveformCache
 {
 	int16_t min[128] = {};
@@ -1025,6 +1057,241 @@ static int32_t live_wave_last_col = -1;
 
 constexpr size_t kRecordMaxFrames = static_cast<size_t>(kRecordMaxSeconds) * 48000U;
 constexpr uint32_t kRecordCountdownMs = 4000;
+
+// Control event bits (for snapshot-based input passing from main loop to audio callback)
+enum CtrlEventBits : uint32_t {
+	kEncLPress   = 1U << 0,
+	kEncRPress   = 1U << 1,
+	kBtn1Press   = 1U << 2,
+	kBtn2Press   = 1U << 3,
+	kShiftRise   = 1U << 4,
+	kShiftFall   = 1U << 5,
+};
+
+// Control snapshot (shared between main loop and audio callback)
+volatile int32_t g_enc_l_delta = 0;
+volatile int32_t g_enc_r_delta = 0;
+volatile uint32_t g_ctrl_events = 0;
+volatile bool g_shift_held = false;
+volatile bool g_btn1_held = false;
+static bool ui_button1_held = false;
+
+enum AudioCmdBits : uint32_t
+{
+	kCmdNone         = 0,
+	kCmdPlayStart    = 1U << 0,
+	kCmdPlayStop     = 1U << 1,
+	kCmdTriggerStep0 = 1U << 2,
+	kCmdRecStart     = 1U << 3,
+	kCmdRecStop      = 1U << 4,
+	kCmdAllNotesOff  = 1U << 5,
+	kCmdSetContext   = 1U << 6,
+};
+
+static volatile uint32_t g_audio_cmd = 0;
+static volatile SampleContext g_pending_context = SampleContext::Perform;
+
+static void RequestAudioCmd(uint32_t bits)
+{
+	{
+		daisy::ScopedIrqBlocker irq;
+		g_audio_cmd |= bits;
+	}
+}
+
+static void RequestContextSwitch(SampleContext ctx)
+{
+	{
+		daisy::ScopedIrqBlocker irq;
+		g_pending_context = ctx;
+		g_audio_cmd |= kCmdSetContext;
+	}
+}
+
+// Deferred logging ring buffer (for non-blocking logs from AudioCallback)
+constexpr size_t kLogBufSize = 96;
+constexpr size_t kLogRingSize = 8;
+struct LogMsg {
+	char buf[kLogBufSize];
+};
+static volatile LogMsg g_log_ring[kLogRingSize];
+static volatile uint32_t g_log_head = 0;
+static volatile uint32_t g_log_tail = 0;
+
+enum class LogEventType : uint8_t
+{
+	None = 0,
+	RecordAutoStop,
+};
+
+struct LogEvent
+{
+	LogEventType type;
+	int32_t a;
+	int32_t b;
+};
+
+static constexpr uint32_t kLogEvtRingSize = 16;
+static volatile uint32_t g_logevt_head = 0;
+static volatile uint32_t g_logevt_tail = 0;
+static LogEvent g_logevt_ring[kLogEvtRingSize];
+
+static inline void PushLogEvent(LogEventType t, int32_t a = 0, int32_t b = 0)
+{
+	daisy::ScopedIrqBlocker irq;
+	const uint32_t next = (g_logevt_head + 1) % kLogEvtRingSize;
+	if (next != g_logevt_tail)
+	{
+		g_logevt_ring[g_logevt_head] = {t, a, b};
+		g_logevt_head = next;
+	}
+}
+
+struct WaveformJob
+{
+	bool active;
+	size_t frames;
+	size_t columns;
+	size_t step;
+	size_t col;
+	size_t idx;
+	size_t end;
+	float minv;
+	float maxv;
+	float scale;
+	SampleContext ctx;
+};
+
+static WaveformJob g_wf_job = {};
+
+struct FileListJob
+{
+	bool active;
+	bool done;
+	bool wav_only;
+	bool dir_open;
+	int32_t count;
+	DIR dir;
+	FILINFO fno;
+};
+
+static FileListJob g_list_job = {};
+
+constexpr float kUiTickHz = 1000.0f;
+
+struct SmoothParam
+{
+	float value = 0.0f;
+	float target = 0.0f;
+	float coeff = 1.0f;
+
+	void Init(float initial, float time_ms, float tick_hz)
+	{
+		value = initial;
+		target = initial;
+		SetTime(time_ms, tick_hz);
+	}
+
+	void SetTime(float time_ms, float tick_hz)
+	{
+		if (time_ms <= 0.0f)
+		{
+			coeff = 1.0f;
+			return;
+		}
+		const float dt = 1.0f / tick_hz;
+		const float tau = time_ms / 1000.0f;
+		coeff = 1.0f - expf(-dt / tau);
+		if (coeff > 1.0f) coeff = 1.0f;
+		if (coeff < 0.0f) coeff = 0.0f;
+	}
+
+	void SetTarget(float t) { target = t; }
+
+	float Process()
+	{
+		value += coeff * (target - value);
+		return value;
+	}
+
+	bool IsNearTarget(float eps = 1e-4f) const
+	{
+		return fabsf(target - value) <= eps;
+	}
+};
+
+struct AudioParams
+{
+	float amp_attack;
+	float amp_decay;
+	float amp_sustain;
+	float amp_release;
+	float flt_cutoff;
+	float flt_res;
+	float fx_s_wet;
+	float sat_drive;
+	float sat_tape_bump;
+	float sat_bit_reso;
+	float sat_bit_smpl;
+	float fx_c_wet;
+	float mod_depth;
+	float chorus_rate;
+	float chorus_wow;
+	float tape_rate;
+	float delay_wet;
+	float delay_time;
+	float delay_feedback;
+	float delay_spread;
+	float delay_freeze;
+	float reverb_wet;
+	float reverb_pre;
+	float reverb_damp;
+	float reverb_decay;
+	float reverb_shimmer;
+};
+
+static AudioParams g_audio_params = {};
+
+static SmoothParam sm_amp_attack;
+static SmoothParam sm_amp_decay;
+static SmoothParam sm_amp_sustain;
+static SmoothParam sm_amp_release;
+static SmoothParam sm_flt_cutoff;
+static SmoothParam sm_flt_res;
+static SmoothParam sm_fx_s_wet;
+static SmoothParam sm_sat_drive;
+static SmoothParam sm_sat_tape_bump;
+static SmoothParam sm_sat_bit_reso;
+static SmoothParam sm_sat_bit_smpl;
+static SmoothParam sm_fx_c_wet;
+static SmoothParam sm_mod_depth;
+static SmoothParam sm_chorus_rate;
+static SmoothParam sm_chorus_wow;
+static SmoothParam sm_tape_rate;
+static SmoothParam sm_delay_wet;
+static SmoothParam sm_delay_time;
+static SmoothParam sm_delay_feedback;
+static SmoothParam sm_delay_spread;
+static SmoothParam sm_delay_freeze;
+static SmoothParam sm_reverb_wet;
+static SmoothParam sm_reverb_pre;
+static SmoothParam sm_reverb_damp;
+static SmoothParam sm_reverb_decay;
+static SmoothParam sm_reverb_shimmer;
+
+enum AudioFlagBits : uint32_t
+{
+	kFlagInPlayMode     = 1u << 0,
+	kFlagInPerformMode  = 1u << 1,
+	kFlagMonitorEnabled = 1u << 2,
+	kFlagInMainMode     = 1u << 3,
+	kFlagFxAllowed      = 1u << 4,
+	kFlagPlaySeqMode    = 1u << 5,
+	kFlagPlayMasterFx   = 1u << 6,
+};
+
+static volatile uint32_t g_audio_flags_bits = 0;
+
 volatile RecordState record_state = RecordState::Armed;
 volatile int32_t record_source_index = 0;
 volatile int32_t record_target_index = kRecordTargetSave;
@@ -1093,6 +1360,12 @@ volatile int32_t fx_detail_param_index = 0;
 volatile float flt_cutoff = 1.0f;
 volatile float flt_res = 0.02f;
 volatile bool preview_hold = false;
+static volatile float fx_chain_fade_gain = 1.0f;
+static volatile float fx_chain_fade_target = 1.0f;
+static volatile int32_t fx_chain_fade_samples_left = 0;
+static volatile bool fx_chain_pause_pending = false;
+static volatile bool fx_chain_paused = false;
+static volatile uint32_t fx_chain_last_move_ms = 0;
 volatile bool preview_active = false;
 volatile int32_t preview_index = -1;
 volatile uint32_t preview_sample_rate = 48000;
@@ -1133,7 +1406,7 @@ static inline bool UiLogEnabled()
 	return true;
 }
 
-static void ComputeWaveform();
+static void __attribute__((unused)) ComputeWaveform();
 
 static double NowMs()
 {
@@ -1307,6 +1580,20 @@ static void LogLine(const char* format, Va... va)
 		(void)format;
 		(void)sizeof...(va);
 	}
+}
+
+// Deferred logging for AudioCallback (non-blocking, uses ring buffer)
+static void DeferLog(const char* msg)
+{
+	__disable_irq();
+	uint32_t next_head = (g_log_head + 1) % kLogRingSize;
+	if (next_head != g_log_tail)
+	{
+		strncpy((char*)g_log_ring[g_log_head].buf, msg, kLogBufSize - 1);
+		g_log_ring[g_log_head].buf[kLogBufSize - 1] = '\0';
+		g_log_head = next_head;
+	}
+	__enable_irq();
 }
 
 static const char* FresultName(FRESULT res)
@@ -1761,7 +2048,11 @@ static bool BuildNextSaveName(char* out_name, size_t out_len)
 				{
 					continue;
 				}
-				snprintf(name, sizeof(name), "%s.wav", base);
+				int n = snprintf(name, sizeof(name), "%s.wav", base);
+				if (n < 0 || n >= static_cast<int>(sizeof(name)))
+				{
+					continue;
+				}
 			}
 			else
 			{
@@ -1769,7 +2060,11 @@ static bool BuildNextSaveName(char* out_name, size_t out_len)
 				{
 					continue;
 				}
-				snprintf(name, sizeof(name), "%s%02d.wav", base, suffix);
+				int n = snprintf(name, sizeof(name), "%s%02d.wav", base, suffix);
+				if (n < 0 || n >= static_cast<int>(sizeof(name)))
+				{
+					continue;
+				}
 			}
 			if (StrLen(name) >= out_len)
 			{
@@ -1971,7 +2266,7 @@ static bool ReinitSdNow()
 	return sd_mounted;
 }
 
-static void ScanSdFiles(bool wav_only)
+static void __attribute__((unused)) ScanSdFiles(bool wav_only)
 {
 	LogLine("Scanning WAV files...");
 	bool detected = BSP_SD_IsDetected();
@@ -2110,7 +2405,7 @@ static void ScanSdFiles(bool wav_only)
 	}
 }
 
-static void ComputeWaveform()
+static void __attribute__((unused)) ComputeWaveform()
 {
 	const int32_t width = 128;
 	if (!sample_loaded || sample_length == 0)
@@ -2161,6 +2456,531 @@ static void ComputeWaveform()
 
 		waveform_min[col] = static_cast<int16_t>(minv * scale);
 		waveform_max[col] = static_cast<int16_t>(maxv * scale);
+	}
+}
+
+static inline bool JobsAllowedNow()
+{
+	return !playhead_running && record_state != RecordState::Recording;
+}
+
+enum class JobType : uint8_t
+{
+	None = 0,
+	WaveformBuild,
+	FileListScan,
+};
+
+struct Job
+{
+	JobType type;
+	bool active;
+	bool foreground;
+	uint8_t priority;
+	uint32_t progress;
+	uint32_t last_reported;
+};
+
+static Job g_job = {};
+
+static void WaveformJobCancel()
+{
+	g_wf_job.active = false;
+}
+
+static void WaveformJobStart(SampleContext ctx)
+{
+	WaveformJobCancel();
+	g_wf_job.ctx = ctx;
+	if (!sample_loaded || sample_length == 0)
+	{
+		for (int32_t i = 0; i < 128; ++i)
+		{
+			waveform_min[i] = 0;
+			waveform_max[i] = 0;
+		}
+		waveform_ready = true;
+		waveform_dirty = true;
+		return;
+	}
+	const size_t frames = sample_length;
+	if (frames < 2)
+	{
+		waveform_ready = true;
+		waveform_dirty = true;
+		return;
+	}
+	g_wf_job.active = true;
+	g_wf_job.frames = frames;
+	g_wf_job.columns = 128;
+	g_wf_job.step = frames / g_wf_job.columns;
+	if (g_wf_job.step == 0)
+	{
+		g_wf_job.step = 1;
+	}
+	g_wf_job.col = 0;
+	g_wf_job.idx = 0;
+	g_wf_job.end = (g_wf_job.columns == 1) ? frames : g_wf_job.step;
+	g_wf_job.minv = 1.0f;
+	g_wf_job.maxv = -1.0f;
+	g_wf_job.scale = 28.0f;
+	waveform_ready = false;
+}
+
+static void WaveformJobTick(uint32_t budget_samples)
+{
+	if (!g_wf_job.active || budget_samples == 0)
+	{
+		return;
+	}
+	while (budget_samples > 0 && g_wf_job.active)
+	{
+		if (g_wf_job.idx >= g_wf_job.end)
+		{
+			waveform_min[g_wf_job.col]
+				= static_cast<int16_t>(g_wf_job.minv * g_wf_job.scale);
+			waveform_max[g_wf_job.col]
+				= static_cast<int16_t>(g_wf_job.maxv * g_wf_job.scale);
+			g_wf_job.col++;
+			if (g_wf_job.col >= g_wf_job.columns)
+			{
+				g_wf_job.active = false;
+				waveform_ready = true;
+				waveform_dirty = true;
+				return;
+			}
+			const size_t start = g_wf_job.col * g_wf_job.step;
+			const size_t end = (g_wf_job.col == g_wf_job.columns - 1)
+				? g_wf_job.frames
+				: (start + g_wf_job.step);
+			g_wf_job.idx = start;
+			g_wf_job.end = end;
+			g_wf_job.minv = 1.0f;
+			g_wf_job.maxv = -1.0f;
+			continue;
+		}
+		const float s = static_cast<float>(sample_buffer_l[g_wf_job.idx]) * kSampleScale;
+		if (s < g_wf_job.minv)
+		{
+			g_wf_job.minv = s;
+		}
+		if (s > g_wf_job.maxv)
+		{
+			g_wf_job.maxv = s;
+		}
+		g_wf_job.idx++;
+		budget_samples--;
+	}
+}
+
+static void FileListJobCancel()
+{
+	if (g_list_job.active && g_list_job.dir_open)
+	{
+		f_closedir(&g_list_job.dir);
+	}
+	g_list_job = {};
+}
+
+static void FileListJobStart(bool wav_only)
+{
+	FileListJobCancel();
+	LogLine("Scanning WAV files...");
+	bool detected = BSP_SD_IsDetected();
+	if (!detected)
+	{
+		SdmmcHandler::Config sd_cfg;
+		sd_cfg.Defaults();
+		sdcard.Init(sd_cfg);
+		fsi.Init(FatFSInterface::Config::MEDIA_SD);
+		const uint8_t init_res = BSP_SD_Init();
+		LogLine("SD init (detect): %u", static_cast<unsigned>(init_res));
+		detected = BSP_SD_IsDetected();
+		if (!detected)
+		{
+			sd_mounted = false;
+			sd_need_reinit = true;
+			sd_detected_last = false;
+			wav_file_count = 0;
+			load_selected = 0;
+			load_scroll = 0;
+			LogLine("Scan aborted: SD not detected");
+			return;
+		}
+	}
+	if (BSP_SD_GetCardState() != SD_TRANSFER_OK)
+	{
+		sd_mounted = false;
+		sd_need_reinit = true;
+		wav_file_count = 0;
+		load_selected = 0;
+		load_scroll = 0;
+		LogLine("Scan aborted: SD not ready");
+		return;
+	}
+	if (detected && !sd_detected_last)
+	{
+		sd_need_reinit = true;
+	}
+	sd_detected_last = true;
+
+	if (sd_need_reinit)
+	{
+		f_mount(0, fsi.GetSDPath(), 0);
+		sd_mounted = false;
+		SdmmcHandler::Config sd_cfg;
+		sd_cfg.Defaults();
+		sdcard.Init(sd_cfg);
+		fsi.Init(FatFSInterface::Config::MEDIA_SD);
+		const uint8_t init_res = BSP_SD_Init();
+		LogLine("SD init: %u", static_cast<unsigned>(init_res));
+		MountSd();
+		sd_need_reinit = !sd_mounted;
+	}
+
+	if (!sd_mounted)
+	{
+		MountSd();
+	}
+	if (!sd_mounted)
+	{
+		wav_file_count = 0;
+		load_selected = 0;
+		load_scroll = 0;
+		LogLine("Scan aborted: SD not mounted");
+		return;
+	}
+
+	FRESULT res = f_opendir(&g_list_job.dir, fsi.GetSDPath());
+	if (res != FR_OK)
+	{
+		wav_file_count = 0;
+		load_selected = 0;
+		load_scroll = 0;
+		LogLine("Scan failed: f_opendir error %d", static_cast<int>(res));
+		return;
+	}
+
+	g_list_job.active = true;
+	g_list_job.done = false;
+	g_list_job.wav_only = wav_only;
+	g_list_job.dir_open = true;
+	g_list_job.count = 0;
+	wav_file_count = 0;
+}
+
+static void FinalizeFileList()
+{
+	wav_file_count = g_list_job.count;
+	LogLine("Scan complete: %ld files", static_cast<long>(wav_file_count));
+	if (wav_file_count <= 0)
+	{
+		load_selected = 0;
+		load_scroll = 0;
+		return;
+	}
+	if (load_selected >= wav_file_count)
+	{
+		load_selected = wav_file_count - 1;
+	}
+	if (load_selected < load_scroll)
+	{
+		load_scroll = load_selected;
+	}
+	else if (load_selected >= load_scroll + LoadVisibleLines())
+	{
+		load_scroll = load_selected - (LoadVisibleLines() - 1);
+	}
+	if (load_scroll < 0)
+	{
+		load_scroll = 0;
+	}
+	const int32_t max_top = wav_file_count - LoadVisibleLines();
+	if (max_top < 0)
+	{
+		load_scroll = 0;
+	}
+	else if (load_scroll > max_top)
+	{
+		load_scroll = max_top;
+	}
+	request_delete_redraw = true;
+	RequestDisplayUpdate();
+}
+
+static void FileListJobTick(uint32_t budget_entries)
+{
+	if (!g_list_job.active || budget_entries == 0)
+	{
+		return;
+	}
+	bool dirty = false;
+	for (uint32_t i = 0; i < budget_entries && g_list_job.active; ++i)
+	{
+		FRESULT res = f_readdir(&g_list_job.dir, &g_list_job.fno);
+		if (res != FR_OK || g_list_job.fno.fname[0] == 0)
+		{
+			f_closedir(&g_list_job.dir);
+			g_list_job.dir_open = false;
+			g_list_job.active = false;
+			g_list_job.done = true;
+			FinalizeFileList();
+			return;
+		}
+		if (g_list_job.fno.fattrib & (AM_DIR | AM_HID))
+		{
+			continue;
+		}
+		if (g_list_job.wav_only && !HasWavExtension(g_list_job.fno.fname))
+		{
+			continue;
+		}
+		if (g_list_job.count >= kMaxWavFiles)
+		{
+			f_closedir(&g_list_job.dir);
+			g_list_job.dir_open = false;
+			g_list_job.active = false;
+			g_list_job.done = true;
+			FinalizeFileList();
+			return;
+		}
+		CopyString(wav_files[g_list_job.count], g_list_job.fno.fname, kMaxWavNameLen);
+		g_list_job.count++;
+		wav_file_count = g_list_job.count;
+		dirty = true;
+	}
+	if (dirty)
+	{
+		request_delete_redraw = true;
+		RequestDisplayUpdate();
+	}
+}
+
+static void InitSmoothers()
+{
+	sm_amp_attack.Init(amp_attack, 20.0f, kUiTickHz);
+	sm_amp_decay.Init(amp_decay, 20.0f, kUiTickHz);
+	sm_amp_sustain.Init(amp_sustain, 20.0f, kUiTickHz);
+	sm_amp_release.Init(amp_release, 20.0f, kUiTickHz);
+	sm_flt_cutoff.Init(flt_cutoff, 20.0f, kUiTickHz);
+	sm_flt_res.Init(flt_res, 20.0f, kUiTickHz);
+	sm_fx_s_wet.Init(fx_s_wet, 80.0f, kUiTickHz);
+	sm_sat_drive.Init(sat_drive, 30.0f, kUiTickHz);
+	sm_sat_tape_bump.Init(sat_tape_bump, 30.0f, kUiTickHz);
+	sm_sat_bit_reso.Init(sat_bit_reso, 30.0f, kUiTickHz);
+	sm_sat_bit_smpl.Init(sat_bit_smpl, 30.0f, kUiTickHz);
+	sm_fx_c_wet.Init(fx_c_wet, 80.0f, kUiTickHz);
+	sm_mod_depth.Init(mod_depth, 40.0f, kUiTickHz);
+	sm_chorus_rate.Init(chorus_rate, 40.0f, kUiTickHz);
+	sm_chorus_wow.Init(chorus_wow, 40.0f, kUiTickHz);
+	sm_tape_rate.Init(tape_rate, 40.0f, kUiTickHz);
+	sm_delay_wet.Init(delay_wet, 80.0f, kUiTickHz);
+	sm_delay_time.Init(delay_time, 60.0f, kUiTickHz);
+	sm_delay_feedback.Init(delay_feedback, 60.0f, kUiTickHz);
+	sm_delay_spread.Init(delay_spread, 60.0f, kUiTickHz);
+	sm_delay_freeze.Init(delay_freeze, 0.0f, kUiTickHz);
+	sm_reverb_wet.Init(reverb_wet, 80.0f, kUiTickHz);
+	sm_reverb_pre.Init(reverb_pre, 60.0f, kUiTickHz);
+	sm_reverb_damp.Init(reverb_damp, 60.0f, kUiTickHz);
+	sm_reverb_decay.Init(reverb_decay, 80.0f, kUiTickHz);
+	sm_reverb_shimmer.Init(reverb_shimmer, 80.0f, kUiTickHz);
+}
+
+static void UpdateSmoothedParamsPerTick()
+{
+	sm_amp_attack.SetTarget(amp_attack);
+	sm_amp_decay.SetTarget(amp_decay);
+	sm_amp_sustain.SetTarget(amp_sustain);
+	sm_amp_release.SetTarget(amp_release);
+	sm_flt_cutoff.SetTarget(flt_cutoff);
+	sm_flt_res.SetTarget(flt_res);
+	sm_fx_s_wet.SetTarget(fx_s_wet);
+	sm_sat_drive.SetTarget(sat_drive);
+	sm_sat_tape_bump.SetTarget(sat_tape_bump);
+	sm_sat_bit_reso.SetTarget(sat_bit_reso);
+	sm_sat_bit_smpl.SetTarget(sat_bit_smpl);
+	sm_fx_c_wet.SetTarget(fx_c_wet);
+	sm_mod_depth.SetTarget(mod_depth);
+	sm_chorus_rate.SetTarget(chorus_rate);
+	sm_chorus_wow.SetTarget(chorus_wow);
+	sm_tape_rate.SetTarget(tape_rate);
+	sm_delay_wet.SetTarget(delay_wet);
+	sm_delay_time.SetTarget(delay_time);
+	sm_delay_feedback.SetTarget(delay_feedback);
+	sm_delay_spread.SetTarget(delay_spread);
+	sm_delay_freeze.SetTarget(delay_freeze);
+	sm_reverb_wet.SetTarget(reverb_wet);
+	sm_reverb_pre.SetTarget(reverb_pre);
+	sm_reverb_damp.SetTarget(reverb_damp);
+	sm_reverb_decay.SetTarget(reverb_decay);
+	sm_reverb_shimmer.SetTarget(reverb_shimmer);
+
+	AudioParams p = {};
+	p.amp_attack = sm_amp_attack.Process();
+	p.amp_decay = sm_amp_decay.Process();
+	p.amp_sustain = sm_amp_sustain.Process();
+	p.amp_release = sm_amp_release.Process();
+	p.flt_cutoff = sm_flt_cutoff.Process();
+	p.flt_res = sm_flt_res.Process();
+	p.fx_s_wet = sm_fx_s_wet.Process();
+	p.sat_drive = sm_sat_drive.Process();
+	p.sat_tape_bump = sm_sat_tape_bump.Process();
+	p.sat_bit_reso = sm_sat_bit_reso.Process();
+	p.sat_bit_smpl = sm_sat_bit_smpl.Process();
+	p.fx_c_wet = sm_fx_c_wet.Process();
+	p.mod_depth = sm_mod_depth.Process();
+	p.chorus_rate = sm_chorus_rate.Process();
+	p.chorus_wow = sm_chorus_wow.Process();
+	p.tape_rate = sm_tape_rate.Process();
+	p.delay_wet = sm_delay_wet.Process();
+	p.delay_time = sm_delay_time.Process();
+	p.delay_feedback = sm_delay_feedback.Process();
+	p.delay_spread = sm_delay_spread.Process();
+	p.delay_freeze = sm_delay_freeze.Process();
+	p.reverb_wet = sm_reverb_wet.Process();
+	p.reverb_pre = sm_reverb_pre.Process();
+	p.reverb_damp = sm_reverb_damp.Process();
+	p.reverb_decay = sm_reverb_decay.Process();
+	p.reverb_shimmer = sm_reverb_shimmer.Process();
+
+	{
+		daisy::ScopedIrqBlocker irq;
+		std::memcpy(&g_audio_params, &p, sizeof(AudioParams));
+	}
+
+	if (!sm_fx_s_wet.IsNearTarget()
+		|| !sm_sat_drive.IsNearTarget()
+		|| !sm_sat_tape_bump.IsNearTarget()
+		|| !sm_sat_bit_reso.IsNearTarget()
+		|| !sm_sat_bit_smpl.IsNearTarget()
+		|| !sm_fx_c_wet.IsNearTarget()
+		|| !sm_mod_depth.IsNearTarget()
+		|| !sm_chorus_rate.IsNearTarget()
+		|| !sm_chorus_wow.IsNearTarget()
+		|| !sm_tape_rate.IsNearTarget()
+		|| !sm_delay_wet.IsNearTarget()
+		|| !sm_delay_time.IsNearTarget()
+		|| !sm_delay_feedback.IsNearTarget()
+		|| !sm_delay_spread.IsNearTarget()
+		|| !sm_delay_freeze.IsNearTarget()
+		|| !sm_reverb_wet.IsNearTarget()
+		|| !sm_reverb_pre.IsNearTarget()
+		|| !sm_reverb_damp.IsNearTarget()
+		|| !sm_reverb_decay.IsNearTarget()
+		|| !sm_reverb_shimmer.IsNearTarget())
+	{
+		fx_params_dirty = true;
+	}
+}
+
+static void JobCancel()
+{
+	if (!g_job.active)
+	{
+		return;
+	}
+	if (g_job.type == JobType::WaveformBuild)
+	{
+		WaveformJobCancel();
+	}
+	else if (g_job.type == JobType::FileListScan)
+	{
+		FileListJobCancel();
+	}
+	g_job = {};
+}
+
+static bool JobCanPreempt(uint8_t priority)
+{
+	if (!g_job.active)
+	{
+		return true;
+	}
+	return priority >= g_job.priority;
+}
+
+static void JobStartWaveform(SampleContext ctx, bool foreground = true)
+{
+	const uint8_t priority = foreground ? 2 : 1;
+	if (!JobCanPreempt(priority))
+	{
+		return;
+	}
+	JobCancel();
+	g_job.type = JobType::WaveformBuild;
+	g_job.active = true;
+	g_job.foreground = foreground;
+	g_job.priority = priority;
+	g_job.progress = 0;
+	g_job.last_reported = 0;
+	WaveformJobStart(ctx);
+}
+
+static void JobStartFileList(const char* path, bool wav_only, bool foreground = true)
+{
+	(void)path;
+	const uint8_t priority = foreground ? 2 : 1;
+	if (!JobCanPreempt(priority))
+	{
+		return;
+	}
+	JobCancel();
+	g_job.type = JobType::FileListScan;
+	g_job.active = true;
+	g_job.foreground = foreground;
+	g_job.priority = priority;
+	g_job.progress = 0;
+	g_job.last_reported = 0;
+	FileListJobStart(wav_only);
+}
+
+static void JobTick()
+{
+	if (!g_job.active)
+	{
+		return;
+	}
+	if (!JobsAllowedNow())
+	{
+		if (!g_job.foreground)
+		{
+			JobCancel();
+		}
+		return;
+	}
+	constexpr uint32_t kWaveformBudget = 2048;
+	constexpr uint32_t kListBudget = 6;
+	if (g_job.type == JobType::WaveformBuild)
+	{
+		WaveformJobTick(kWaveformBudget);
+		const uint32_t total = static_cast<uint32_t>(g_wf_job.frames);
+		uint32_t done = 0;
+		if (total > 0)
+		{
+			done = static_cast<uint32_t>(g_wf_job.col * g_wf_job.step + g_wf_job.idx);
+			if (done > total) done = total;
+			g_job.progress = (done * 1000U) / total;
+		}
+		if (!g_wf_job.active)
+		{
+			g_job = {};
+		}
+	}
+	else if (g_job.type == JobType::FileListScan)
+	{
+		FileListJobTick(kListBudget);
+		const uint32_t done = static_cast<uint32_t>(wav_file_count);
+		const uint32_t total = kMaxWavFiles;
+		g_job.progress = (done * 1000U) / total;
+		if (!g_list_job.active)
+		{
+			g_job = {};
+		}
+	}
+	if (g_job.foreground && g_job.progress >= g_job.last_reported + 10)
+	{
+		g_job.last_reported = g_job.progress;
+		RequestDisplayUpdate();
 	}
 }
 
@@ -2325,10 +3145,15 @@ static void SetSampleContext(SampleContext ctx)
 	LoadWaveformCache(ctx);
 	if (!waveform_ready && sample_loaded)
 	{
-		ComputeWaveform();
-		waveform_ready = true;
-		waveform_dirty = true;
+		// Request waveform computation from the main loop instead of computing here
+		waveform_compute_ctx = ctx;
+		waveform_compute_pending = true;
 	}
+}
+
+static void ApplyContextSwitchAudioSafe(SampleContext ctx)
+{
+	SetSampleContext(ctx);
 }
 
 static void UpdatePlayStepMs()
@@ -2981,9 +3806,7 @@ static bool LoadSampleFromPath(const char* path)
 	trim_end = 1.0f;
 	LogLine("Load complete: %lu frames", static_cast<unsigned long>(sample_length));
 	waveform_from_recording = false;
-	ComputeWaveform();
-	waveform_ready = true;
-	waveform_dirty = true;
+	JobStartWaveform(current_sample_context, true);
 	UpdateTrimFrames();
 	return true;
 }
@@ -3331,7 +4154,7 @@ static void DrawMenu(int32_t selected)
 		const int text_y = y + (kBoxH - text_h) / 2;
 		DrawTinyString(label, text_x, text_y, !is_selected);
 	}
-	display.Update();
+	RequestDisplayUpdate();
 }
 
 static void DrawScaledChar(char ch,
@@ -3874,7 +4697,7 @@ static void DrawPerformScreen(int32_t selected,
 						false);
 		}
 	}
-	display.Update();
+	RequestDisplayUpdate();
 }
 
 static void DrawProgressBar(int x, int y, int w, int h, int32_t percent)
@@ -3915,7 +4738,21 @@ static void DrawLoadMessage(const char* line1, const char* line2)
 						 true,
 						 load_chars_per_line);
 	}
-	display.Update();
+	RequestDisplayUpdate();
+}
+
+static void DrawJobOverlay()
+{
+	if (!g_job.active || !g_job.foreground)
+	{
+		return;
+	}
+	const FontDef font = Font_6x8;
+	char buf[24];
+	const uint32_t pct = g_job.progress / 10U;
+	snprintf(buf, sizeof(buf), "WORK %lu%%", static_cast<unsigned long>(pct));
+	display.SetCursor(0, kDisplayH - font.FontHeight);
+	display.WriteString(buf, font, true);
 }
 
 static void DrawLoadMenu(int32_t top_index, int32_t selected)
@@ -3993,7 +4830,8 @@ static void DrawLoadMenu(int32_t top_index, int32_t selected)
 						 !is_selected,
 						 load_chars_per_line);
 	}
-	display.Update();
+	DrawJobOverlay();
+	RequestDisplayUpdate();
 }
 
 static int LoadTargetDisplayIndex(LoadDestination selected)
@@ -4054,7 +4892,7 @@ static void DrawLoadTargetMenu(LoadDestination selected)
 
 	draw_box(kMargin, top_y, box_w, top_h, "PLAY", selected_idx == 0);
 	draw_box(kMargin, bottom_y, box_w, bottom_h, "PERFORM", selected_idx == 1);
-	display.Update();
+	RequestDisplayUpdate();
 }
 
 static void DrawRecordReadyScreen()
@@ -4415,7 +5253,8 @@ static void DrawRecordReadyScreen()
 		}
 	}
 
-	display.Update();
+	DrawJobOverlay();
+	RequestDisplayUpdate();
 }
 
 static void DrawDeleteConfirm(const char* name)
@@ -4430,7 +5269,7 @@ static void DrawDeleteConfirm(const char* name)
 	}
 	display.SetCursor(0, (font.FontHeight + 2) * 3);
 	display.WriteString("L=NO  R=YES", font, true);
-	display.Update();
+	RequestDisplayUpdate();
 }
 
 static void DrawRecordBackConfirm()
@@ -4446,7 +5285,7 @@ static void DrawRecordBackConfirm()
 	display.WriteString("BE LOST", font, true);
 	display.SetCursor(0, (font.FontHeight + 2) * 4);
 	display.WriteString("L=NO  R=YES", font, true);
-	display.Update();
+	RequestDisplayUpdate();
 }
 
 static void DrawRecordSourceScreen()
@@ -4475,7 +5314,7 @@ static void DrawRecordSourceScreen()
 		display.SetCursor(2, y + 1);
 		display.WriteString(options[i], font, !is_selected);
 	}
-	display.Update();
+	RequestDisplayUpdate();
 }
 
 static void DrawRecordArmed()
@@ -4506,7 +5345,7 @@ static float BitResoValueFromIndex(int idx)
 	return static_cast<float>(ClampI(idx, 0, max_idx)) / static_cast<float>(max_idx);
 }
 
-static void StartRecording()
+static void StartRecordingAudioSafe()
 {
 	record_pos = 0;
 	sample_length = 0;
@@ -4529,6 +5368,11 @@ static void StartRecording()
 	live_wave_peak = 1;
 	live_wave_dirty = true;
 	record_state = RecordState::Recording;
+}
+
+static void StartRecording()
+{
+	StartRecordingAudioSafe();
 	LogLine("Record: start (monitor ON)");
 }
 
@@ -4646,7 +5490,7 @@ static void DrawRecordCountdown()
 	const int hy = cy + static_cast<int>(sinf(angle) * hand_r);
 	DrawLineInv(cx, cy, hx, hy, true);
 
-	display.Update();
+	RequestDisplayUpdate();
 }
 
 static void DrawRecordRecording()
@@ -4673,7 +5517,7 @@ static void DrawRecordRecording()
 		bottom = ClampI(bottom, wave_top, wave_bottom);
 		display.DrawLine(x, top, x, bottom, true);
 	}
-	display.Update();
+	RequestDisplayUpdate();
 }
 
 static void DrawShiftMenu(int32_t selected)
@@ -4697,7 +5541,7 @@ static void DrawShiftMenu(int32_t selected)
 		display.SetCursor(2, y + 1);
 		display.WriteString(kShiftMenuLabels[i], font, !is_selected);
 	}
-	display.Update();
+	RequestDisplayUpdate();
 }
 
 static void DrawSdInitScreen()
@@ -4730,7 +5574,7 @@ static void DrawSdInitScreen()
 				 static_cast<long>(kSdInitAttempts));
 		display.WriteString(buf, font, true);
 	}
-	display.Update();
+	RequestDisplayUpdate();
 }
 
 static void DrawSaveScreen()
@@ -4763,7 +5607,7 @@ static void DrawSaveScreen()
 		}
 		DrawProgressBar(bar_x, bar_y, bar_w, bar_h, percent);
 	}
-	display.Update();
+	RequestDisplayUpdate();
 }
 
 static inline int ClampI(int v, int lo, int hi)
@@ -5259,7 +6103,7 @@ static void DrawPlayScreen()
 		}
 	}
 
-	display.Update();
+	RequestDisplayUpdate();
 }
 
 static void DrawWaveform()
@@ -5359,7 +6203,8 @@ static void DrawWaveform()
 	display.SetCursor(0, 0);
 	display.WriteString(waveform_title ? waveform_title : loaded_sample_name, Font_6x8, true);
 
-	display.Update();
+	DrawJobOverlay();
+	RequestDisplayUpdate();
 }
 
 static void DrawRecordReview()
@@ -6044,7 +6889,7 @@ static void DrawFxDetailScreen(int32_t index)
 									 nullptr);
 		}
 	}
-	display.Update();
+	RequestDisplayUpdate();
 }
 
 static void DrawLoadModeSelect(int32_t selected)
@@ -6073,7 +6918,7 @@ static void DrawLoadModeSelect(int32_t selected)
 
 	draw_box(top_y, "PRESETS", selected == 0);
 	draw_box(bottom_y, "BAKE", selected == 1);
-	display.Update();
+	RequestDisplayUpdate();
 }
 
 static void DrawLoadStubScreen(LoadStubMode mode)
@@ -6089,7 +6934,7 @@ static void DrawLoadStubScreen(LoadStubMode mode)
 	const int y2 = y1 + Font5x7::H + 4;
 	DrawTinyString(line1, x1, y1, true);
 	DrawTinyString(line2, x2, y2, true);
-	display.Update();
+	RequestDisplayUpdate();
 }
 
 static void DrawPresetSaveStub()
@@ -6110,7 +6955,7 @@ static void DrawPresetSaveStub()
 	DrawTinyString(line1, x1, y1, true);
 	DrawTinyString(line2, x2, y2, true);
 	DrawTinyString(line3, x3, y3, true);
-	display.Update();
+	RequestDisplayUpdate();
 }
 
 static void DrawRecordTargetScreen(int32_t selected)
@@ -6121,7 +6966,7 @@ static void DrawRecordTargetScreen(int32_t selected)
 	display.WriteString("SAVE SAMPLE?", font, true);
 	display.SetCursor(0, (font.FontHeight + 2) * 2);
 	display.WriteString("L=NO  R=YES", font, true);
-	display.Update();
+	RequestDisplayUpdate();
 }
 
 static void StartPlayback(uint8_t note)
@@ -6410,30 +7255,87 @@ static void HandleMidiMessage(MidiEvent msg)
 	}
 }
 
-void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size)
+static void CtrlTimerCb(void* /*data*/)
 {
-	const uint32_t cyc_start = DWT->CYCCNT;
+	if (!g_ctrl_timer_running)
+	{
+		return;
+	}
+
 	hw.ProcessAllControls();
-	const int32_t encoder_l_inc = hw.encoder.Increment();
-	const bool encoder_l_pressed = hw.encoder.RisingEdge();
 	encoder_r.Debounce();
-	const int32_t encoder_r_inc = encoder_r.Increment();
+	shift_button.Debounce();
+
+	const int32_t enc_l_inc = hw.encoder.Increment();
+	const int32_t enc_r_inc = encoder_r.Increment();
+
+	uint32_t ev = 0;
+	if (hw.encoder.RisingEdge())      ev |= kEncLPress;
+	if (encoder_r.RisingEdge())       ev |= kEncRPress;
+	if (hw.button1.RisingEdge())      ev |= kBtn1Press;
+	if (hw.button2.RisingEdge())      ev |= kBtn2Press;
+	if (shift_button.RisingEdge())    ev |= kShiftRise;
+	if (shift_button.FallingEdge())   ev |= kShiftFall;
+
+	const bool shift_held = shift_button.Pressed();
+	const bool btn1_held = hw.button1.Pressed();
+
+	{
+		daisy::ScopedIrqBlocker irq;
+		g_enc_l_delta += enc_l_inc;
+		g_enc_r_delta += enc_r_inc;
+		g_ctrl_events |= ev;
+		g_shift_held = shift_held;
+		g_btn1_held = btn1_held;
+	}
+}
+
+static void InitControlTimer()
+{
+	daisy::TimerHandle::Config cfg;
+	cfg.periph = daisy::TimerHandle::Config::Peripheral::TIM_3;
+	cfg.dir = daisy::TimerHandle::Config::CounterDir::UP;
+	cfg.enable_irq = true;
+
+	g_ctrl_timer.Init(cfg);
+
+	constexpr uint32_t kCtrlTimerHz = 10000;
+	const uint32_t tim_clk = daisy::System::GetPClk1Freq() * 2U;
+	uint32_t psc = tim_clk / kCtrlTimerHz;
+	if (psc == 0)
+	{
+		psc = 1;
+	}
+	psc -= 1;
+	if (psc > 0xFFFFU)
+	{
+		psc = 0xFFFFU;
+	}
+	g_ctrl_timer.SetPrescaler(psc);
+	g_ctrl_timer.SetPeriod(kCtrlTimerHz / 1000);
+	g_ctrl_timer.SetCallback(CtrlTimerCb, nullptr);
+
+	g_ctrl_timer_running = true;
+	g_ctrl_timer.Start();
+}
+
+static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_events, bool shift_held)
+{
+	const bool encoder_l_pressed = (ctrl_events & kEncLPress) != 0;
+	const bool encoder_r_pressed = (ctrl_events & kEncRPress) != 0;
+	const bool button1_press_event = (ctrl_events & kBtn1Press) != 0;
+	const bool button2_press_event = (ctrl_events & kBtn2Press) != 0;
+
 	if (encoder_r_inc != 0)
 	{
 		encoder_r_accum += encoder_r_inc;
 	}
-	const bool encoder_r_pressed = encoder_r.RisingEdge();
 	bool encoder_r_consumed = false;
 	if (encoder_r_pressed)
 	{
 		encoder_r_button_press = true;
 	}
-	static float fx_chain_fade_gain = 1.0f;
-	static float fx_chain_fade_target = 1.0f;
-	static int32_t fx_chain_fade_samples_left = 0;
-	static bool fx_chain_pause_pending = false;
-	static bool fx_chain_paused = false;
-	static uint32_t fx_chain_last_move_ms = 0;
+
 	const float out_sr = hw.AudioSampleRate();
 	const uint32_t now_ms = System::GetNow();
 	const bool ui_blocked = (sd_init_in_progress || save_in_progress);
@@ -6448,8 +7350,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			request_fx_detail_redraw = true;
 		}
 	}
-	shift_button.Debounce();
-	const bool shift_pressed = shift_button.Pressed();
+	const bool shift_pressed = shift_held;
 	const bool perform_ui = IsPerformUiMode(ui_mode);
 	if (!perform_ui && ui_mode != UiMode::FxDetail)
 	{
@@ -6460,17 +7361,17 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		amp_window_active = false;
 		flt_window_active = false;
 	}
-	if (hw.button1.RisingEdge())
+	if (button1_press_event)
 	{
 		button1_press = true;
 	}
-	if (hw.button2.RisingEdge())
+	if (button2_press_event)
 	{
 		button2_press = true;
 	}
 	preview_hold = (ui_mode == UiMode::Load
 		&& !(kLoadPresetsPlaceholder && load_context == LoadContext::Main && !delete_mode))
-		? hw.button1.Pressed()
+		? ui_button1_held
 		: false;
 	if (!sd_init_in_progress && ui_mode == UiMode::Shift)
 	{
@@ -6490,21 +7391,27 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		}
 		if (encoder_r_pressed)
 		{
-			LogLine("Shift menu select: %s", kShiftMenuLabels[shift_menu_index]);
+			// Deferred logging
+			if (shift_menu_index < kShiftMenuCount)
+			{
+				char defer_msg[96];
+				snprintf(defer_msg, sizeof(defer_msg), "Shift menu select: %s", kShiftMenuLabels[shift_menu_index]);
+				DeferLog(defer_msg);
+			}
 			if (shift_menu_index == 0)
 			{
 				ui_mode = UiMode::PresetSaveStub;
 			}
-				else if (shift_menu_index == 1)
-				{
-					delete_mode = true;
-					delete_confirm = false;
-					delete_prev_mode = shift_prev_mode;
-					load_context = LoadContext::Main;
-					load_prev_mode = delete_prev_mode;
-					ui_mode = UiMode::Load;
-					load_selected = 0;
-					load_scroll = 0;
+			else if (shift_menu_index == 1)
+			{
+				delete_mode = true;
+				delete_confirm = false;
+				delete_prev_mode = shift_prev_mode;
+				load_context = LoadContext::Main;
+				load_prev_mode = delete_prev_mode;
+				ui_mode = UiMode::Load;
+				load_selected = 0;
+				load_scroll = 0;
 				request_delete_scan = true;
 				request_delete_redraw = true;
 			}
@@ -6524,26 +7431,29 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		{
 			menu_index = NextMenuIndex(menu_index, encoder_l_inc);
 		}
-			if (encoder_r_pressed && menu_index == 0)
-			{
-				delete_mode = false;
-				delete_confirm = false;
-				load_context = LoadContext::Main;
-				load_prev_mode = UiMode::Main;
-				load_mode_index = 0;
-				ui_mode = UiMode::LoadModeSelect;
+		if (encoder_r_pressed && menu_index == 0)
+		{
+			delete_mode = false;
+			delete_confirm = false;
+			load_context = LoadContext::Main;
+			load_prev_mode = UiMode::Main;
+			load_mode_index = 0;
+			ui_mode = UiMode::LoadModeSelect;
 		}
 		else if (encoder_r_pressed && menu_index == 1)
 		{
-			SetSampleContext(SampleContext::Play);
+			RequestContextSwitch(SampleContext::Play);
 			ui_mode = UiMode::Record;
 			record_source_index = (record_input == RecordInput::Mic) ? 1 : 0;
 			record_state = RecordState::SourceSelect;
 			record_pos = 0;
 			playback_active = false;
 			record_anim_start_ms = NowMs();
-			LogLine("Record: entered (monitor ON), max %ld s @48k mono",
+			// Deferred logging
+			char defer_msg[96];
+			snprintf(defer_msg, sizeof(defer_msg), "Record: entered (monitor ON), max %ld s @48k mono",
 					static_cast<long>(kRecordMaxSeconds));
+			DeferLog(defer_msg);
 		}
 		else if (encoder_r_pressed && menu_index == 2)
 		{
@@ -6552,7 +7462,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		}
 		else if (encoder_r_pressed && menu_index == 3)
 		{
-			SetSampleContext(SampleContext::Play);
+			RequestContextSwitch(SampleContext::Play);
 			ui_mode = UiMode::Play;
 			if(sample_loaded && sample_length > 0)
 			{
@@ -6597,11 +7507,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				while (next < 0)
 				{
 					next += count;
-			}
-			while (next >= count)
-			{
-				next -= count;
-			}
+				}
+				while (next >= count)
+				{
+					next -= count;
+				}
 				load_selected = next;
 				int32_t max_top = count - visible_lines;
 				if (max_top < 0)
@@ -6625,47 +7535,47 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 					load_scroll = max_top;
 				}
 			}
-				if (encoder_r_pressed && wav_file_count > 0)
+			if (encoder_r_pressed && wav_file_count > 0)
+			{
+				if (delete_mode)
 				{
-					if (delete_mode)
-					{
-						delete_confirm = true;
-						CopyString(delete_confirm_name, wav_files[load_selected], kMaxWavNameLen);
-						request_delete_redraw = true;
-					}
-					else if (load_context == LoadContext::Edt)
-					{
-						request_load_destination = LoadDestination::Perform;
-						request_load_sample = true;
-						request_load_index = load_selected;
-					}
-					else if (load_context == LoadContext::Track)
-					{
-						request_load_destination = LoadDestination::Play;
-						request_load_sample = true;
-						request_load_index = load_selected;
-					}
-					else
-					{
-						load_target_selected = LoadDestination::Play;
-						load_target_index = load_selected;
-						ui_mode = UiMode::LoadTarget;
-					}
-			}
-				if (encoder_l_pressed)
-				{
-					if (delete_mode)
-					{
-						delete_mode = false;
-						delete_confirm = false;
-						ui_mode = delete_prev_mode;
-					}
-					else
-					{
-						ui_mode = load_prev_mode;
-						load_context = LoadContext::Main;
-					}
+					delete_confirm = true;
+					CopyString(delete_confirm_name, wav_files[load_selected], kMaxWavNameLen);
+					request_delete_redraw = true;
 				}
+				else if (load_context == LoadContext::Edt)
+				{
+					request_load_destination = LoadDestination::Perform;
+					request_load_sample = true;
+					request_load_index = load_selected;
+				}
+				else if (load_context == LoadContext::Track)
+				{
+					request_load_destination = LoadDestination::Play;
+					request_load_sample = true;
+					request_load_index = load_selected;
+				}
+				else
+				{
+					load_target_selected = LoadDestination::Play;
+					load_target_index = load_selected;
+					ui_mode = UiMode::LoadTarget;
+				}
+			}
+			if (encoder_l_pressed)
+			{
+				if (delete_mode)
+				{
+					delete_mode = false;
+					delete_confirm = false;
+					ui_mode = delete_prev_mode;
+				}
+				else
+				{
+					ui_mode = load_prev_mode;
+					load_context = LoadContext::Main;
+				}
+			}
 		}
 	}
 	else if (!ui_blocked && ui_mode == UiMode::LoadModeSelect)
@@ -6754,8 +7664,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			if (encoder_r_pressed)
 			{
 				record_input = (record_source_index == 1) ? RecordInput::Mic : RecordInput::LineIn;
-				LogLine("Record input set: %s",
+				// Deferred logging
+				char defer_msg[96];
+				snprintf(defer_msg, sizeof(defer_msg), "Record input set: %s",
 						(record_input == RecordInput::Mic) ? "MIC (R)" : "LINE IN (L)");
+				DeferLog(defer_msg);
 				record_state = RecordState::Armed;
 				record_anim_start_ms = -1.0;
 				encoder_r_consumed = true;
@@ -6799,13 +7712,17 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				record_waveform_pending = true;
 				if (sample_loaded)
 				{
-					ComputeWaveform();
-					waveform_ready = true;
-					waveform_dirty = true;
+					// Request waveform computation from main loop instead
+					waveform_compute_ctx = current_sample_context;
+					waveform_compute_pending = true;
 					UpdateTrimFrames();
 					request_length_redraw = true;
 				}
-				LogLine("Record: stop, frames=%lu", static_cast<unsigned long>(sample_length));
+				// Deferred logging
+				char defer_msg[96];
+				snprintf(defer_msg, sizeof(defer_msg), "Record: stop, frames=%lu", static_cast<unsigned long>(sample_length));
+				DeferLog(defer_msg);
+				RequestAudioCmd(kCmdRecStop);
 			}
 			else if (record_state == RecordState::Review && sample_loaded)
 			{
@@ -6877,14 +7794,14 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			{
 				int32_t dl = encoder_l_inc;
 				int32_t dr = encoder_r_inc;
-				if (shift_button.Pressed())
+				if (shift_held)
 				{
 					if (dl > 0) dl = 1;
 					else if (dl < 0) dl = -1;
 					if (dr > 0) dr = 1;
 					else if (dr < 0) dr = -1;
 				}
-				AdjustTrimNormalized(dl, dr, shift_button.Pressed());
+				AdjustTrimNormalized(dl, dr, shift_held);
 			}
 		}
 	}
@@ -7028,10 +7945,10 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 							fx_params_dirty = true;
 						}
 					}
-						fx_detail_prev_mode = ui_mode;
-						ui_mode = UiMode::FxDetail;
-						request_fx_detail_redraw = true;
-					}
+					fx_detail_prev_mode = ui_mode;
+					ui_mode = UiMode::FxDetail;
+					request_fx_detail_redraw = true;
+				}
 			}
 			else if (perform_index == kPerformAmpIndex)
 			{
@@ -7188,24 +8105,24 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				request_perform_redraw = true;
 			}
 		}
-			if (encoder_l_pressed)
+		if (encoder_l_pressed)
+		{
+			if (fx_select_active || amp_select_active || flt_select_active)
 			{
-				if (fx_select_active || amp_select_active || flt_select_active)
-				{
-					fx_window_active = false;
-					amp_window_active = false;
-					flt_window_active = false;
-					request_perform_redraw = true;
-				}
-				else if (track_mode)
-				{
-					ExitPlayTrack();
-				}
-				else
-				{
-					ui_mode = UiMode::Main;
-				}
+				fx_window_active = false;
+				amp_window_active = false;
+				flt_window_active = false;
+				request_perform_redraw = true;
 			}
+			else if (track_mode)
+			{
+				ExitPlayTrack();
+			}
+			else
+			{
+				ui_mode = UiMode::Main;
+			}
+		}
 	}
 	else if (!ui_blocked && ui_mode == UiMode::Edt)
 	{
@@ -7213,14 +8130,14 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		{
 			int32_t dl = encoder_l_inc;
 			int32_t dr = encoder_r_inc;
-			if (shift_button.Pressed())
+			if (shift_held)
 			{
 				if (dl > 0) dl = 1;
 				else if (dl < 0) dl = -1;
 				if (dr > 0) dr = 1;
 				else if (dr < 0) dr = -1;
 			}
-			AdjustTrimNormalized(dl, dr, shift_button.Pressed());
+			AdjustTrimNormalized(dl, dr, shift_held);
 			if (perform_context == PerformContext::Track)
 			{
 				StoreTrackSampleState(perform_context_track);
@@ -7677,9 +8594,74 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		if ((System::GetNow() - record_countdown_start_ms) >= kRecordCountdownMs)
 		{
 			StartRecording();
+			RequestAudioCmd(kCmdRecStart);
 		}
 	}
+}
 
+void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size)
+{
+	const uint32_t cyc_start = DWT->CYCCNT;
+
+	uint32_t cmd = 0;
+	SampleContext pending_ctx = SampleContext::Perform;
+	{
+		daisy::ScopedIrqBlocker irq;
+		cmd = g_audio_cmd;
+		g_audio_cmd = 0;
+		pending_ctx = g_pending_context;
+	}
+
+	if (cmd & kCmdSetContext)
+	{
+		ApplyContextSwitchAudioSafe(pending_ctx);
+	}
+	if (cmd & kCmdPlayStart)
+	{
+		playhead_running = true;
+		playhead_step = 0;
+		TriggerSequencerStep(0);
+	}
+	if (cmd & kCmdPlayStop)
+	{
+		playhead_running = false;
+		playhead_last_step_ms = 0;
+	}
+	if (cmd & kCmdTriggerStep0)
+	{
+		TriggerSequencerStep(0);
+	}
+	if (cmd & kCmdRecStart)
+	{
+		if (record_state != RecordState::Recording)
+		{
+			StartRecordingAudioSafe();
+		}
+	}
+	if (cmd & kCmdRecStop)
+	{
+		if (record_state == RecordState::Recording)
+		{
+			record_state = RecordState::Review;
+		}
+	}
+	if (cmd & kCmdAllNotesOff)
+	{
+		ResetPerformVoices();
+	}
+
+	uint32_t flags_bits = 0;
+	{
+		daisy::ScopedIrqBlocker irq;
+		flags_bits = g_audio_flags_bits;
+	}
+	AudioParams params = {};
+	{
+		daisy::ScopedIrqBlocker irq;
+		std::memcpy(&params, &g_audio_params, sizeof(AudioParams));
+	}
+
+	const float out_sr = hw.AudioSampleRate();
 	size_t window_start = sample_play_start;
 	size_t window_end = sample_play_end;
 	if (window_end > sample_length || window_end == 0)
@@ -7747,28 +8729,28 @@ static float last_chorus_wow = -1.0f;
 	{
 		fx_params_dirty = false;
 
-		cached_sat_drive = sat_drive;
-		cached_sat_mix = fx_s_wet;
-		cached_sat_bump = sat_tape_bump;
-		cached_sat_smpl = sat_bit_smpl;
-		cached_sat_reso = sat_bit_reso;
+		cached_sat_drive = params.sat_drive;
+		cached_sat_mix = params.fx_s_wet;
+		cached_sat_bump = params.sat_tape_bump;
+		cached_sat_smpl = params.sat_bit_smpl;
+		cached_sat_reso = params.sat_bit_reso;
 		cached_sat_mode = sat_mode;
-		cached_chorus_depth = mod_depth;
-		cached_chorus_mix = fx_c_wet;
-		cached_chorus_rate = chorus_rate;
+		cached_chorus_depth = params.mod_depth;
+		cached_chorus_mix = params.fx_c_wet;
+		cached_chorus_rate = params.chorus_rate;
 		cached_chorus_mode = chorus_mode;
-		cached_chorus_wow = chorus_wow;
-		cached_tape_rate = tape_rate;
-		cached_delay_wet = delay_wet;
-		cached_delay_time = delay_time;
-		cached_delay_feedback = delay_feedback;
-		cached_delay_spread = delay_spread;
-		cached_delay_freeze = delay_freeze;
-		cached_reverb_wet = reverb_wet;
-		cached_reverb_pre = reverb_pre;
-		cached_reverb_damp = reverb_damp;
-		cached_reverb_decay = reverb_decay;
-		cached_reverb_shimmer = reverb_shimmer;
+		cached_chorus_wow = params.chorus_wow;
+		cached_tape_rate = params.tape_rate;
+		cached_delay_wet = params.delay_wet;
+		cached_delay_time = params.delay_time;
+		cached_delay_feedback = params.delay_feedback;
+		cached_delay_spread = params.delay_spread;
+		cached_delay_freeze = params.delay_freeze;
+		cached_reverb_wet = params.reverb_wet;
+		cached_reverb_pre = params.reverb_pre;
+		cached_reverb_damp = params.reverb_damp;
+		cached_reverb_decay = params.reverb_decay;
+		cached_reverb_shimmer = params.reverb_shimmer;
 
 		if (cached_sat_drive < 0.0f) cached_sat_drive = 0.0f;
 		if (cached_sat_drive > 1.0f) cached_sat_drive = 1.0f;
@@ -7994,16 +8976,16 @@ static float last_chorus_wow = -1.0f;
 		delay_line_r.SetDelay(delay_time_smoothed);
 		last_delay_time = delay_time_smoothed;
 	}
-	const bool perform_mode = IsPerformUiMode(ui_mode);
-	const bool main_mode = (ui_mode == UiMode::Main);
-	const bool fx_allowed = perform_mode || IsPlayUiMode(ui_mode) || ui_mode == UiMode::FxDetail;
+	const bool perform_mode = (flags_bits & kFlagInPerformMode) != 0;
+	const bool main_mode = (flags_bits & kFlagInMainMode) != 0;
+	const bool fx_allowed = (flags_bits & kFlagFxAllowed) != 0;
 	const bool amp_env_active = perform_mode;
-	const float amp_attack_ms = AmpEnvMsFromFader(amp_attack);
-	const float amp_release_ms = AmpEnvMsFromFader(amp_release);
+	const float amp_attack_ms = AmpEnvMsFromFader(params.amp_attack);
+	const float amp_release_ms = AmpEnvMsFromFader(params.amp_release);
 	const float amp_attack_samples = amp_attack_ms * 0.001f * out_sr;
 	const float amp_release_samples = amp_release_ms * 0.001f * out_sr;
-	const bool play_seq_mode = IsPlayUiMode(ui_mode) && sample_loaded;
-	const bool play_master_fx = IsPlayUiMode(ui_mode);
+	const bool play_seq_mode = (flags_bits & kFlagPlaySeqMode) != 0;
+	const bool play_master_fx = (flags_bits & kFlagPlayMasterFx) != 0;
 	const int32_t live_track = (perform_context == PerformContext::Track
 		&& perform_context_track >= 0
 		&& perform_context_track < kPlayTrackCount)
@@ -8017,9 +8999,9 @@ static float last_chorus_wow = -1.0f;
 		for (int t = 0; t < kPlayTrackCount; ++t)
 		{
 			const bool use_live = (t == live_track);
-			float mod_send = use_live ? fx_c_wet : track_perform_state[t].fx_c_wet;
-			float delay_send = use_live ? delay_wet : track_perform_state[t].delay_wet;
-			float reverb_send = use_live ? reverb_wet : track_perform_state[t].reverb_wet;
+			float mod_send = use_live ? params.fx_c_wet : track_perform_state[t].fx_c_wet;
+			float delay_send = use_live ? params.delay_wet : track_perform_state[t].delay_wet;
+			float reverb_send = use_live ? params.reverb_wet : track_perform_state[t].reverb_wet;
 			if (mod_send < 0.0f) mod_send = 0.0f;
 			if (mod_send > 1.0f) mod_send = 1.0f;
 			if (delay_send < 0.0f) delay_send = 0.0f;
@@ -8034,8 +9016,8 @@ static float last_chorus_wow = -1.0f;
 	const bool use_poly = (record_state != RecordState::Recording)
 		&& ((perform_mode && sample_loaded) || play_seq_mode);
 	const bool sample_stereo = (sample_channels == 2);
-	const float flt_cutoff_hz = FltCutoffFromFader(flt_cutoff, out_sr);
-	const float flt_q = FltQFromFader(flt_res);
+	const float flt_cutoff_hz = FltCutoffFromFader(params.flt_cutoff, out_sr);
+	const float flt_q = FltQFromFader(params.flt_res);
 	static float last_flt_cutoff = -1.0f;
 	static float last_flt_q = -1.0f;
 	if (flt_cutoff_hz != last_flt_cutoff || flt_q != last_flt_q)
@@ -8396,12 +9378,7 @@ static float last_chorus_wow = -1.0f;
 				reverb_send_r += v_r * reverb_send;
 			}
 		};
-		const bool monitor_active =
-			(ui_mode == UiMode::Record
-				&& record_state != RecordState::Review
-				&& record_state != RecordState::SourceSelect
-				&& record_state != RecordState::BackConfirm
-				&& record_state != RecordState::TargetSelect);
+		const bool monitor_active = (flags_bits & kFlagMonitorEnabled) != 0;
 		float monitor_l = 0.0f;
 		float monitor_r = 0.0f;
 		if (monitor_active)
@@ -8471,14 +9448,14 @@ static float last_chorus_wow = -1.0f;
 				record_waveform_pending = true;
 				if (sample_loaded)
 				{
-					ComputeWaveform();
-					waveform_ready = true;
-					waveform_dirty = true;
+					// Request waveform computation from main loop instead
+					waveform_compute_ctx = current_sample_context;
+					waveform_compute_pending = true;
 					UpdateTrimFrames();
 					request_length_redraw = true;
 				}
-				LogLine("Record: auto-stop at max frames=%lu",
-						static_cast<unsigned long>(sample_length));
+				PushLogEvent(LogEventType::RecordAutoStop,
+					static_cast<int32_t>(sample_length));
 			}
 		}
 		if (sample_loaded && playback_active && record_state != RecordState::Recording && window_valid)
@@ -8986,9 +9963,12 @@ int main(void)
 
 	UpdatePlayStepMs();
 	InitTrackStates();
+	InitSmoothers();
+	UpdateSmoothedParamsPerTick();
 
 	encoder_r.Init(seed::D7, seed::D8, seed::D22, hw.AudioSampleRate());
 	shift_button.Init(seed::D9, 1000);
+	InitControlTimer();
 
 	PodDisplay::Config disp_cfg;
 	disp_cfg.driver_config.transport_config.i2c_config.pin_config.scl = seed::D11;
@@ -9006,6 +9986,33 @@ int main(void)
 	MountSd();
 
 	DrawMenu(menu_index);
+	g_last_draw_ms = System::GetNow();
+	{
+		uint32_t bits = 0;
+		const bool in_play_mode = IsPlayUiMode(ui_mode);
+		const bool in_perform_mode = IsPerformUiMode(ui_mode);
+		if (in_play_mode) bits |= kFlagInPlayMode;
+		if (in_perform_mode) bits |= kFlagInPerformMode;
+		if (ui_mode == UiMode::Main) bits |= kFlagInMainMode;
+		if (in_perform_mode || in_play_mode || (ui_mode == UiMode::FxDetail))
+		{
+			bits |= kFlagFxAllowed;
+		}
+		if (in_play_mode && sample_loaded) bits |= kFlagPlaySeqMode;
+		if (in_play_mode) bits |= kFlagPlayMasterFx;
+		if (ui_mode == UiMode::Record
+			&& record_state != RecordState::Review
+			&& record_state != RecordState::SourceSelect
+			&& record_state != RecordState::BackConfirm
+			&& record_state != RecordState::TargetSelect)
+		{
+			bits |= kFlagMonitorEnabled;
+		}
+		{
+			daisy::ScopedIrqBlocker irq;
+			g_audio_flags_bits = bits;
+		}
+	}
 
 	hw.StartAdc();
 	hw.StartAudio(AudioCallback);
@@ -9029,6 +10036,7 @@ int main(void)
 	uint32_t last_edt_playhead_ms = 0;
 	bool last_edt_playhead_active = false;
 	LoadDestination last_load_target = LoadDestination::Play;
+	uint32_t last_ui_ms = System::GetNow();
 	while(1)
 	{
 		hw.midi.Listen();
@@ -9036,6 +10044,125 @@ int main(void)
 		{
 			HandleMidiMessage(hw.midi.PopEvent());
 		}
+		// Service pending waveform computation (from audio callback)
+		if (waveform_compute_pending
+			&& !playhead_running
+			&& record_state != RecordState::Recording)
+		{
+			waveform_compute_pending = false;
+			if (sample_loaded && !waveform_ready)
+			{
+				JobStartWaveform(waveform_compute_ctx, false);
+			}
+		}
+
+		// Service deferred logs from AudioCallback
+		while (true)
+		{
+			char local_msg[kLogBufSize];
+			bool has_msg = false;
+			__disable_irq();
+			if (g_log_head != g_log_tail)
+			{
+				strncpy(local_msg, (const char*)g_log_ring[g_log_tail].buf, kLogBufSize - 1);
+				local_msg[kLogBufSize - 1] = '\0';
+				g_log_tail = (g_log_tail + 1) % kLogRingSize;
+				has_msg = true;
+			}
+			__enable_irq();
+			
+			if (!has_msg) break;
+			LogLine("%s", local_msg);
+		}
+		while (true)
+		{
+			LogEvent evt = {};
+			bool has_evt = false;
+			{
+				daisy::ScopedIrqBlocker irq;
+				if (g_logevt_head != g_logevt_tail)
+				{
+					evt = g_logevt_ring[g_logevt_tail];
+					g_logevt_tail = (g_logevt_tail + 1) % kLogEvtRingSize;
+					has_evt = true;
+				}
+			}
+			if (!has_evt)
+			{
+				break;
+			}
+			switch (evt.type)
+			{
+				case LogEventType::RecordAutoStop:
+				{
+					char msg[96];
+					snprintf(msg, sizeof(msg), "Record: auto-stop at max frames=%ld",
+						static_cast<long>(evt.a));
+					LogLine("%s", msg);
+				}
+				break;
+				default:
+					break;
+			}
+		}
+
+		{
+			uint32_t now = System::GetNow();
+			int32_t loops = 0;
+			while ((int32_t)(now - last_ui_ms) >= 1 && loops < 4)
+			{
+				last_ui_ms += 1;
+				int32_t enc_l_inc = 0;
+				int32_t enc_r_inc = 0;
+				uint32_t ev = 0;
+				bool shift_held = false;
+				bool btn1_held = false;
+				{
+					daisy::ScopedIrqBlocker irq;
+					enc_l_inc = g_enc_l_delta;
+					g_enc_l_delta = 0;
+					enc_r_inc = g_enc_r_delta;
+					g_enc_r_delta = 0;
+					ev = g_ctrl_events;
+					g_ctrl_events = 0;
+					shift_held = g_shift_held;
+					btn1_held = g_btn1_held;
+				}
+
+				ui_button1_held = btn1_held;
+				UiTick(enc_l_inc, enc_r_inc, ev, shift_held);
+				JobTick();
+				UpdateSmoothedParamsPerTick();
+				loops++;
+			}
+		}
+		{
+			uint32_t bits = 0;
+			const bool in_play_mode = IsPlayUiMode(ui_mode);
+			const bool in_perform_mode = IsPerformUiMode(ui_mode);
+			if (in_play_mode) bits |= kFlagInPlayMode;
+			if (in_perform_mode) bits |= kFlagInPerformMode;
+			if (ui_mode == UiMode::Main) bits |= kFlagInMainMode;
+			if (in_perform_mode || in_play_mode || (ui_mode == UiMode::FxDetail))
+			{
+				bits |= kFlagFxAllowed;
+			}
+			if (in_play_mode && sample_loaded) bits |= kFlagPlaySeqMode;
+			if (in_play_mode) bits |= kFlagPlayMasterFx;
+			if (ui_mode == UiMode::Record
+				&& record_state != RecordState::Review
+				&& record_state != RecordState::SourceSelect
+				&& record_state != RecordState::BackConfirm
+				&& record_state != RecordState::TargetSelect)
+			{
+				bits |= kFlagMonitorEnabled;
+			}
+			{
+				daisy::ScopedIrqBlocker irq;
+				g_audio_flags_bits = bits;
+			}
+		}
+
 		int32_t aux_delta = 0;
 		if (encoder_r_accum != 0)
 		{
@@ -9071,42 +10198,43 @@ int main(void)
 		{
 			encoder_r_button_press = false;
 			if (UiLogEnabled())
-		{
-			LogLine("Encoder R button pressed");
+			{
+				LogLine("Encoder R button pressed");
+			}
 		}
-	}
-	const bool ui_blocked = (sd_init_in_progress || save_in_progress);
-	if (button2_press)
-	{
-		button2_press = false;
-		if (!ui_blocked)
+		const bool ui_blocked = (sd_init_in_progress || save_in_progress);
+		if (button2_press)
 		{
-			shift_prev_mode = ui_mode;
-			ui_mode = UiMode::Shift;
-			shift_menu_index = 0;
-			request_shift_redraw = true;
+			button2_press = false;
+			if (!ui_blocked)
+			{
+				shift_prev_mode = ui_mode;
+				ui_mode = UiMode::Shift;
+				shift_menu_index = 0;
+				request_shift_redraw = true;
+			}
 		}
-	}
 		if (button1_press)
 		{
 			button1_press = false;
-				if (!ui_blocked && IsPlayUiMode(ui_mode))
+			if (!ui_blocked && IsPlayUiMode(ui_mode))
+			{
+				if (!playhead_running)
 				{
-					if (!playhead_running)
-					{
-						playhead_running = true;
-						playhead_step = 0;
-						playhead_last_step_ms = System::GetNow();
-						play_screen_dirty = true;
-						request_playhead_redraw = true;
-						TriggerSequencerStep(playhead_step);
-					}
-					else
-					{
-						playhead_running = false;
-						playhead_last_step_ms = 0;
+					playhead_running = true;
+					playhead_step = 0;
+					playhead_last_step_ms = System::GetNow();
 					play_screen_dirty = true;
 					request_playhead_redraw = true;
+					RequestAudioCmd(kCmdPlayStart);
+				}
+				else
+				{
+					playhead_running = false;
+					playhead_last_step_ms = 0;
+					play_screen_dirty = true;
+					request_playhead_redraw = true;
+					RequestAudioCmd(kCmdPlayStop);
 				}
 			}
 			else if (!IsPlayUiMode(ui_mode)
@@ -9129,9 +10257,9 @@ int main(void)
 				request_playhead_redraw = true;
 			}
 		}
-			if (!ui_blocked && IsPlayUiMode(ui_mode) && playhead_running)
+		if (!ui_blocked && IsPlayUiMode(ui_mode) && playhead_running)
 		{
-		const uint32_t now = System::GetNow();
+			const uint32_t now = System::GetNow();
 			if (playhead_last_step_ms == 0)
 			{
 				playhead_last_step_ms = now;
@@ -9157,17 +10285,21 @@ int main(void)
 		}
 		if (request_load_scan)
 		{
+			request_load_scan = false;
+			list_build_pending = true;
+		}
+		if (list_build_pending)
+		{
 			if (!ui_blocked)
 			{
 				if (kLoadPresetsPlaceholder && load_context == LoadContext::Main && !delete_mode)
 				{
-					request_load_scan = false;
+					list_build_pending = false;
 				}
 				else
 				{
-					request_load_scan = false;
-					LogLine("Load menu: scan requested");
-					ScanSdFiles(true);
+					list_build_pending = false;
+					JobStartFileList(fsi.GetSDPath(), true, true);
 				}
 			}
 		}
@@ -9176,8 +10308,7 @@ int main(void)
 			if (!ui_blocked)
 			{
 				request_delete_scan = false;
-				LogLine("Delete menu: scan requested");
-				ScanSdFiles(false);
+				JobStartFileList(fsi.GetSDPath(), false, true);
 			}
 		}
 		if (request_load_sample)
@@ -9458,14 +10589,14 @@ int main(void)
 			}
 		}
 
-		if (record_waveform_pending)
+		if (record_waveform_pending
+			&& !playhead_running
+			&& record_state != RecordState::Recording)
 		{
 			record_waveform_pending = false;
 			if (sample_loaded && sample_length > 0)
 			{
-				ComputeWaveform();
-				waveform_ready = true;
-				waveform_dirty = true;
+				JobStartWaveform(current_sample_context, true);
 				UpdateTrimFrames();
 				if (ui_mode == UiMode::Record && record_state == RecordState::Review)
 				{
@@ -9501,6 +10632,10 @@ int main(void)
 		const UiMode mode = ui_mode;
 		if (mode != last_mode)
 		{
+			if (last_mode == UiMode::Load && mode != UiMode::Load && g_job.type == JobType::FileListScan)
+			{
+				JobCancel();
+			}
 			const bool was_play = IsPlayUiMode(last_mode);
 			const bool is_play = IsPlayUiMode(mode);
 			if (was_play && !is_play)
@@ -9679,11 +10814,11 @@ int main(void)
 				}
 				else
 				{
-					if (sample_loaded && sample_length > 0)
+					if (sample_loaded && sample_length > 0
+						&& !playhead_running
+						&& record_state != RecordState::Recording)
 					{
-						ComputeWaveform();
-						waveform_ready = true;
-						waveform_dirty = true;
+						JobStartWaveform(current_sample_context, true);
 						UpdateTrimFrames();
 					}
 					DrawRecordReview();
@@ -9997,6 +11132,21 @@ int main(void)
 				led1_level = 0.0f;
 			}
 			hw.led1.Set(0.0f, led1_level, 0.0f);
+		}
+		const uint32_t draw_now = System::GetNow();
+		const bool needs_draw = g_display_update_pending
+			|| request_shift_redraw
+			|| request_delete_redraw
+			|| request_playhead_redraw
+			|| play_screen_dirty
+			|| waveform_dirty
+			|| live_wave_dirty
+			|| request_perform_redraw
+			|| request_fx_detail_redraw
+			|| request_length_redraw;
+		if (needs_draw)
+		{
+			FlushDisplayIfDue(draw_now);
 		}
 		hw.UpdateLeds();
 		hw.DelayMs(10);
