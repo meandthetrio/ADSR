@@ -1,3 +1,25 @@
+### 1/11/26
+Edge moved a ton of major components out of the AudioCallback
+
+As well as timing the sequencer to a hardware clock
+
+And receiving Midi Inputs via a hardware clock which reduced incoming midi note lag in a major way
+
+
+	•	Decoupled “heavy work” from the audio thread: waveform building, SD/file list work, and logging were moved out of AudioCallback so audio timing can’t get stalled by UI/IO.
+	•	Hardened real-time boundaries: AudioCallback is now basically DSP + consuming small command/param snapshots; UI decisions run in the main loop on a fixed tick; shared state uses IRQ-safe handoff.
+	•	Fixed encoder feel: we moved control scanning off the main loop (which was variable) and made it deterministic again (timer-based), which stopped missed steps and direction glitches.
+	•	Made UI cadence predictable: main loop runs UiTick at a fixed rate and OLED updates are throttled and “dirty-only,” so the UI doesn’t spike CPU.
+	•	Added a job system: heavy tasks (waveform + SD scanning) became time-sliced jobs, then were unified under a small scheduler with cancel/preempt so the UI doesn’t freeze.
+	•	Added parameter smoothing: continuous parameters now slew smoothly (no zipper/clicks) without calling expensive DSP setters constantly.
+	•	Changed audio block size: bumped block size to 48 for lower callback overhead (with an audit so nothing became block-dependent).
+	•	Identified the remaining lag source: PLAY sequencer is still clocked from the main loop (System::GetNow()), so the final fix is switching the PLAY clock to an AudioCallback sample accumulator and deleting the main-loop step-advance block.
+
+
+
+
+
+
 # 1/9/26 8:52pm
 Cuz reworked Sample saving screen
 - Isolated "SAVE" only to RECORDED samples for quicker load to SD card.
