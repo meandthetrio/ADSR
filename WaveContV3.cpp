@@ -3107,6 +3107,11 @@ static bool IsPlayUiMode(UiMode mode)
 
 static bool IsPerformUiMode(UiMode mode)
 {
+	return (mode == UiMode::Perform);
+}
+
+static bool IsPerformEditUiMode(UiMode mode)
+{
 	return (mode == UiMode::Perform || mode == UiMode::PlayTrack);
 }
 
@@ -7479,7 +7484,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 		}
 	}
 	const bool shift_pressed = shift_held;
-	const bool perform_ui = IsPerformUiMode(ui_mode);
+	const bool perform_ui = IsPerformEditUiMode(ui_mode);
 	if (!perform_ui && ui_mode != UiMode::FxDetail)
 	{
 		fx_window_active = false;
@@ -7933,7 +7938,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			}
 		}
 	}
-	else if (!ui_blocked && IsPerformUiMode(ui_mode))
+	else if (!ui_blocked && IsPerformEditUiMode(ui_mode))
 	{
 		const bool track_mode = (ui_mode == UiMode::PlayTrack);
 		const bool fx_select_active = (perform_index == kPerformFxIndex && fx_window_active);
@@ -8251,6 +8256,14 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				ui_mode = UiMode::Main;
 			}
 		}
+		if (track_mode
+			&& perform_context == PerformContext::Track
+			&& perform_context_track >= 0
+			&& perform_context_track < kPlayTrackCount)
+		{
+			// PLAY always uses track_perform_state[t] for DSP; PlayTrack edits that state directly.
+			CapturePerformState(track_perform_state[perform_context_track]);
+		}
 	}
 	else if (!ui_blocked && ui_mode == UiMode::Edt)
 	{
@@ -8566,6 +8579,13 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				midi_ignore_until_ms = now_ms + 200;
 			}
 			request_perform_redraw = true;
+		}
+		if (perform_context == PerformContext::Track
+			&& perform_context_track >= 0
+			&& perform_context_track < kPlayTrackCount)
+		{
+			// PLAY always uses track_perform_state[t] for DSP; PlayTrack edits that state directly.
+			CapturePerformState(track_perform_state[perform_context_track]);
 		}
 	}
 	else if (!ui_blocked && ui_mode == UiMode::Play)
@@ -9199,20 +9219,33 @@ static float last_chorus_wow = -1.0f;
 		last_delay_time = delay_time_smoothed;
 	}
 	const bool perform_mode = (flags_bits & kFlagInPerformMode) != 0;
+	const bool play_mode = (flags_bits & kFlagInPlayMode) != 0;
 	const bool main_mode = (flags_bits & kFlagInMainMode) != 0;
 	const bool fx_allowed = (flags_bits & kFlagFxAllowed) != 0;
-	const bool amp_env_active = perform_mode;
+	const bool playback_env_active = perform_mode;
+	const bool poly_env_active = perform_mode || play_mode;
 	const float amp_attack_ms = AmpEnvMsFromFader(params.amp_attack);
 	const float amp_release_ms = AmpEnvMsFromFader(params.amp_release);
 	const float amp_attack_samples = amp_attack_ms * 0.001f * out_sr;
 	const float amp_release_samples = amp_release_ms * 0.001f * out_sr;
+	float track_amp_attack_samples[kPlayTrackCount] = {};
+	float track_amp_release_samples[kPlayTrackCount] = {};
+	float track_flt_cutoff_hz[kPlayTrackCount] = {};
+	float track_flt_q[kPlayTrackCount] = {};
+	if (play_mode)
+	{
+		// PLAY DSP always pulls per-track settings from track_perform_state[t], UI mode aside.
+		for (int t = 0; t < kPlayTrackCount; ++t)
+		{
+			const PerformState& ps = track_perform_state[t];
+			track_amp_attack_samples[t] = AmpEnvMsFromFader(ps.amp_attack) * 0.001f * out_sr;
+			track_amp_release_samples[t] = AmpEnvMsFromFader(ps.amp_release) * 0.001f * out_sr;
+			track_flt_cutoff_hz[t] = FltCutoffFromFader(ps.flt_cutoff, out_sr);
+			track_flt_q[t] = FltQFromFader(ps.flt_res);
+		}
+	}
 	const bool play_seq_mode = (flags_bits & kFlagPlaySeqMode) != 0;
 	const bool play_master_fx = (flags_bits & kFlagPlayMasterFx) != 0;
-	const int32_t live_track = (perform_context == PerformContext::Track
-		&& perform_context_track >= 0
-		&& perform_context_track < kPlayTrackCount)
-		? perform_context_track
-		: -1;
 	float track_mod_send[kPlayTrackCount] = {};
 	float track_delay_send[kPlayTrackCount] = {};
 	float track_reverb_send[kPlayTrackCount] = {};
@@ -9220,10 +9253,9 @@ static float last_chorus_wow = -1.0f;
 	{
 		for (int t = 0; t < kPlayTrackCount; ++t)
 		{
-			const bool use_live = (t == live_track);
-			float mod_send = use_live ? params.fx_c_wet : track_perform_state[t].fx_c_wet;
-			float delay_send = use_live ? params.delay_wet : track_perform_state[t].delay_wet;
-			float reverb_send = use_live ? params.reverb_wet : track_perform_state[t].reverb_wet;
+			float mod_send = track_perform_state[t].fx_c_wet;
+			float delay_send = track_perform_state[t].delay_wet;
+			float reverb_send = track_perform_state[t].reverb_wet;
 			if (mod_send < 0.0f) mod_send = 0.0f;
 			if (mod_send > 1.0f) mod_send = 1.0f;
 			if (delay_send < 0.0f) delay_send = 0.0f;
@@ -9238,26 +9270,70 @@ static float last_chorus_wow = -1.0f;
 	const bool use_poly = (record_state != RecordState::Recording)
 		&& ((perform_mode && sample_loaded) || play_seq_mode);
 	const bool sample_stereo = (sample_channels == 2);
-	const float flt_cutoff_hz = FltCutoffFromFader(params.flt_cutoff, out_sr);
-	const float flt_q = FltQFromFader(params.flt_res);
-	static float last_flt_cutoff = -1.0f;
-	static float last_flt_q = -1.0f;
-	if (flt_cutoff_hz != last_flt_cutoff || flt_q != last_flt_q)
+	if (perform_mode)
 	{
+		const float flt_cutoff_hz = FltCutoffFromFader(params.flt_cutoff, out_sr);
+		const float flt_q = FltQFromFader(params.flt_res);
+		static float last_flt_cutoff = -1.0f;
+		static float last_flt_q = -1.0f;
+		if (flt_cutoff_hz != last_flt_cutoff || flt_q != last_flt_q)
+		{
+			for (int v = 0; v < kPerformVoiceCount; ++v)
+			{
+				perform_lpf_l1[v].Set(out_sr, flt_cutoff_hz, flt_q);
+				perform_lpf_l2[v].Set(out_sr, flt_cutoff_hz, flt_q);
+				perform_lpf_r1[v].Set(out_sr, flt_cutoff_hz, flt_q);
+				perform_lpf_r2[v].Set(out_sr, flt_cutoff_hz, flt_q);
+			}
+			last_flt_cutoff = flt_cutoff_hz;
+			last_flt_q = flt_q;
+		}
+	}
+	if (play_mode)
+	{
+		// PLAY always uses per-track filter settings regardless of UI mode.
 		for (int v = 0; v < kPerformVoiceCount; ++v)
 		{
+			const auto& voice = perform_voices[v];
+			if (!voice.active)
+			{
+				continue;
+			}
+			const int32_t track = voice.track;
+			if (track < 0 || track >= kPlayTrackCount)
+			{
+				continue;
+			}
+			const float flt_cutoff_hz = track_flt_cutoff_hz[track];
+			const float flt_q = track_flt_q[track];
 			perform_lpf_l1[v].Set(out_sr, flt_cutoff_hz, flt_q);
 			perform_lpf_l2[v].Set(out_sr, flt_cutoff_hz, flt_q);
 			perform_lpf_r1[v].Set(out_sr, flt_cutoff_hz, flt_q);
 			perform_lpf_r2[v].Set(out_sr, flt_cutoff_hz, flt_q);
 		}
-		last_flt_cutoff = flt_cutoff_hz;
-		last_flt_q = flt_q;
 	}
 	int32_t fx_order[kPerformFaderCount];
 	for (int i = 0; i < kPerformFaderCount; ++i)
 	{
 		fx_order[i] = fx_chain_order[i];
+	}
+	float voice_attack_samples[kPerformVoiceCount] = {};
+	float voice_release_samples[kPerformVoiceCount] = {};
+	for (int v = 0; v < kPerformVoiceCount; ++v)
+	{
+		float attack_samples = amp_attack_samples;
+		float release_samples = amp_release_samples;
+		if (play_mode)
+		{
+			const int32_t track = perform_voices[v].track;
+			if (track >= 0 && track < kPlayTrackCount)
+			{
+				attack_samples = track_amp_attack_samples[track];
+				release_samples = track_amp_release_samples[track];
+			}
+		}
+		voice_attack_samples[v] = attack_samples;
+		voice_release_samples[v] = release_samples;
 	}
 
 	auto apply_saturation = [&](float &l, float &r, int32_t track)
@@ -9685,7 +9761,7 @@ static float last_chorus_wow = -1.0f;
 		if (sample_loaded && playback_active && record_state != RecordState::Recording && window_valid)
 		{
 			float amp_env = 1.0f;
-			if (amp_env_active)
+			if (playback_env_active)
 			{
 				float attack_env = 1.0f;
 				if (amp_attack_samples > 1.0f)
@@ -9740,7 +9816,7 @@ static float last_chorus_wow = -1.0f;
 			{
 				sig_l = static_cast<float>(sample_buffer_l[0]) * kSampleScale * playback_amp;
 				sig_r = static_cast<float>(sample_buffer_r[0]) * kSampleScale * playback_amp;
-				if (amp_env_active)
+				if (playback_env_active)
 				{
 					sig_l *= amp_env;
 					sig_r *= amp_env;
@@ -9759,7 +9835,7 @@ static float last_chorus_wow = -1.0f;
 					const float r1 = static_cast<float>(sample_buffer_r[idx + 1]);
 					sig_l = (l0 + (l1 - l0) * frac) * kSampleScale * playback_amp;
 					sig_r = (r0 + (r1 - r0) * frac) * kSampleScale * playback_amp;
-					if (amp_env_active)
+					if (playback_env_active)
 					{
 						sig_l *= amp_env;
 						sig_r *= amp_env;
@@ -9807,12 +9883,14 @@ static float last_chorus_wow = -1.0f;
 				{
 					continue;
 				}
+				const float attack_samples = voice_attack_samples[v];
+				const float release_samples = voice_release_samples[v];
 				float env = 1.0f;
-				if (amp_env_active)
+				if (poly_env_active)
 				{
-					if (amp_attack_samples > 1.0f)
+					if (attack_samples > 1.0f)
 					{
-						env = static_cast<float>(voice.env_samples) / amp_attack_samples;
+						env = static_cast<float>(voice.env_samples) / attack_samples;
 					}
 				}
 				if (env > 1.0f)
@@ -9822,9 +9900,9 @@ static float last_chorus_wow = -1.0f;
 				if (voice.releasing)
 				{
 					float noteoff_env = voice.release_start;
-					if (amp_release_samples > 1.0f)
+					if (release_samples > 1.0f)
 					{
-						noteoff_env *= (1.0f - (voice.release_pos / amp_release_samples));
+						noteoff_env *= (1.0f - (voice.release_pos / release_samples));
 					}
 					if (noteoff_env < 0.0f)
 					{
@@ -9851,7 +9929,7 @@ static float last_chorus_wow = -1.0f;
 						? static_cast<float>(sample_buffer_r[idx])
 						: static_cast<float>(sample_buffer_l[idx]);
 					samp_r = r * kSampleScale * amp;
-					if (perform_mode)
+					if (perform_mode || play_mode)
 					{
 						samp_l = perform_lpf_l2[v].Process(perform_lpf_l1[v].Process(samp_l));
 						samp_r = perform_lpf_r2[v].Process(perform_lpf_r1[v].Process(samp_r));
@@ -9893,7 +9971,7 @@ static float last_chorus_wow = -1.0f;
 				const float amp = voice.amp * env;
 				float samp_l = (l0 + (l1 - l0) * frac) * kSampleScale * amp;
 				float samp_r = (r0 + (r1 - r0) * frac) * kSampleScale * amp;
-				if (perform_mode)
+				if (perform_mode || play_mode)
 				{
 					samp_l = perform_lpf_l2[v].Process(perform_lpf_l1[v].Process(samp_l));
 					samp_r = perform_lpf_r2[v].Process(perform_lpf_r1[v].Process(samp_r));
@@ -9907,7 +9985,7 @@ static float last_chorus_wow = -1.0f;
 				else
 				{
 					voice.release_pos += 1.0f;
-					if (amp_release_samples > 1.0f && voice.release_pos >= amp_release_samples)
+					if (release_samples > 1.0f && voice.release_pos >= release_samples)
 					{
 						voice.active = false;
 						voice.releasing = false;
@@ -11312,7 +11390,7 @@ int main(void)
 		else
 		{
 				if ((ui_mode == UiMode::Record && record_state == RecordState::Review)
-					|| (IsPerformUiMode(ui_mode) && sample_loaded)
+					|| (IsPerformEditUiMode(ui_mode) && sample_loaded)
 					|| (ui_mode == UiMode::FxDetail && sample_loaded)
 					|| (ui_mode == UiMode::Edt && sample_loaded)
 					|| (ui_mode == UiMode::Load && load_context == LoadContext::Edt)
