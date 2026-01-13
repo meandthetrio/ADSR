@@ -24,19 +24,19 @@ constexpr int32_t kLoadTargetCount = 2;
 constexpr int32_t kRecordTargetCount = 2;
 constexpr int32_t kRecordTargetSave = 0;
 constexpr int32_t kRecordTargetDiscard = 1;
-constexpr int32_t kPerformBoxCount = 4;
-constexpr int32_t kPerformEdtIndex = 0;
-constexpr int32_t kPerformFaderCount = 4;
+constexpr int32_t kEditorBoxCount = 4;
+constexpr int32_t kEditorEdtIndex = 0;
+constexpr int32_t kEditorFaderCount = 4;
 constexpr int32_t kFxSatIndex = 0;
 constexpr int32_t kFxChorusIndex = 1;
 constexpr int32_t kFxDelayIndex = 2;
 constexpr int32_t kFxReverbIndex = 3;
 constexpr int32_t kReverbFaderCount = 5;
 constexpr int32_t kDelayFaderCount = 5;
-constexpr int32_t kPerformFltFaderCount = 2;
-constexpr int32_t kPerformAmpIndex = 1;
-constexpr int32_t kPerformFltIndex = 2;
-constexpr int32_t kPerformFxIndex = 3;
+constexpr int32_t kEditorFltFaderCount = 2;
+constexpr int32_t kEditorAmpIndex = 1;
+constexpr int32_t kEditorFltIndex = 2;
+constexpr int32_t kEditorFxIndex = 3;
 constexpr uint32_t kFxChainIdleMs = 300;
 constexpr float kFxChainFadeMs = 20.0f;
 constexpr uint32_t kSdInitMinMs = 800;
@@ -57,7 +57,7 @@ constexpr float kSampleScale = 1.0f / 32768.0f;
 constexpr int32_t kLoadProgressStep = 5;
 constexpr float kLedBlinkPeriodMs = 25.0f;
 constexpr float kLedBlinkDuty = 0.5f;
-constexpr uint32_t kPerformPlayheadIntervalMs = 33;
+constexpr uint32_t kEditorPlayheadIntervalMs = 33;
 constexpr bool kPlaybackVerboseLog = false;
 constexpr float kPi = 3.14159265f;
 constexpr float kTwoPi = 6.2831853f;
@@ -298,7 +298,7 @@ static const char* kSaveNouns[] =
 	"Lowtide",
 	"Earthsong",
 };
-constexpr int kPerformVoiceCount = 5;
+constexpr int kChannelSlotCount = 5;
 constexpr float kReverbFeedback = 0.85f;
 constexpr float kReverbLpFreq = 12000.0f;
 constexpr float kReverbFeedbackMin = 0.2f;
@@ -852,19 +852,19 @@ TapeSaturator sat_l;
 TapeSaturator sat_r;
 static BitCrushState g_sat_bit_state;
 static BitCrushState g_sat_bit_state_tracks[kPlayTrackCount];
-BiquadLp perform_lpf_l1[kPerformVoiceCount];
-BiquadLp perform_lpf_l2[kPerformVoiceCount];
-BiquadLp perform_lpf_r1[kPerformVoiceCount];
-BiquadLp perform_lpf_r2[kPerformVoiceCount];
+BiquadLp channel_lpf_l1[kChannelSlotCount];
+BiquadLp channel_lpf_l2[kChannelSlotCount];
+BiquadLp channel_lpf_r1[kChannelSlotCount];
+BiquadLp channel_lpf_r2[kChannelSlotCount];
 
 volatile UiMode ui_mode = UiMode::Main;
 volatile int32_t menu_index = 0;
 volatile int32_t shift_menu_index = 0;
-volatile int32_t perform_index = 0;
+volatile int32_t editor_index = 0;
 volatile int32_t amp_fader_index = 0;
 volatile int32_t flt_fader_index = 0;
 volatile int32_t fx_fader_index = 0;
-volatile int32_t fx_chain_order[kPerformFaderCount]
+volatile int32_t fx_chain_order[kEditorFaderCount]
 	= {kFxSatIndex, kFxChorusIndex, kFxDelayIndex, kFxReverbIndex};
 volatile bool fx_window_active = false;
 volatile bool amp_window_active = false;
@@ -945,16 +945,16 @@ struct SampleState
 	bool from_recording = false;
 };
 
-static SampleState perform_sample_state;
+static SampleState main_sample_state;
 static SampleState play_sample_state;
 static SampleContext current_sample_context = SampleContext::Perform;
 
-DSY_SDRAM_BSS int16_t perform_sample_buffer_l[kMaxSampleSamples];
-DSY_SDRAM_BSS int16_t perform_sample_buffer_r[kMaxSampleSamples];
+DSY_SDRAM_BSS int16_t main_sample_buffer_l[kMaxSampleSamples];
+DSY_SDRAM_BSS int16_t main_sample_buffer_r[kMaxSampleSamples];
 DSY_SDRAM_BSS int16_t play_sample_buffer_l[kMaxSampleSamples];
 DSY_SDRAM_BSS int16_t play_sample_buffer_r[kMaxSampleSamples];
-static int16_t* sample_buffer_l = perform_sample_buffer_l;
-static int16_t* sample_buffer_r = perform_sample_buffer_r;
+static int16_t* sample_buffer_l = main_sample_buffer_l;
+static int16_t* sample_buffer_r = main_sample_buffer_r;
 volatile size_t sample_length = 0;
 volatile size_t sample_play_start = 0;
 volatile size_t sample_play_end = 0;
@@ -971,7 +971,7 @@ volatile float playback_release_pos = 0.0f;
 volatile float playback_release_start = 0.0f;
 volatile int32_t current_note = -1;
 
-struct PerformVoice
+struct ChannelSlot
 {
 	bool active = false;
 	bool releasing = false;
@@ -988,11 +988,11 @@ struct PerformVoice
 	uint32_t env_samples = 0;
 };
 
-static PerformVoice perform_voices[kPerformVoiceCount];
+static ChannelSlot channel_slots[kChannelSlotCount];
 
-struct PerformState
+struct ChannelState
 {
-	int32_t perform_index = 0;
+	int32_t editor_index = 0;
 	int32_t fx_fader_index = 0;
 	int32_t amp_fader_index = 0;
 	int32_t flt_fader_index = 0;
@@ -1001,7 +1001,7 @@ struct PerformState
 	bool fx_window_active = false;
 	bool amp_window_active = false;
 	bool flt_window_active = false;
-	int32_t fx_chain_order[kPerformFaderCount] = {};
+	int32_t fx_chain_order[kEditorFaderCount] = {};
 	float amp_attack = 0.0f;
 	float amp_decay = 0.0f;
 	float amp_sustain = 0.0f;
@@ -1034,7 +1034,8 @@ struct PerformState
 	bool mod_params_initialized = false;
 };
 
-using PlayTrackState = PerformState;
+using PlayTrackState = ChannelState;
+// Dev check: run `git grep -n "perform" WaveContV3.cpp` and confirm remaining hits are PERFORM-only.
 
 struct TrackSampleState
 {
@@ -1057,8 +1058,8 @@ enum class LoadContext : int32_t
 	Edt,
 };
 
-static PerformState main_perform_state;
-static PerformState play_state;
+static ChannelState default_channel_state;
+static ChannelState play_state;
 static PlayTrackState play_track_state[kPlayTrackCount];
 static PlayEditContext play_edit_context = PlayEditContext::Main;
 static int32_t play_edit_track = 0;
@@ -1100,11 +1101,11 @@ struct WaveformCache
 	bool dirty = false;
 };
 
-static WaveformCache perform_waveform_cache;
+static WaveformCache main_waveform_cache;
 static WaveformCache play_waveform_cache;
 static bool waveform_from_recording = false;
-static volatile float perform_attack_norm = 0.0f;
-static volatile float perform_release_norm = 0.0f;
+static volatile float editor_attack_norm = 0.0f;
+static volatile float editor_release_norm = 0.0f;
 static const char* waveform_title = nullptr;
 static int16_t live_wave_min[128];
 static int16_t live_wave_max[128];
@@ -1339,7 +1340,7 @@ static SmoothParam sm_reverb_shimmer;
 enum AudioFlagBits : uint32_t
 {
 	kFlagInPlayMode     = 1u << 0,
-	kFlagInPerformMode  = 1u << 1,
+	kFlagInEditorMode  = 1u << 1,
 	kFlagMonitorEnabled = 1u << 2,
 	kFlagInMainMode     = 1u << 3,
 	kFlagFxAllowed      = 1u << 4,
@@ -1446,7 +1447,7 @@ static uint8_t record_invert_mask[kDisplayH][kDisplayW];
 static uint8_t record_fb_buf[kDisplayH][kDisplayW];
 static uint8_t record_bold_mask[kDisplayH][kDisplayW];
 static bool request_shift_redraw = false;
-static bool request_perform_redraw = false;
+static bool request_editor_redraw = false;
 static bool request_fx_detail_redraw = false;
 static uint32_t delay_snow_next_ms = 0;
 static uint32_t midi_ignore_until_ms = 0;
@@ -3112,11 +3113,11 @@ static bool IsFxEditUiMode(UiMode mode)
 	return (mode == UiMode::Perform || mode == UiMode::PlayTrack);
 }
 
-static bool AnyPerformVoiceActive()
+static bool AnyChannelSlotActive()
 {
-	for (int v = 0; v < kPerformVoiceCount; ++v)
+	for (int v = 0; v < kChannelSlotCount; ++v)
 	{
-		if (perform_voices[v].active)
+		if (channel_slots[v].active)
 		{
 			return true;
 		}
@@ -3126,12 +3127,12 @@ static bool AnyPerformVoiceActive()
 
 static SampleState& SampleStateForContext(SampleContext ctx)
 {
-	return (ctx == SampleContext::Perform) ? perform_sample_state : play_sample_state;
+	return (ctx == SampleContext::Perform) ? main_sample_state : play_sample_state;
 }
 
 static WaveformCache& WaveformCacheForContext(SampleContext ctx)
 {
-	return (ctx == SampleContext::Perform) ? perform_waveform_cache : play_waveform_cache;
+	return (ctx == SampleContext::Perform) ? main_waveform_cache : play_waveform_cache;
 }
 
 static void SaveWaveformCache(SampleContext ctx)
@@ -3191,8 +3192,8 @@ static void SetSampleContext(SampleContext ctx)
 	current_sample_context = ctx;
 	if (ctx == SampleContext::Perform)
 	{
-		sample_buffer_l = perform_sample_buffer_l;
-		sample_buffer_r = perform_sample_buffer_r;
+		sample_buffer_l = main_sample_buffer_l;
+		sample_buffer_r = main_sample_buffer_r;
 	}
 	else
 	{
@@ -3348,9 +3349,9 @@ static void StartSequencerVoiceWindow(size_t window_start, size_t window_end, in
 	}
 
 	int voice_index = -1;
-	for (int i = 0; i < kPerformVoiceCount; ++i)
+	for (int i = 0; i < kChannelSlotCount; ++i)
 	{
-		if (!perform_voices[i].active)
+		if (!channel_slots[i].active)
 		{
 			voice_index = i;
 			break;
@@ -3361,7 +3362,7 @@ static void StartSequencerVoiceWindow(size_t window_start, size_t window_end, in
 		voice_index = 0;
 	}
 
-	PerformVoice& voice = perform_voices[voice_index];
+	ChannelSlot& voice = channel_slots[voice_index];
 	voice.active = true;
 	voice.releasing = false;
 	voice.note = -1;
@@ -3372,10 +3373,10 @@ static void StartSequencerVoiceWindow(size_t window_start, size_t window_end, in
 	voice.release_start = 0.0f;
 	voice.release_pos = 0.0f;
 	voice.env_samples = 0;
-	perform_lpf_l1[voice_index].Reset();
-	perform_lpf_l2[voice_index].Reset();
-	perform_lpf_r1[voice_index].Reset();
-	perform_lpf_r2[voice_index].Reset();
+	channel_lpf_l1[voice_index].Reset();
+	channel_lpf_l2[voice_index].Reset();
+	channel_lpf_r1[voice_index].Reset();
+	channel_lpf_r2[voice_index].Reset();
 
 	const float sr = (sample_rate == 0) ? 48000.0f : static_cast<float>(sample_rate);
 	voice.rate = sr / hw.AudioSampleRate();
@@ -3413,9 +3414,9 @@ static void TriggerSequencerStep(int32_t step)
 	}
 }
 
-static void CapturePerformState(PerformState& state)
+static void CaptureChannelState(ChannelState& state)
 {
-	state.perform_index = perform_index;
+	state.editor_index = editor_index;
 	state.fx_fader_index = fx_fader_index;
 	state.amp_fader_index = amp_fader_index;
 	state.flt_fader_index = flt_fader_index;
@@ -3424,7 +3425,7 @@ static void CapturePerformState(PerformState& state)
 	state.fx_window_active = fx_window_active;
 	state.amp_window_active = amp_window_active;
 	state.flt_window_active = flt_window_active;
-	for (int i = 0; i < kPerformFaderCount; ++i)
+	for (int i = 0; i < kEditorFaderCount; ++i)
 	{
 		state.fx_chain_order[i] = fx_chain_order[i];
 	}
@@ -3460,9 +3461,9 @@ static void CapturePerformState(PerformState& state)
 	state.mod_params_initialized = mod_params_initialized;
 }
 
-static void ApplyPerformState(const PerformState& state)
+static void ApplyChannelState(const ChannelState& state)
 {
-	perform_index = state.perform_index;
+	editor_index = state.editor_index;
 	fx_fader_index = state.fx_fader_index;
 	amp_fader_index = state.amp_fader_index;
 	flt_fader_index = state.flt_fader_index;
@@ -3471,7 +3472,7 @@ static void ApplyPerformState(const PerformState& state)
 	fx_window_active = state.fx_window_active;
 	amp_window_active = state.amp_window_active;
 	flt_window_active = state.flt_window_active;
-	for (int i = 0; i < kPerformFaderCount; ++i)
+	for (int i = 0; i < kEditorFaderCount; ++i)
 	{
 		fx_chain_order[i] = state.fx_chain_order[i];
 	}
@@ -3522,15 +3523,15 @@ static void SaveFxContext()
 	switch (fx_context)
 	{
 		case FxContext::Perform:
-			CapturePerformState(main_perform_state);
+			CaptureChannelState(default_channel_state);
 			break;
 		case FxContext::Play:
-			CapturePerformState(play_state);
+			CaptureChannelState(play_state);
 			break;
 		case FxContext::PlayTrack:
 			if (play_edit_track >= 0 && play_edit_track < kPlayTrackCount)
 			{
-				CapturePerformState(play_track_state[play_edit_track]);
+				CaptureChannelState(play_track_state[play_edit_track]);
 			}
 			break;
 		default:
@@ -3552,12 +3553,12 @@ static void SetFxContext(FxContext ctx, int32_t track = 0)
 	if (ctx == FxContext::Perform)
 	{
 		play_edit_context = PlayEditContext::Main;
-		ApplyPerformState(main_perform_state);
+		ApplyChannelState(default_channel_state);
 	}
 	else if (ctx == FxContext::Play)
 	{
 		play_edit_context = PlayEditContext::Main;
-		ApplyPerformState(play_state);
+		ApplyChannelState(play_state);
 	}
 	else
 	{
@@ -3567,7 +3568,7 @@ static void SetFxContext(FxContext ctx, int32_t track = 0)
 		}
 		play_edit_context = PlayEditContext::PlayTrack;
 		play_edit_track = track;
-		ApplyPerformState(play_track_state[track]);
+		ApplyChannelState(play_track_state[track]);
 	}
 }
 
@@ -3585,11 +3586,11 @@ static void StoreTrackSampleState(int32_t track)
 
 static void InitTrackStates()
 {
-	CapturePerformState(main_perform_state);
-	play_state = main_perform_state;
+	CaptureChannelState(default_channel_state);
+	play_state = default_channel_state;
 	for (int t = 0; t < kPlayTrackCount; ++t)
 	{
-		play_track_state[t] = main_perform_state;
+		play_track_state[t] = default_channel_state;
 		track_samples[t].loaded = false;
 		track_samples[t].name[0] = '\0';
 		track_samples[t].trim_start = 0.0f;
@@ -3608,14 +3609,14 @@ static void EnterPlayTrack(int32_t track)
 	request_track_sample_load = true;
 	request_track_sample_index = track;
 	ui_mode = UiMode::PlayTrack;
-	request_perform_redraw = true;
+	request_editor_redraw = true;
 }
 
 static void ExitPlayTrack()
 {
 	if (play_edit_context == PlayEditContext::PlayTrack)
 	{
-		CapturePerformState(play_track_state[play_edit_track]);
+		CaptureChannelState(play_track_state[play_edit_track]);
 		StoreTrackSampleState(play_edit_track);
 	}
 	SetFxContext(FxContext::Play);
@@ -3624,9 +3625,9 @@ static void ExitPlayTrack()
 	request_playhead_redraw = true;
 }
 
-static void ResetPerformVoices()
+static void ResetChannelSlots()
 {
-	for (auto &voice : perform_voices)
+	for (auto &voice : channel_slots)
 	{
 		voice.active = false;
 		voice.releasing = false;
@@ -3641,12 +3642,12 @@ static void ResetPerformVoices()
 		voice.length = 0;
 		voice.env_samples = 0;
 	}
-	for (int i = 0; i < kPerformVoiceCount; ++i)
+	for (int i = 0; i < kChannelSlotCount; ++i)
 	{
-		perform_lpf_l1[i].Reset();
-		perform_lpf_l2[i].Reset();
-		perform_lpf_r1[i].Reset();
-		perform_lpf_r2[i].Reset();
+		channel_lpf_l1[i].Reset();
+		channel_lpf_l2[i].Reset();
+		channel_lpf_r1[i].Reset();
+		channel_lpf_r2[i].Reset();
 	}
 }
 
@@ -3694,9 +3695,9 @@ static bool LoadSampleFromPath(const char* path)
 	playback_active = false;
 	playback_phase = 0.0f;
 	sample_loaded = false;
-	perform_attack_norm = 0.0f;
-	perform_release_norm = 0.0f;
-	ResetPerformVoices();
+	editor_attack_norm = 0.0f;
+	editor_release_norm = 0.0f;
+	ResetChannelSlots();
 	sample_length = 0;
 	sample_channels = 1;
 	trim_start = 0.0f;
@@ -4415,7 +4416,7 @@ static volatile float* FxWetTarget(int32_t fx_index)
 	}
 }
 
-static void DrawPerformScreen(int32_t selected,
+static void DrawEditorScreen(int32_t selected,
 							  bool fx_select_active,
 							  int32_t fx_selected,
 							  bool amp_select_active,
@@ -4631,9 +4632,9 @@ static void DrawPerformScreen(int32_t selected,
 			}
 			else
 			{
-				for (int v = 0; v < kPerformVoiceCount; ++v)
+				for (int v = 0; v < kChannelSlotCount; ++v)
 				{
-					const auto& voice = perform_voices[v];
+					const auto& voice = channel_slots[v];
 					if (voice.active && voice.length > 0)
 					{
 						const float pos = static_cast<float>(voice.offset) + voice.phase;
@@ -4678,7 +4679,7 @@ static void DrawPerformScreen(int32_t selected,
 		}
 	};
 
-	for (int i = 0; i < kPerformBoxCount; ++i)
+	for (int i = 0; i < kEditorBoxCount; ++i)
 	{
 		const auto& box = boxes[i];
 		const bool is_selected = (i == selected);
@@ -4696,49 +4697,49 @@ static void DrawPerformScreen(int32_t selected,
 								   box.y + kLabelPadY,
 								   kBoxH - (kLabelPadY * 2),
 								   !is_selected);
-		if (i == kPerformEdtIndex)
+		if (i == kEditorEdtIndex)
 		{
 			draw_waveform_preview(box, is_selected);
 		}
-		if (i == kPerformAmpIndex)
+		if (i == kEditorAmpIndex)
 		{
-			const char* labels[kPerformFaderCount] = {"A", "D", "S", "R"};
-			const float values[kPerformFaderCount] = {amp_attack, amp_decay, amp_sustain, amp_release};
+			const char* labels[kEditorFaderCount] = {"A", "D", "S", "R"};
+			const float values[kEditorFaderCount] = {amp_attack, amp_decay, amp_sustain, amp_release};
 			draw_faders(box,
 						is_selected,
 						labels,
 						values,
-						kPerformFaderCount,
+						kEditorFaderCount,
 						amp_select_active,
 						amp_selected,
 						false);
 		}
-		if (i == kPerformFltIndex)
+		if (i == kEditorFltIndex)
 		{
-			const char* labels[kPerformFltFaderCount] = {"C", "R"};
-			const float values[kPerformFltFaderCount] = {flt_cutoff, flt_res};
+			const char* labels[kEditorFltFaderCount] = {"C", "R"};
+			const float values[kEditorFltFaderCount] = {flt_cutoff, flt_res};
 			draw_faders(box,
 						is_selected,
 						labels,
 						values,
-						kPerformFltFaderCount,
+						kEditorFltFaderCount,
 						flt_select_active,
 						flt_selected,
 						true);
 		}
-		if (i == kPerformFxIndex)
+		if (i == kEditorFxIndex)
 		{
-			int32_t order[kPerformFaderCount];
-			for (int f = 0; f < kPerformFaderCount; ++f)
+			int32_t order[kEditorFaderCount];
+			for (int f = 0; f < kEditorFaderCount; ++f)
 			{
 				order[f] = fx_chain_order[f];
 			}
-			const char* labels[kPerformFaderCount] =
+			const char* labels[kEditorFaderCount] =
 				{FxShortLabel(order[0]),
 				 FxShortLabel(order[1]),
 				 FxShortLabel(order[2]),
 				 FxShortLabel(order[3])};
-			const float values[kPerformFaderCount] =
+			const float values[kEditorFaderCount] =
 				{FxWetValue(order[0]),
 				 FxWetValue(order[1]),
 				 FxWetValue(order[2]),
@@ -4747,7 +4748,7 @@ static void DrawPerformScreen(int32_t selected,
 						is_selected,
 						labels,
 						values,
-						kPerformFaderCount,
+						kEditorFaderCount,
 						fx_select_active,
 						fx_selected,
 						false);
@@ -5420,9 +5421,9 @@ static void StartRecordingAudioSafe()
 	record_pos = 0;
 	sample_length = 0;
 	sample_loaded = false;
-	perform_attack_norm = 0.0f;
-	perform_release_norm = 0.0f;
-	ResetPerformVoices();
+	editor_attack_norm = 0.0f;
+	editor_release_norm = 0.0f;
+	ResetChannelSlots();
 	playback_active = false;
 	sample_channels = 1;
 	sample_rate = 48000;
@@ -6531,8 +6532,8 @@ static void DrawVerticalFadersInRect(int x,
 
 static void DrawFxDetailScreen(int32_t index)
 {
-	const char* labels[kPerformFaderCount] = {"SATURATION", "MODULATION", "DELAY", "REVERB"};
-	if (index < 0 || index >= kPerformFaderCount)
+	const char* labels[kEditorFaderCount] = {"SATURATION", "MODULATION", "DELAY", "REVERB"};
+	if (index < 0 || index >= kEditorFaderCount)
 	{
 		index = 0;
 	}
@@ -7186,7 +7187,7 @@ static void StopPlayback(uint8_t note)
 	}
 }
 
-static void StartPerformVoice(int32_t note)
+static void StartChannelSlot(int32_t note)
 {
 	size_t window_start = 0;
 	size_t window_end = 0;
@@ -7211,9 +7212,9 @@ static void StartPerformVoice(int32_t note)
 	}
 
 	int voice_index = -1;
-	for (int i = 0; i < kPerformVoiceCount; ++i)
+	for (int i = 0; i < kChannelSlotCount; ++i)
 	{
-		if (perform_voices[i].active && perform_voices[i].note == note)
+		if (channel_slots[i].active && channel_slots[i].note == note)
 		{
 			voice_index = i;
 			break;
@@ -7221,9 +7222,9 @@ static void StartPerformVoice(int32_t note)
 	}
 	if (voice_index < 0)
 	{
-		for (int i = 0; i < kPerformVoiceCount; ++i)
+		for (int i = 0; i < kChannelSlotCount; ++i)
 		{
-			if (!perform_voices[i].active)
+			if (!channel_slots[i].active)
 			{
 				voice_index = i;
 				break;
@@ -7235,7 +7236,7 @@ static void StartPerformVoice(int32_t note)
 		voice_index = 0;
 	}
 
-	PerformVoice& voice = perform_voices[voice_index];
+	ChannelSlot& voice = channel_slots[voice_index];
 	voice.active = true;
 	voice.releasing = false;
 	voice.note = note;
@@ -7246,10 +7247,10 @@ static void StartPerformVoice(int32_t note)
 	voice.release_start = 0.0f;
 	voice.release_pos = 0.0f;
 	voice.env_samples = 0;
-	perform_lpf_l1[voice_index].Reset();
-	perform_lpf_l2[voice_index].Reset();
-	perform_lpf_r1[voice_index].Reset();
-	perform_lpf_r2[voice_index].Reset();
+	channel_lpf_l1[voice_index].Reset();
+	channel_lpf_l2[voice_index].Reset();
+	channel_lpf_r1[voice_index].Reset();
+	channel_lpf_r2[voice_index].Reset();
 	const float sr = (sample_rate == 0) ? 48000.0f : static_cast<float>(sample_rate);
 	const float semis = static_cast<float>(note - kBaseMidiNote);
 	const float pitch = powf(2.0f, semis / 12.0f);
@@ -7258,9 +7259,9 @@ static void StartPerformVoice(int32_t note)
 	voice.length = window_end - window_start;
 }
 
-static void StopPerformVoice(int32_t note)
+static void StopChannelSlot(int32_t note)
 {
-	for (auto &voice : perform_voices)
+	for (auto &voice : channel_slots)
 	{
 		if (voice.active && voice.note == note)
 		{
@@ -7302,18 +7303,18 @@ static void __attribute__((unused)) HandleMidiMessage(MidiEvent msg)
 				}
 				if (note.velocity == 0)
 				{
-					StopPerformVoice(note.note);
+					StopChannelSlot(note.note);
 				}
 				else
 				{
-					StartPerformVoice(note.note);
+					StartChannelSlot(note.note);
 				}
 			}
 			break;
 			case NoteOff:
 			{
 				const NoteOffEvent note = msg.AsNoteOff();
-				StopPerformVoice(note.note);
+				StopChannelSlot(note.note);
 			}
 			break;
 			default:
@@ -7938,9 +7939,9 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 	else if (!ui_blocked && IsFxEditUiMode(ui_mode))
 	{
 		const bool track_mode = (ui_mode == UiMode::PlayTrack);
-		const bool fx_select_active = (perform_index == kPerformFxIndex && fx_window_active);
-		const bool amp_select_active = (perform_index == kPerformAmpIndex && amp_window_active);
-		const bool flt_select_active = (perform_index == kPerformFltIndex && flt_window_active);
+		const bool fx_select_active = (editor_index == kEditorFxIndex && fx_window_active);
+		const bool amp_select_active = (editor_index == kEditorAmpIndex && amp_window_active);
+		const bool flt_select_active = (editor_index == kEditorFltIndex && flt_window_active);
 		const bool fx_reorder_active = fx_select_active && shift_pressed;
 		const bool has_sample = (sample_loaded && sample_length > 0);
 		if (encoder_l_inc != 0)
@@ -7950,16 +7951,16 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				int32_t next = fx_fader_index + encoder_l_inc;
 				while (next < 0)
 				{
-					next += kPerformFaderCount;
+					next += kEditorFaderCount;
 				}
-				while (next >= kPerformFaderCount)
+				while (next >= kEditorFaderCount)
 				{
-					next -= kPerformFaderCount;
+					next -= kEditorFaderCount;
 				}
 				if (next != fx_fader_index)
 				{
 					fx_fader_index = next;
-					request_perform_redraw = true;
+					request_editor_redraw = true;
 				}
 			}
 			else if (amp_select_active)
@@ -7967,16 +7968,16 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				int32_t next = amp_fader_index + encoder_l_inc;
 				while (next < 0)
 				{
-					next += kPerformFaderCount;
+					next += kEditorFaderCount;
 				}
-				while (next >= kPerformFaderCount)
+				while (next >= kEditorFaderCount)
 				{
-					next -= kPerformFaderCount;
+					next -= kEditorFaderCount;
 				}
 				if (next != amp_fader_index)
 				{
 					amp_fader_index = next;
-					request_perform_redraw = true;
+					request_editor_redraw = true;
 				}
 			}
 			else if (flt_select_active)
@@ -7984,42 +7985,42 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				int32_t next = flt_fader_index + encoder_l_inc;
 				while (next < 0)
 				{
-					next += kPerformFltFaderCount;
+					next += kEditorFltFaderCount;
 				}
-				while (next >= kPerformFltFaderCount)
+				while (next >= kEditorFltFaderCount)
 				{
-					next -= kPerformFltFaderCount;
+					next -= kEditorFltFaderCount;
 				}
 				if (next != flt_fader_index)
 				{
 					flt_fader_index = next;
-					request_perform_redraw = true;
+					request_editor_redraw = true;
 				}
 			}
 			else
 			{
-				int32_t next = perform_index + encoder_l_inc;
+				int32_t next = editor_index + encoder_l_inc;
 				while (next < 0)
 				{
-					next += kPerformBoxCount;
+					next += kEditorBoxCount;
 				}
-				while (next >= kPerformBoxCount)
+				while (next >= kEditorBoxCount)
 				{
-					next -= kPerformBoxCount;
+					next -= kEditorBoxCount;
 				}
-				perform_index = next;
+				editor_index = next;
 			}
 		}
 		if (encoder_r_pressed)
 		{
-			if (perform_index == kPerformFxIndex)
+			if (editor_index == kEditorFxIndex)
 			{
 				if (!fx_window_active)
 				{
 					fx_window_active = true;
 					amp_window_active = false;
 					flt_window_active = false;
-					request_perform_redraw = true;
+					request_editor_redraw = true;
 				}
 				else
 				{
@@ -8080,28 +8081,28 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					request_fx_detail_redraw = true;
 				}
 			}
-			else if (perform_index == kPerformAmpIndex)
+			else if (editor_index == kEditorAmpIndex)
 			{
 				if (!amp_window_active)
 				{
 					amp_window_active = true;
 					fx_window_active = false;
 					flt_window_active = false;
-					request_perform_redraw = true;
+					request_editor_redraw = true;
 				}
 			}
-			else if (perform_index == kPerformFltIndex)
+			else if (editor_index == kEditorFltIndex)
 			{
 				if (!flt_window_active)
 				{
 					flt_window_active = true;
 					fx_window_active = false;
 					amp_window_active = false;
-					request_perform_redraw = true;
+					request_editor_redraw = true;
 				}
 			}
 			else if (!fx_select_active && !amp_select_active && !flt_select_active
-				&& perform_index == kPerformEdtIndex)
+				&& editor_index == kEditorEdtIndex)
 			{
 				if (!has_sample && track_mode)
 				{
@@ -8146,9 +8147,9 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				int32_t to = from + dir;
 				if (to < 0)
 				{
-					to = kPerformFaderCount - 1;
+					to = kEditorFaderCount - 1;
 				}
-				else if (to >= kPerformFaderCount)
+				else if (to >= kEditorFaderCount)
 				{
 					to = 0;
 				}
@@ -8157,7 +8158,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				fx_chain_order[to] = temp;
 				fx_fader_index = to;
 			}
-			request_perform_redraw = true;
+			request_editor_redraw = true;
 			fx_chain_last_move_ms = now_ms;
 			if (!fx_chain_paused)
 			{
@@ -8186,14 +8187,14 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			if (next != current)
 			{
 				*target = next;
-				request_perform_redraw = true;
+				request_editor_redraw = true;
 				fx_params_dirty = true;
 			}
 		}
 		else if (amp_select_active && encoder_r_inc != 0)
 		{
 			const float step = kAmpEnvStep;
-			volatile float* targets[kPerformFaderCount]
+			volatile float* targets[kEditorFaderCount]
 				= {&amp_attack, &amp_decay, &amp_sustain, &amp_release};
 			const int idx = amp_fader_index;
 			volatile float* target = targets[idx];
@@ -8210,13 +8211,13 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			if (next != current)
 			{
 				*target = next;
-				request_perform_redraw = true;
+				request_editor_redraw = true;
 			}
 		}
 		else if (flt_select_active && encoder_r_inc != 0)
 		{
 			const float step = kFltParamStep;
-			volatile float* targets[kPerformFltFaderCount] = {&flt_cutoff, &flt_res};
+			volatile float* targets[kEditorFltFaderCount] = {&flt_cutoff, &flt_res};
 			const int idx = flt_fader_index;
 			volatile float* target = targets[idx];
 			const float current = *target;
@@ -8232,7 +8233,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			if (next != current)
 			{
 				*target = next;
-				request_perform_redraw = true;
+				request_editor_redraw = true;
 			}
 		}
 		if (encoder_l_pressed)
@@ -8242,7 +8243,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				fx_window_active = false;
 				amp_window_active = false;
 				flt_window_active = false;
-				request_perform_redraw = true;
+				request_editor_redraw = true;
 			}
 			else if (track_mode)
 			{
@@ -8292,7 +8293,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			{
 				midi_ignore_until_ms = now_ms + 200;
 			}
-			request_perform_redraw = true;
+			request_editor_redraw = true;
 		}
 	}
 	else if (!ui_blocked && ui_mode == UiMode::FxDetail)
@@ -8567,7 +8568,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			{
 				midi_ignore_until_ms = now_ms + 200;
 			}
-			request_perform_redraw = true;
+			request_editor_redraw = true;
 		}
 	}
 	else if (!ui_blocked && ui_mode == UiMode::Play)
@@ -8781,7 +8782,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	}
 	if (cmd & kCmdAllNotesOff)
 	{
-		ResetPerformVoices();
+		ResetChannelSlots();
 	}
 
 	uint32_t flags_bits = 0;
@@ -8812,16 +8813,16 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		{
 			continue;
 		}
-		const bool in_perform = (flags_bits & kFlagInPerformMode) != 0;
-		if (in_perform)
+		const bool in_fx_edit = (flags_bits & kFlagInEditorMode) != 0;
+		if (in_fx_edit)
 		{
 			if (c.kind == kMidiCmdNoteOn)
 			{
-				StartPerformVoice((int32_t)c.note);
+				StartChannelSlot((int32_t)c.note);
 			}
 			else
 			{
-				StopPerformVoice((int32_t)c.note);
+				StopChannelSlot((int32_t)c.note);
 			}
 		}
 		else
@@ -9200,10 +9201,10 @@ static float last_chorus_wow = -1.0f;
 		delay_line_r.SetDelay(delay_time_smoothed);
 		last_delay_time = delay_time_smoothed;
 	}
-	const bool perform_mode = (flags_bits & kFlagInPerformMode) != 0;
+	const bool fx_edit_mode = (flags_bits & kFlagInEditorMode) != 0;
 	const bool main_mode = (flags_bits & kFlagInMainMode) != 0;
 	const bool fx_allowed = (flags_bits & kFlagFxAllowed) != 0;
-	const bool amp_env_active = perform_mode;
+	const bool amp_env_active = fx_edit_mode;
 	const float amp_attack_ms = AmpEnvMsFromFader(params.amp_attack);
 	const float amp_release_ms = AmpEnvMsFromFader(params.amp_release);
 	const float amp_attack_samples = amp_attack_ms * 0.001f * out_sr;
@@ -9238,7 +9239,7 @@ static float last_chorus_wow = -1.0f;
 		}
 	}
 	const bool use_poly = (record_state != RecordState::Recording)
-		&& ((perform_mode && sample_loaded) || play_seq_mode);
+		&& ((fx_edit_mode && sample_loaded) || play_seq_mode);
 	const bool sample_stereo = (sample_channels == 2);
 	const float flt_cutoff_hz = FltCutoffFromFader(params.flt_cutoff, out_sr);
 	const float flt_q = FltQFromFader(params.flt_res);
@@ -9246,18 +9247,18 @@ static float last_chorus_wow = -1.0f;
 	static float last_flt_q = -1.0f;
 	if (flt_cutoff_hz != last_flt_cutoff || flt_q != last_flt_q)
 	{
-		for (int v = 0; v < kPerformVoiceCount; ++v)
+		for (int v = 0; v < kChannelSlotCount; ++v)
 		{
-			perform_lpf_l1[v].Set(out_sr, flt_cutoff_hz, flt_q);
-			perform_lpf_l2[v].Set(out_sr, flt_cutoff_hz, flt_q);
-			perform_lpf_r1[v].Set(out_sr, flt_cutoff_hz, flt_q);
-			perform_lpf_r2[v].Set(out_sr, flt_cutoff_hz, flt_q);
+			channel_lpf_l1[v].Set(out_sr, flt_cutoff_hz, flt_q);
+			channel_lpf_l2[v].Set(out_sr, flt_cutoff_hz, flt_q);
+			channel_lpf_r1[v].Set(out_sr, flt_cutoff_hz, flt_q);
+			channel_lpf_r2[v].Set(out_sr, flt_cutoff_hz, flt_q);
 		}
 		last_flt_cutoff = flt_cutoff_hz;
 		last_flt_q = flt_q;
 	}
-	int32_t fx_order[kPerformFaderCount];
-	for (int i = 0; i < kPerformFaderCount; ++i)
+	int32_t fx_order[kEditorFaderCount];
+	for (int i = 0; i < kEditorFaderCount; ++i)
 	{
 		fx_order[i] = fx_chain_order[i];
 	}
@@ -9802,9 +9803,9 @@ static float last_chorus_wow = -1.0f;
 		}
 		if (use_poly)
 		{
-			for (int v = 0; v < kPerformVoiceCount; ++v)
+			for (int v = 0; v < kChannelSlotCount; ++v)
 			{
-				auto &voice = perform_voices[v];
+				auto &voice = channel_slots[v];
 				if (!voice.active || voice.length == 0)
 				{
 					continue;
@@ -9853,10 +9854,10 @@ static float last_chorus_wow = -1.0f;
 						? static_cast<float>(sample_buffer_r[idx])
 						: static_cast<float>(sample_buffer_l[idx]);
 					samp_r = r * kSampleScale * amp;
-					if (perform_mode)
+					if (fx_edit_mode)
 					{
-						samp_l = perform_lpf_l2[v].Process(perform_lpf_l1[v].Process(samp_l));
-						samp_r = perform_lpf_r2[v].Process(perform_lpf_r1[v].Process(samp_r));
+						samp_l = channel_lpf_l2[v].Process(channel_lpf_l1[v].Process(samp_l));
+						samp_r = channel_lpf_r2[v].Process(channel_lpf_r1[v].Process(samp_r));
 					}
 					add_voice(samp_l, samp_r, voice.track);
 					voice.active = false;
@@ -9895,10 +9896,10 @@ static float last_chorus_wow = -1.0f;
 				const float amp = voice.amp * env;
 				float samp_l = (l0 + (l1 - l0) * frac) * kSampleScale * amp;
 				float samp_r = (r0 + (r1 - r0) * frac) * kSampleScale * amp;
-				if (perform_mode)
+				if (fx_edit_mode)
 				{
-					samp_l = perform_lpf_l2[v].Process(perform_lpf_l1[v].Process(samp_l));
-					samp_r = perform_lpf_r2[v].Process(perform_lpf_r1[v].Process(samp_r));
+					samp_l = channel_lpf_l2[v].Process(channel_lpf_l1[v].Process(samp_l));
+					samp_r = channel_lpf_r2[v].Process(channel_lpf_r1[v].Process(samp_r));
 				}
 				add_voice(samp_l, samp_r, voice.track);
 				voice.phase += voice.rate;
@@ -10060,7 +10061,7 @@ static float last_chorus_wow = -1.0f;
 		}
 		else
 		{
-			for (int stage = 0; stage < kPerformFaderCount; ++stage)
+			for (int stage = 0; stage < kEditorFaderCount; ++stage)
 			{
 				switch (fx_order[stage])
 				{
@@ -10217,7 +10218,7 @@ int main(void)
 		const bool in_play_mode = IsPlayUiMode(ui_mode);
 		const bool in_fx_edit_mode = IsFxEditUiMode(ui_mode);
 		if (in_play_mode) bits |= kFlagInPlayMode;
-		if (in_fx_edit_mode) bits |= kFlagInPerformMode;
+		if (in_fx_edit_mode) bits |= kFlagInEditorMode;
 		if (ui_mode == UiMode::Main) bits |= kFlagInMainMode;
 		if (in_fx_edit_mode || in_play_mode || (ui_mode == UiMode::FxDetail))
 		{
@@ -10246,7 +10247,7 @@ int main(void)
 	UiMode last_mode = UiMode::Main;
 	int32_t last_menu = -1;
 	int32_t last_shift_menu = -1;
-	int32_t last_perform_index = -1;
+	int32_t last_editor_index = -1;
 	int32_t last_fx_detail_index = -1;
 	int32_t last_fx_detail_param_index = -1;
 	int32_t last_scroll = -1;
@@ -10257,8 +10258,8 @@ int main(void)
 	bool last_playback_active = false;
 	uint8_t last_cpu_pct = 0;
 	int32_t last_playhead_step = -1;
-	uint32_t last_perform_playhead_ms = 0;
-	bool last_perform_playhead_active = false;
+	uint32_t last_editor_playhead_ms = 0;
+	bool last_editor_playhead_active = false;
 	uint32_t last_edt_playhead_ms = 0;
 	bool last_edt_playhead_active = false;
 	LoadDestination last_load_target = LoadDestination::Play;
@@ -10362,7 +10363,7 @@ int main(void)
 			const bool in_play_mode = IsPlayUiMode(ui_mode);
 			const bool in_fx_edit_mode = IsFxEditUiMode(ui_mode);
 			if (in_play_mode) bits |= kFlagInPlayMode;
-			if (in_fx_edit_mode) bits |= kFlagInPerformMode;
+			if (in_fx_edit_mode) bits |= kFlagInEditorMode;
 			if (ui_mode == UiMode::Main) bits |= kFlagInMainMode;
 			if (in_fx_edit_mode || in_play_mode || (ui_mode == UiMode::FxDetail))
 			{
@@ -10476,7 +10477,7 @@ int main(void)
 				}
 				if (IsFxEditUiMode(ui_mode))
 				{
-					StartPerformVoice(kBaseMidiNote);
+					StartChannelSlot(kBaseMidiNote);
 				}
 				else
 				{
@@ -10573,7 +10574,7 @@ int main(void)
 						}
 						LogLine("Load success, entering TRACK menu");
 						ui_mode = UiMode::PlayTrack;
-						request_perform_redraw = true;
+						request_editor_redraw = true;
 					}
 					else if (load_context == LoadContext::Edt)
 					{
@@ -10626,7 +10627,7 @@ int main(void)
 				if (play_edit_context == PlayEditContext::PlayTrack && track == play_edit_track)
 				{
 					ApplyTrackSampleState(track);
-					request_perform_redraw = true;
+					request_editor_redraw = true;
 				}
 			}
 		}
@@ -10891,7 +10892,7 @@ int main(void)
 			}
 			if (IsFxEditUiMode(last_mode) && !IsFxEditUiMode(mode))
 			{
-				ResetPerformVoices();
+				ResetChannelSlots();
 			}
 			if (mode == UiMode::Record)
 			{
@@ -10949,7 +10950,7 @@ int main(void)
 			}
 				else if (mode == UiMode::PlayTrack)
 				{
-					request_perform_redraw = true;
+					request_editor_redraw = true;
 				}
 				else if (mode == UiMode::Edt)
 				{
@@ -10963,13 +10964,13 @@ int main(void)
 			}
 			else if (mode == UiMode::Perform || mode == UiMode::PlayTrack)
 			{
-				const bool fx_select_active = (perform_index == kPerformFxIndex)
+				const bool fx_select_active = (editor_index == kEditorFxIndex)
 					&& fx_window_active;
-				const bool amp_select_active = (perform_index == kPerformAmpIndex)
+				const bool amp_select_active = (editor_index == kEditorAmpIndex)
 					&& amp_window_active;
-				const bool flt_select_active = (perform_index == kPerformFltIndex)
+				const bool flt_select_active = (editor_index == kEditorFltIndex)
 					&& flt_window_active;
-				DrawPerformScreen(perform_index,
+				DrawEditorScreen(editor_index,
 								  fx_select_active,
 								  fx_fader_index,
 								  amp_select_active,
@@ -11034,7 +11035,7 @@ int main(void)
 				last_sd_mounted = sd_mounted;
 				last_record_state = record_state;
 				last_load_target = load_target_selected;
-				last_perform_index = perform_index;
+				last_editor_index = editor_index;
 			}
 			else if (mode == UiMode::Main)
 			{
@@ -11050,24 +11051,24 @@ int main(void)
 			}
 			else if (mode == UiMode::Perform || mode == UiMode::PlayTrack)
 			{
-				const int32_t current = perform_index;
-				if (request_perform_redraw || current != last_perform_index)
+				const int32_t current = editor_index;
+				if (request_editor_redraw || current != last_editor_index)
 				{
-					request_perform_redraw = false;
-					const bool fx_select_active = (current == kPerformFxIndex)
+					request_editor_redraw = false;
+					const bool fx_select_active = (current == kEditorFxIndex)
 						&& fx_window_active;
-					const bool amp_select_active = (current == kPerformAmpIndex)
+					const bool amp_select_active = (current == kEditorAmpIndex)
 						&& amp_window_active;
-					const bool flt_select_active = (current == kPerformFltIndex)
+					const bool flt_select_active = (current == kEditorFltIndex)
 						&& flt_window_active;
-					DrawPerformScreen(current,
+					DrawEditorScreen(current,
 									  fx_select_active,
 									  fx_fader_index,
 									  amp_select_active,
 									  amp_fader_index,
 									  flt_select_active,
 									  flt_fader_index);
-					last_perform_index = current;
+					last_editor_index = current;
 				}
 			}
 			else if (mode == UiMode::FxDetail)
@@ -11218,29 +11219,29 @@ int main(void)
 		{
 			DrawRecordBackConfirm();
 		}
-		const bool perform_playhead_active = (!ui_blocked
+		const bool editor_playhead_active = (!ui_blocked
 			&& (mode == UiMode::Perform || mode == UiMode::PlayTrack)
-			&& perform_index == kPerformEdtIndex
-			&& (playback_active || AnyPerformVoiceActive()));
-		if (perform_playhead_active)
+			&& editor_index == kEditorEdtIndex
+			&& (playback_active || AnyChannelSlotActive()));
+		if (editor_playhead_active)
 		{
 			const uint32_t now = System::GetNow();
-			if (!last_perform_playhead_active)
+			if (!last_editor_playhead_active)
 			{
-				last_perform_playhead_ms = now;
-				request_perform_redraw = true;
+				last_editor_playhead_ms = now;
+				request_editor_redraw = true;
 			}
-			else if ((now - last_perform_playhead_ms) >= kPerformPlayheadIntervalMs)
+			else if ((now - last_editor_playhead_ms) >= kEditorPlayheadIntervalMs)
 			{
-				last_perform_playhead_ms = now;
-				request_perform_redraw = true;
+				last_editor_playhead_ms = now;
+				request_editor_redraw = true;
 			}
 		}
 		else
 		{
-			last_perform_playhead_ms = 0;
+			last_editor_playhead_ms = 0;
 		}
-		last_perform_playhead_active = perform_playhead_active;
+		last_editor_playhead_active = editor_playhead_active;
 		const bool edt_playhead_active = (!ui_blocked
 			&& mode == UiMode::Edt
 			&& playback_active);
@@ -11253,7 +11254,7 @@ int main(void)
 				waveform_dirty = true;
 				request_playhead_redraw = true;
 			}
-			else if ((now - last_edt_playhead_ms) >= kPerformPlayheadIntervalMs)
+			else if ((now - last_edt_playhead_ms) >= kEditorPlayheadIntervalMs)
 			{
 				last_edt_playhead_ms = now;
 				waveform_dirty = true;
@@ -11343,7 +11344,7 @@ int main(void)
 			|| play_screen_dirty
 			|| waveform_dirty
 			|| live_wave_dirty
-			|| request_perform_redraw
+			|| request_editor_redraw
 			|| request_fx_detail_redraw
 			|| request_length_redraw;
 		if (needs_draw)
