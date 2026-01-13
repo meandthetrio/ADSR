@@ -5215,122 +5215,6 @@ static void DrawEditorScreen(int32_t selected,
 		}
 	};
 
-	auto draw_waveform_preview = [&](const Box& box, bool is_selected)
-	{
-		if (!sample_loaded || sample_length == 0)
-		{
-			const char* line1 = "SELECT";
-			const char* line2 = "WAV";
-			const int text_w1 = TinyStringWidth(line1);
-			const int text_w2 = TinyStringWidth(line2);
-			const int text_x1 = box.x + (kBoxW - text_w1) / 2;
-			const int text_x2 = box.x + (kBoxW - text_w2) / 2;
-			const int text_y = box.y + (kBoxH - (Font5x7::H * 2) - 2) / 2;
-			DrawTinyString(line1, text_x1, text_y, !is_selected);
-			DrawTinyString(line2, text_x2, text_y + Font5x7::H + 2, !is_selected);
-			return;
-		}
-		const int preview_x0 = box.x + kLabelPadX + Font5x7::W + 4;
-		const int preview_x1 = box.x + kBoxW - 2;
-		const int preview_y0 = box.y + kLabelPadY + 1;
-		const int preview_y1 = box.y + kBoxH - kLabelPadY - 1;
-		if (preview_x1 <= preview_x0 || preview_y1 <= preview_y0)
-		{
-			return;
-		}
-		const int preview_w = preview_x1 - preview_x0 + 1;
-		const int preview_h = preview_y1 - preview_y0 + 1;
-		if (preview_h < 3)
-		{
-			return;
-		}
-		const int mid = preview_y0 + (preview_h / 2);
-		float scale = static_cast<float>((preview_h / 2) - 1) / 28.0f;
-		if (scale <= 0.0f)
-		{
-			scale = 1.0f / 28.0f;
-		}
-		const bool on = !is_selected;
-		for (int x = 0; x < preview_w; ++x)
-		{
-			const int wf_idx = (preview_w > 1) ? ((x * 127) / (preview_w - 1)) : 0;
-			int top = mid + static_cast<int>(static_cast<float>(waveform_min[wf_idx]) * scale);
-			int bottom = mid + static_cast<int>(static_cast<float>(waveform_max[wf_idx]) * scale);
-			if (top > bottom)
-			{
-				const int tmp = top;
-				top = bottom;
-				bottom = tmp;
-			}
-			if (top < preview_y0)
-			{
-				top = preview_y0;
-			}
-			if (bottom > preview_y1)
-			{
-				bottom = preview_y1;
-			}
-			display.DrawLine(preview_x0 + x, top, preview_x0 + x, bottom, on);
-		}
-
-		if (sample_length > 1)
-		{
-			bool has_playhead = false;
-			float norm = 0.0f;
-			if (perform_preview_active)
-			{
-				norm = playback_phase / static_cast<float>(sample_length - 1);
-				has_playhead = true;
-			}
-			else
-			{
-				for (int v = 0; v < kChannelSlotCount; ++v)
-				{
-					const auto& voice = channel_slots[v];
-					if (voice.active && voice.length > 0)
-					{
-						const float pos = static_cast<float>(voice.offset) + voice.phase;
-						norm = pos / static_cast<float>(sample_length - 1);
-						has_playhead = true;
-						break;
-					}
-				}
-			}
-			if (has_playhead)
-			{
-				if (norm < 0.0f)
-				{
-					norm = 0.0f;
-				}
-				else if (norm > 1.0f)
-				{
-					norm = 1.0f;
-				}
-				int trim_x0 = preview_x0
-					+ static_cast<int>(trim_start * static_cast<float>(preview_w - 1) + 0.5f);
-				int trim_x1 = preview_x0
-					+ static_cast<int>(trim_end * static_cast<float>(preview_w - 1) + 0.5f);
-				if (trim_x0 > trim_x1)
-				{
-					const int tmp = trim_x0;
-					trim_x0 = trim_x1;
-					trim_x1 = tmp;
-				}
-				int play_x = preview_x0
-					+ static_cast<int>(norm * static_cast<float>(preview_w - 1) + 0.5f);
-				if (play_x < trim_x0)
-				{
-					play_x = trim_x0;
-				}
-				else if (play_x > trim_x1)
-				{
-					play_x = trim_x1;
-				}
-				display.DrawLine(play_x, preview_y0, play_x, preview_y1, on);
-			}
-		}
-	};
-
 	for (int i = 0; i < kEditorBoxCount; ++i)
 	{
 		const auto& box = boxes[i];
@@ -5349,10 +5233,6 @@ static void DrawEditorScreen(int32_t selected,
 								   box.y + kLabelPadY,
 								   kBoxH - (kLabelPadY * 2),
 								   !is_selected);
-		if (i == kEditorEdtIndex)
-		{
-			draw_waveform_preview(box, is_selected);
-		}
 		if (i == kEditorAmpIndex)
 		{
 			const char* labels[kEditorFaderCount] = {"A", "D", "S", "R"};
