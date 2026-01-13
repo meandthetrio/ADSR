@@ -3108,9 +3108,14 @@ static bool IsPlayUiMode(UiMode mode)
 	return (mode == UiMode::Play || mode == UiMode::PlayTrack);
 }
 
-static bool IsFxEditUiMode(UiMode mode)
+static bool IsPerformUiMode(UiMode mode)
 {
-	return (mode == UiMode::Perform || mode == UiMode::PlayTrack);
+	return (mode == UiMode::Perform);
+}
+
+static bool IsPlayTrackUiMode(UiMode mode)
+{
+	return (mode == UiMode::PlayTrack);
 }
 
 static bool AnyChannelSlotActive()
@@ -7169,7 +7174,7 @@ static void StopPlayback(uint8_t note)
 {
 	if (note == current_note)
 	{
-		if (IsFxEditUiMode(ui_mode) && playback_active)
+		if (IsPerformUiMode(ui_mode) && playback_active)
 		{
 			playback_release_active = true;
 			playback_release_pos = 0.0f;
@@ -7289,7 +7294,7 @@ static void __attribute__((unused)) HandleMidiMessage(MidiEvent msg)
 	{
 		return;
 	}
-	if (IsFxEditUiMode(ui_mode))
+	if (IsPerformUiMode(ui_mode))
 	{
 		const bool ignore_note_on = (System::GetNow() < midi_ignore_until_ms);
 		switch (msg.type)
@@ -7380,10 +7385,10 @@ static void CtrlTimerCb(void* /*data*/)
 					}
 					else
 					{
-						if (IsFxEditUiMode(ui_mode) && (System::GetNow() < midi_ignore_until_ms))
-						{
-							break;
-						}
+					if (IsPerformUiMode(ui_mode) && (System::GetNow() < midi_ignore_until_ms))
+					{
+						break;
+					}
 						MidiCmdPushIsr(kMidiCmdNoteOn, (uint8_t)n.note, (uint8_t)n.velocity);
 					}
 				}
@@ -7482,12 +7487,13 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 		}
 	}
 	const bool shift_pressed = shift_held;
-	const bool fx_edit_ui = IsFxEditUiMode(ui_mode);
-	if (!fx_edit_ui && ui_mode != UiMode::FxDetail)
+	const bool is_play_track_ui = IsPlayTrackUiMode(ui_mode);
+	const bool is_editor_ui = IsPerformUiMode(ui_mode) || is_play_track_ui;
+	if (!is_editor_ui && ui_mode != UiMode::FxDetail)
 	{
 		fx_window_active = false;
 	}
-	if (!fx_edit_ui)
+	if (!is_editor_ui)
 	{
 		amp_window_active = false;
 		flt_window_active = false;
@@ -7936,9 +7942,9 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			}
 		}
 	}
-	else if (!ui_blocked && IsFxEditUiMode(ui_mode))
+	else if (!ui_blocked && is_editor_ui)
 	{
-		const bool track_mode = (ui_mode == UiMode::PlayTrack);
+		const bool track_mode = is_play_track_ui;
 		const bool fx_select_active = (editor_index == kEditorFxIndex && fx_window_active);
 		const bool amp_select_active = (editor_index == kEditorAmpIndex && amp_window_active);
 		const bool flt_select_active = (editor_index == kEditorFltIndex && flt_window_active);
@@ -10216,7 +10222,7 @@ int main(void)
 	{
 		uint32_t bits = 0;
 		const bool in_play_mode = IsPlayUiMode(ui_mode);
-		const bool in_fx_edit_mode = IsFxEditUiMode(ui_mode);
+		const bool in_fx_edit_mode = IsPerformUiMode(ui_mode) || IsPlayTrackUiMode(ui_mode);
 		if (in_play_mode) bits |= kFlagInPlayMode;
 		if (in_fx_edit_mode) bits |= kFlagInEditorMode;
 		if (ui_mode == UiMode::Main) bits |= kFlagInMainMode;
@@ -10361,7 +10367,7 @@ int main(void)
 		{
 			uint32_t bits = 0;
 			const bool in_play_mode = IsPlayUiMode(ui_mode);
-			const bool in_fx_edit_mode = IsFxEditUiMode(ui_mode);
+			const bool in_fx_edit_mode = IsPerformUiMode(ui_mode) || IsPlayTrackUiMode(ui_mode);
 			if (in_play_mode) bits |= kFlagInPlayMode;
 			if (in_fx_edit_mode) bits |= kFlagInEditorMode;
 			if (ui_mode == UiMode::Main) bits |= kFlagInMainMode;
@@ -10475,7 +10481,7 @@ int main(void)
 				{
 					LogLine("Button1: playback request (unpitched)");
 				}
-				if (IsFxEditUiMode(ui_mode))
+				if (IsPerformUiMode(ui_mode))
 				{
 					StartChannelSlot(kBaseMidiNote);
 				}
@@ -10890,7 +10896,7 @@ int main(void)
 				SetSampleContext(SampleContext::Play);
 				SetFxContext(FxContext::PlayTrack, play_edit_track);
 			}
-			if (IsFxEditUiMode(last_mode) && !IsFxEditUiMode(mode))
+			if (IsPerformUiMode(last_mode) && !IsPerformUiMode(mode))
 			{
 				ResetChannelSlots();
 			}
@@ -10962,7 +10968,7 @@ int main(void)
 				last_fx_detail_index = fx_detail_index;
 				last_fx_detail_param_index = fx_detail_param_index;
 			}
-			else if (mode == UiMode::Perform || mode == UiMode::PlayTrack)
+			else if (IsPerformUiMode(mode) || IsPlayTrackUiMode(mode))
 			{
 				const bool fx_select_active = (editor_index == kEditorFxIndex)
 					&& fx_window_active;
@@ -11049,7 +11055,7 @@ int main(void)
 					last_menu = current;
 				}
 			}
-			else if (mode == UiMode::Perform || mode == UiMode::PlayTrack)
+			else if (IsPerformUiMode(mode) || IsPlayTrackUiMode(mode))
 			{
 				const int32_t current = editor_index;
 				if (request_editor_redraw || current != last_editor_index)
@@ -11220,7 +11226,7 @@ int main(void)
 			DrawRecordBackConfirm();
 		}
 		const bool editor_playhead_active = (!ui_blocked
-			&& (mode == UiMode::Perform || mode == UiMode::PlayTrack)
+			&& (IsPerformUiMode(mode) || IsPlayTrackUiMode(mode))
 			&& editor_index == kEditorEdtIndex
 			&& (playback_active || AnyChannelSlotActive()));
 		if (editor_playhead_active)
@@ -11315,7 +11321,7 @@ int main(void)
 		else
 		{
 				if ((ui_mode == UiMode::Record && record_state == RecordState::Review)
-					|| (IsFxEditUiMode(ui_mode) && sample_loaded)
+					|| (IsPerformUiMode(ui_mode) && sample_loaded)
 					|| (ui_mode == UiMode::FxDetail && sample_loaded)
 					|| (ui_mode == UiMode::Edt && sample_loaded)
 					|| (ui_mode == UiMode::Load && load_context == LoadContext::Edt)
