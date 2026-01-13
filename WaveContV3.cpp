@@ -68,6 +68,7 @@ constexpr int32_t kPlayBpmMin = 40;
 constexpr int32_t kPlayBpmMax = 240;
 constexpr int32_t kPlayTrackCount = 4;
 constexpr int kPlayStepCount = 16;
+constexpr float kPlayTrackRetriggerFadeMs = 3.0f;
 constexpr uint32_t kPreviewReadBudgetMs = 2;
 constexpr size_t kPreviewBufferFrames = 4096;
 constexpr size_t kPreviewReadFrames = 256;
@@ -986,6 +987,12 @@ struct ChannelSlot
 	size_t offset = 0;
 	size_t length = 0;
 	uint32_t env_samples = 0;
+	uint32_t retrigger_fade_total = 0;
+	uint32_t retrigger_fade_remaining = 0;
+	bool retrigger_pending = false;
+	size_t retrigger_offset = 0;
+	size_t retrigger_length = 0;
+	float retrigger_rate = 1.0f;
 };
 
 static ChannelSlot channel_slots[kChannelSlotCount];
@@ -3335,6 +3342,38 @@ static bool ComputeTrimWindowFrames(float trim_start_in,
 	return (out_end > out_start);
 }
 
+static inline void InitSequencerVoiceSlot(ChannelSlot& voice,
+										  int voice_index,
+										  size_t window_start,
+										  size_t window_end,
+										  int32_t track,
+										  float rate)
+{
+	voice.active = true;
+	voice.releasing = false;
+	voice.note = -1;
+	voice.track = track;
+	voice.phase = 0.0f;
+	voice.amp = 1.0f;
+	voice.env = 0.0f;
+	voice.release_start = 0.0f;
+	voice.release_pos = 0.0f;
+	voice.env_samples = 0;
+	voice.rate = rate;
+	voice.offset = window_start;
+	voice.length = window_end - window_start;
+	voice.retrigger_fade_total = 0;
+	voice.retrigger_fade_remaining = 0;
+	voice.retrigger_pending = false;
+	voice.retrigger_offset = 0;
+	voice.retrigger_length = 0;
+	voice.retrigger_rate = 1.0f;
+	channel_lpf_l1[voice_index].Reset();
+	channel_lpf_l2[voice_index].Reset();
+	channel_lpf_r1[voice_index].Reset();
+	channel_lpf_r2[voice_index].Reset();
+}
+
 static void StartSequencerVoiceWindow(size_t window_start, size_t window_end, int32_t track)
 {
 	if (!sample_loaded || sample_length < 1)
@@ -3355,13 +3394,26 @@ static void StartSequencerVoiceWindow(size_t window_start, size_t window_end, in
 		return;
 	}
 
+	const float sr = (sample_rate == 0) ? 48000.0f : static_cast<float>(sample_rate);
+	const float rate = sr / hw.AudioSampleRate();
 	int voice_index = -1;
 	for (int i = 0; i < kChannelSlotCount; ++i)
 	{
-		if (!channel_slots[i].active)
+		if (channel_slots[i].active && channel_slots[i].track == track)
 		{
 			voice_index = i;
 			break;
+		}
+	}
+	if (voice_index < 0)
+	{
+		for (int i = 0; i < kChannelSlotCount; ++i)
+		{
+			if (!channel_slots[i].active)
+			{
+				voice_index = i;
+				break;
+			}
 		}
 	}
 	if (voice_index < 0)
@@ -3370,25 +3422,35 @@ static void StartSequencerVoiceWindow(size_t window_start, size_t window_end, in
 	}
 
 	ChannelSlot& voice = channel_slots[voice_index];
-	voice.active = true;
-	voice.releasing = false;
-	voice.note = -1;
-	voice.track = track;
-	voice.phase = 0.0f;
-	voice.amp = 1.0f;
-	voice.env = 0.0f;
-	voice.release_start = 0.0f;
-	voice.release_pos = 0.0f;
-	voice.env_samples = 0;
-	channel_lpf_l1[voice_index].Reset();
-	channel_lpf_l2[voice_index].Reset();
-	channel_lpf_r1[voice_index].Reset();
-	channel_lpf_r2[voice_index].Reset();
+	if (voice.active && voice.track == track)
+	{
+		for (int i = 0; i < kChannelSlotCount; ++i)
+		{
+			if (i != voice_index && channel_slots[i].active && channel_slots[i].track == track)
+			{
+				channel_slots[i].active = false;
+				channel_slots[i].releasing = false;
+				channel_slots[i].env_samples = 0;
+				channel_slots[i].retrigger_pending = false;
+				channel_slots[i].retrigger_fade_remaining = 0;
+			}
+		}
+		uint32_t fade_total = static_cast<uint32_t>(
+			hw.AudioSampleRate() * (kPlayTrackRetriggerFadeMs * 0.001f));
+		if (fade_total < 1)
+		{
+			fade_total = 1;
+		}
+		voice.retrigger_fade_total = fade_total;
+		voice.retrigger_fade_remaining = fade_total;
+		voice.retrigger_pending = true;
+		voice.retrigger_offset = window_start;
+		voice.retrigger_length = window_end - window_start;
+		voice.retrigger_rate = rate;
+		return;
+	}
 
-	const float sr = (sample_rate == 0) ? 48000.0f : static_cast<float>(sample_rate);
-	voice.rate = sr / hw.AudioSampleRate();
-	voice.offset = window_start;
-	voice.length = window_end - window_start;
+	InitSequencerVoiceSlot(voice, voice_index, window_start, window_end, track, rate);
 }
 
 static void TriggerSequencerStep(int32_t step)
@@ -3609,8 +3671,11 @@ static void EnterPlayTrack(int32_t track)
 	SetSampleContext(SampleContext::Play);
 	play_edit_context = PlayEditContext::PlayTrack;
 	play_edit_track = track;
-	request_track_sample_load = true;
-	request_track_sample_index = track;
+	if (!TrackSampleMatchesLoaded(track))
+	{
+		request_track_sample_load = true;
+		request_track_sample_index = track;
+	}
 	ui_mode = UiMode::PlayTrack;
 	request_editor_redraw = true;
 }
@@ -3643,6 +3708,12 @@ static void ResetChannelSlots()
 		voice.offset = 0;
 		voice.length = 0;
 		voice.env_samples = 0;
+		voice.retrigger_fade_total = 0;
+		voice.retrigger_fade_remaining = 0;
+		voice.retrigger_pending = false;
+		voice.retrigger_offset = 0;
+		voice.retrigger_length = 0;
+		voice.retrigger_rate = 1.0f;
 	}
 	for (int i = 0; i < kChannelSlotCount; ++i)
 	{
@@ -3927,6 +3998,15 @@ static bool ApplyTrackSampleState(int32_t track)
 		waveform_dirty = true;
 		request_length_redraw = true;
 		return false;
+	}
+	if (TrackSampleMatchesLoaded(track))
+	{
+		trim_start = state.trim_start;
+		trim_end = state.trim_end;
+		UpdateTrimFrames();
+		waveform_dirty = true;
+		request_length_redraw = true;
+		return true;
 	}
 	char path[64];
 	BuildFilePath(state.name, path, sizeof(path));
@@ -7306,6 +7386,12 @@ static void StartChannelSlot(int32_t note)
 	voice.release_start = 0.0f;
 	voice.release_pos = 0.0f;
 	voice.env_samples = 0;
+	voice.retrigger_fade_total = 0;
+	voice.retrigger_fade_remaining = 0;
+	voice.retrigger_pending = false;
+	voice.retrigger_offset = 0;
+	voice.retrigger_length = 0;
+	voice.retrigger_rate = 1.0f;
 	channel_lpf_l1[voice_index].Reset();
 	channel_lpf_l2[voice_index].Reset();
 	channel_lpf_r1[voice_index].Reset();
@@ -10001,6 +10087,12 @@ static float last_chorus_wow = -1.0f;
 				{
 					continue;
 				}
+				if (voice.retrigger_pending && voice.retrigger_fade_remaining == 0)
+				{
+					const size_t window_start = voice.retrigger_offset;
+					const size_t window_end = window_start + voice.retrigger_length;
+					InitSequencerVoiceSlot(voice, v, window_start, window_end, voice.track, voice.retrigger_rate);
+				}
 				const float attack_samples = slot_attack_samples[v];
 				const float release_samples = slot_release_samples[v];
 				float env = 1.0f;
@@ -10036,10 +10128,16 @@ static float last_chorus_wow = -1.0f;
 					env = 0.0f;
 				}
 				voice.env = env;
+				float retrigger_gain = 1.0f;
+				if (voice.retrigger_fade_remaining > 0 && voice.retrigger_fade_total > 0)
+				{
+					retrigger_gain = static_cast<float>(voice.retrigger_fade_remaining)
+						/ static_cast<float>(voice.retrigger_fade_total);
+				}
 				if (voice.length == 1)
 				{
 					const size_t idx = voice.offset;
-					const float amp = voice.amp * env;
+					const float amp = voice.amp * env * retrigger_gain;
 					float samp_l = 0.0f;
 					float samp_r = 0.0f;
 					samp_l = static_cast<float>(sample_buffer_l[idx]) * kSampleScale * amp;
@@ -10053,19 +10151,39 @@ static float last_chorus_wow = -1.0f;
 						samp_r = channel_lpf_r2[v].Process(channel_lpf_r1[v].Process(samp_r));
 					}
 					add_voice(samp_l, samp_r, voice.track);
-					voice.active = false;
-					voice.releasing = false;
-					voice.release_pos = 0.0f;
-					voice.env_samples = 0;
+					if (voice.retrigger_pending)
+					{
+						voice.retrigger_fade_remaining = 0;
+						voice.releasing = false;
+					}
+					else
+					{
+						voice.active = false;
+						voice.releasing = false;
+						voice.release_pos = 0.0f;
+						voice.env_samples = 0;
+					}
+					if (voice.retrigger_fade_remaining > 0)
+					{
+						--voice.retrigger_fade_remaining;
+					}
 					continue;
 				}
 				const size_t idx_rel = static_cast<size_t>(voice.phase);
 				if (idx_rel + 1 >= voice.length)
 				{
-					voice.active = false;
-					voice.releasing = false;
-					voice.release_pos = 0.0f;
-					voice.env_samples = 0;
+					if (voice.retrigger_pending)
+					{
+						voice.retrigger_fade_remaining = 0;
+						voice.releasing = false;
+					}
+					else
+					{
+						voice.active = false;
+						voice.releasing = false;
+						voice.release_pos = 0.0f;
+						voice.env_samples = 0;
+					}
 					continue;
 				}
 				const float frac = voice.phase - static_cast<float>(idx_rel);
@@ -10086,7 +10204,7 @@ static float last_chorus_wow = -1.0f;
 					r0 = l0;
 					r1 = l1;
 				}
-				const float amp = voice.amp * env;
+				const float amp = voice.amp * env * retrigger_gain;
 				float samp_l = (l0 + (l1 - l0) * frac) * kSampleScale * amp;
 				float samp_r = (r0 + (r1 - r0) * frac) * kSampleScale * amp;
 				if (perform_mode || play_mode)
@@ -10105,18 +10223,38 @@ static float last_chorus_wow = -1.0f;
 					voice.release_pos += 1.0f;
 					if (release_samples > 1.0f && voice.release_pos >= release_samples)
 					{
+						if (voice.retrigger_pending)
+						{
+							voice.retrigger_fade_remaining = 0;
+							voice.releasing = false;
+						}
+						else
+						{
+							voice.active = false;
+							voice.releasing = false;
+							voice.release_pos = 0.0f;
+							voice.env_samples = 0;
+						}
+					}
+				}
+				if (voice.phase >= static_cast<float>(voice.length - 1))
+				{
+					if (voice.retrigger_pending)
+					{
+						voice.retrigger_fade_remaining = 0;
+						voice.releasing = false;
+					}
+					else
+					{
 						voice.active = false;
 						voice.releasing = false;
 						voice.release_pos = 0.0f;
 						voice.env_samples = 0;
 					}
 				}
-				if (voice.phase >= static_cast<float>(voice.length - 1))
+				if (voice.retrigger_fade_remaining > 0)
 				{
-					voice.active = false;
-					voice.releasing = false;
-					voice.release_pos = 0.0f;
-					voice.env_samples = 0;
+					--voice.retrigger_fade_remaining;
 				}
 			}
 		}
