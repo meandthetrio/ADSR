@@ -881,6 +881,7 @@ volatile bool request_load_sample = false;
 volatile int32_t request_load_index = -1;
 volatile LoadDestination request_load_destination = LoadDestination::Play;
 volatile int32_t wav_file_count = 0;
+static volatile bool wav_list_valid = false;
 volatile int32_t load_target_index = -1;
 volatile LoadDestination load_target_selected = LoadDestination::Play;
 static LoadDestination load_destination = LoadDestination::Perform;
@@ -2402,9 +2403,6 @@ static void __attribute__((unused)) ScanSdFiles(bool wav_only)
 			sd_mounted = false;
 			sd_need_reinit = true;
 			sd_detected_last = false;
-			wav_file_count = 0;
-			load_selected = 0;
-			load_scroll = 0;
 			LogLine("Scan aborted: SD not detected");
 			return;
 		}
@@ -2413,9 +2411,6 @@ static void __attribute__((unused)) ScanSdFiles(bool wav_only)
 	{
 		sd_mounted = false;
 		sd_need_reinit = true;
-		wav_file_count = 0;
-		load_selected = 0;
-		load_scroll = 0;
 		LogLine("Scan aborted: SD not ready");
 		return;
 	}
@@ -2445,9 +2440,6 @@ static void __attribute__((unused)) ScanSdFiles(bool wav_only)
 	}
 	if (!sd_mounted)
 	{
-		wav_file_count = 0;
-		load_selected = 0;
-		load_scroll = 0;
 		LogLine("Scan aborted: SD not mounted");
 		return;
 	}
@@ -2457,9 +2449,6 @@ static void __attribute__((unused)) ScanSdFiles(bool wav_only)
 	FRESULT res = f_opendir(&dir, fsi.GetSDPath());
 	if (res != FR_OK)
 	{
-		wav_file_count = 0;
-		load_selected = 0;
-		load_scroll = 0;
 		LogLine("Scan failed: f_opendir error %d", static_cast<int>(res));
 		return;
 	}
@@ -2719,9 +2708,6 @@ static void FileListJobStart(bool wav_only)
 			sd_mounted = false;
 			sd_need_reinit = true;
 			sd_detected_last = false;
-			wav_file_count = 0;
-			load_selected = 0;
-			load_scroll = 0;
 			LogLine("Scan aborted: SD not detected");
 			return;
 		}
@@ -2730,9 +2716,6 @@ static void FileListJobStart(bool wav_only)
 	{
 		sd_mounted = false;
 		sd_need_reinit = true;
-		wav_file_count = 0;
-		load_selected = 0;
-		load_scroll = 0;
 		LogLine("Scan aborted: SD not ready");
 		return;
 	}
@@ -2762,9 +2745,6 @@ static void FileListJobStart(bool wav_only)
 	}
 	if (!sd_mounted)
 	{
-		wav_file_count = 0;
-		load_selected = 0;
-		load_scroll = 0;
 		LogLine("Scan aborted: SD not mounted");
 		return;
 	}
@@ -2772,9 +2752,6 @@ static void FileListJobStart(bool wav_only)
 	FRESULT res = f_opendir(&g_list_job.dir, fsi.GetSDPath());
 	if (res != FR_OK)
 	{
-		wav_file_count = 0;
-		load_selected = 0;
-		load_scroll = 0;
 		LogLine("Scan failed: f_opendir error %d", static_cast<int>(res));
 		return;
 	}
@@ -2784,12 +2761,12 @@ static void FileListJobStart(bool wav_only)
 	g_list_job.wav_only = wav_only;
 	g_list_job.dir_open = true;
 	g_list_job.count = 0;
-	wav_file_count = 0;
 }
 
 static void FinalizeFileList()
 {
 	wav_file_count = g_list_job.count;
+	wav_list_valid = true;
 	LogLine("Scan complete: %ld files", static_cast<long>(wav_file_count));
 	if (wav_file_count <= 0)
 	{
@@ -2864,7 +2841,6 @@ static void FileListJobTick(uint32_t budget_entries)
 		}
 		CopyString(wav_files[g_list_job.count], g_list_job.fno.fname, kMaxWavNameLen);
 		g_list_job.count++;
-		wav_file_count = g_list_job.count;
 		dirty = true;
 	}
 	if (dirty)
@@ -3087,7 +3063,7 @@ static void JobTick()
 	else if (g_job.type == JobType::FileListScan)
 	{
 		FileListJobTick(kListBudget);
-		const uint32_t done = static_cast<uint32_t>(wav_file_count);
+		const uint32_t done = static_cast<uint32_t>(g_list_job.count);
 		const uint32_t total = kMaxWavFiles;
 		g_job.progress = (done * 1000U) / total;
 		if (!g_list_job.active)
@@ -5533,7 +5509,26 @@ static void DrawLoadMenu(int32_t top_index, int32_t selected)
 	 }
 	if (wav_file_count == 0)
 	{
-		if (delete_mode)
+		const bool list_scan_active = (g_job.active && g_job.type == JobType::FileListScan);
+		const bool list_scan_pending = list_build_pending;
+		const bool jobs_blocked = !JobsAllowedNow();
+		const bool scan_blocked = jobs_blocked || sd_init_in_progress || save_in_progress;
+		if (!wav_list_valid && (list_scan_active || list_scan_pending))
+		{
+			if (scan_blocked)
+			{
+				DrawLoadMessage("SD BUSY", "LIST CACHED");
+			}
+			else
+			{
+				DrawLoadMessage("SCANNING", "SD CARD");
+			}
+		}
+		else if (!wav_list_valid)
+		{
+			DrawLoadMessage("LIST", "CACHED");
+		}
+		else if (delete_mode)
 		{
 			DrawLoadMessage("NO", "FILES");
 		}
@@ -8278,6 +8273,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				ui_mode = UiMode::Load;
 				load_selected = 0;
 				load_scroll = 0;
+				wav_list_valid = false;
 				request_delete_scan = true;
 				request_delete_redraw = true;
 			}
@@ -8888,7 +8884,10 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					ui_mode = UiMode::Load;
 					load_selected = 0;
 					load_scroll = 0;
-					request_load_scan = true;
+					if (!wav_list_valid)
+					{
+						request_load_scan = true;
+					}
 				}
 				else if (!has_sample)
 				{
@@ -8901,7 +8900,10 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					ui_mode = UiMode::Load;
 					load_selected = 0;
 					load_scroll = 0;
-					request_load_scan = true;
+					if (!wav_list_valid)
+					{
+						request_load_scan = true;
+					}
 				}
 				else
 				{
@@ -9081,7 +9083,10 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			ui_mode = UiMode::Load;
 			load_selected = 0;
 			load_scroll = 0;
-			request_load_scan = true;
+			if (!wav_list_valid)
+			{
+				request_load_scan = true;
+			}
 		}
 		if (encoder_l_pressed)
 		{
@@ -11484,11 +11489,14 @@ int main(void)
 		if (request_load_scan)
 		{
 			request_load_scan = false;
-			list_build_pending = true;
+			if (!wav_list_valid)
+			{
+				list_build_pending = true;
+			}
 		}
 		if (list_build_pending)
 		{
-			if (!ui_blocked)
+			if (!ui_blocked && JobsAllowedNow())
 			{
 				if (kLoadPresetsPlaceholder && load_context == LoadContext::Main && !delete_mode)
 				{
@@ -11503,7 +11511,7 @@ int main(void)
 		}
 		if (request_delete_scan)
 		{
-			if (!ui_blocked)
+			if (!ui_blocked && JobsAllowedNow())
 			{
 				request_delete_scan = false;
 				JobStartFileList(fsi.GetSDPath(), false, true);
@@ -11709,6 +11717,7 @@ int main(void)
 				if (DeleteFileAtIndex(index))
 				{
 					LogLine("Delete success");
+					wav_list_valid = false;
 					request_delete_scan = true;
 					delete_confirm = false;
 					request_delete_redraw = true;
@@ -11750,6 +11759,7 @@ int main(void)
 					if (sd_init_success)
 					{
 						ui_mode = UiMode::Load;
+						wav_list_valid = false;
 						request_load_scan = true;
 						last_mode = UiMode::Shift;
 					}
@@ -11801,6 +11811,7 @@ int main(void)
 					{
 						save_done = true;
 						save_result_until_ms = now + kSaveResultMs;
+						wav_list_valid = false;
 						request_load_scan = true;
 					}
 				}
