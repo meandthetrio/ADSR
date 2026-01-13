@@ -1034,6 +1034,8 @@ struct PerformState
 	bool mod_params_initialized = false;
 };
 
+using PlayTrackState = PerformState;
+
 struct TrackSampleState
 {
 	bool loaded = false;
@@ -1042,10 +1044,10 @@ struct TrackSampleState
 	float trim_end = 1.0f;
 };
 
-enum class PerformContext : int32_t
+enum class PlayEditContext : int32_t
 {
 	Main,
-	Track,
+	PlayTrack,
 };
 
 enum class LoadContext : int32_t
@@ -1056,10 +1058,10 @@ enum class LoadContext : int32_t
 };
 
 static PerformState main_perform_state;
-static PerformState play_perform_state;
-static PerformState track_perform_state[kPlayTrackCount];
-static PerformContext perform_context = PerformContext::Main;
-static int32_t perform_context_track = 0;
+static PerformState play_state;
+static PlayTrackState play_track_state[kPlayTrackCount];
+static PlayEditContext play_edit_context = PlayEditContext::Main;
+static int32_t play_edit_track = 0;
 static TrackSampleState track_samples[kPlayTrackCount];
 static UiMode edt_prev_mode = UiMode::Perform;
 static SampleContext edt_sample_context = SampleContext::Perform;
@@ -3105,7 +3107,7 @@ static bool IsPlayUiMode(UiMode mode)
 	return (mode == UiMode::Play || mode == UiMode::PlayTrack);
 }
 
-static bool IsPerformUiMode(UiMode mode)
+static bool IsFxEditUiMode(UiMode mode)
 {
 	return (mode == UiMode::Perform || mode == UiMode::PlayTrack);
 }
@@ -3510,7 +3512,7 @@ enum class FxContext : int32_t
 {
 	Perform,
 	Play,
-	Track,
+	PlayTrack,
 };
 
 static FxContext fx_context = FxContext::Perform;
@@ -3523,12 +3525,12 @@ static void SaveFxContext()
 			CapturePerformState(main_perform_state);
 			break;
 		case FxContext::Play:
-			CapturePerformState(play_perform_state);
+			CapturePerformState(play_state);
 			break;
-		case FxContext::Track:
-			if (perform_context_track >= 0 && perform_context_track < kPlayTrackCount)
+		case FxContext::PlayTrack:
+			if (play_edit_track >= 0 && play_edit_track < kPlayTrackCount)
 			{
-				CapturePerformState(track_perform_state[perform_context_track]);
+				CapturePerformState(play_track_state[play_edit_track]);
 			}
 			break;
 		default:
@@ -3540,7 +3542,7 @@ static void SetFxContext(FxContext ctx, int32_t track = 0)
 {
 	if (fx_context == ctx)
 	{
-		if (ctx != FxContext::Track || track == perform_context_track)
+		if (ctx != FxContext::PlayTrack || track == play_edit_track)
 		{
 			return;
 		}
@@ -3549,13 +3551,13 @@ static void SetFxContext(FxContext ctx, int32_t track = 0)
 	fx_context = ctx;
 	if (ctx == FxContext::Perform)
 	{
-		perform_context = PerformContext::Main;
+		play_edit_context = PlayEditContext::Main;
 		ApplyPerformState(main_perform_state);
 	}
 	else if (ctx == FxContext::Play)
 	{
-		perform_context = PerformContext::Main;
-		ApplyPerformState(play_perform_state);
+		play_edit_context = PlayEditContext::Main;
+		ApplyPerformState(play_state);
 	}
 	else
 	{
@@ -3563,9 +3565,9 @@ static void SetFxContext(FxContext ctx, int32_t track = 0)
 		{
 			return;
 		}
-		perform_context = PerformContext::Track;
-		perform_context_track = track;
-		ApplyPerformState(track_perform_state[track]);
+		play_edit_context = PlayEditContext::PlayTrack;
+		play_edit_track = track;
+		ApplyPerformState(play_track_state[track]);
 	}
 }
 
@@ -3584,10 +3586,10 @@ static void StoreTrackSampleState(int32_t track)
 static void InitTrackStates()
 {
 	CapturePerformState(main_perform_state);
-	play_perform_state = main_perform_state;
+	play_state = main_perform_state;
 	for (int t = 0; t < kPlayTrackCount; ++t)
 	{
-		track_perform_state[t] = main_perform_state;
+		play_track_state[t] = main_perform_state;
 		track_samples[t].loaded = false;
 		track_samples[t].name[0] = '\0';
 		track_samples[t].trim_start = 0.0f;
@@ -3602,7 +3604,7 @@ static void EnterPlayTrack(int32_t track)
 		return;
 	}
 	SetSampleContext(SampleContext::Play);
-	SetFxContext(FxContext::Track, track);
+	SetFxContext(FxContext::PlayTrack, track);
 	request_track_sample_load = true;
 	request_track_sample_index = track;
 	ui_mode = UiMode::PlayTrack;
@@ -3611,10 +3613,10 @@ static void EnterPlayTrack(int32_t track)
 
 static void ExitPlayTrack()
 {
-	if (perform_context == PerformContext::Track)
+	if (play_edit_context == PlayEditContext::PlayTrack)
 	{
-		CapturePerformState(track_perform_state[perform_context_track]);
-		StoreTrackSampleState(perform_context_track);
+		CapturePerformState(play_track_state[play_edit_track]);
+		StoreTrackSampleState(play_edit_track);
 	}
 	SetFxContext(FxContext::Play);
 	ui_mode = UiMode::Play;
@@ -7166,7 +7168,7 @@ static void StopPlayback(uint8_t note)
 {
 	if (note == current_note)
 	{
-		if (IsPerformUiMode(ui_mode) && playback_active)
+		if (IsFxEditUiMode(ui_mode) && playback_active)
 		{
 			playback_release_active = true;
 			playback_release_pos = 0.0f;
@@ -7286,7 +7288,7 @@ static void __attribute__((unused)) HandleMidiMessage(MidiEvent msg)
 	{
 		return;
 	}
-	if (IsPerformUiMode(ui_mode))
+	if (IsFxEditUiMode(ui_mode))
 	{
 		const bool ignore_note_on = (System::GetNow() < midi_ignore_until_ms);
 		switch (msg.type)
@@ -7377,7 +7379,7 @@ static void CtrlTimerCb(void* /*data*/)
 					}
 					else
 					{
-						if (IsPerformUiMode(ui_mode) && (System::GetNow() < midi_ignore_until_ms))
+						if (IsFxEditUiMode(ui_mode) && (System::GetNow() < midi_ignore_until_ms))
 						{
 							break;
 						}
@@ -7479,12 +7481,12 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 		}
 	}
 	const bool shift_pressed = shift_held;
-	const bool perform_ui = IsPerformUiMode(ui_mode);
-	if (!perform_ui && ui_mode != UiMode::FxDetail)
+	const bool fx_edit_ui = IsFxEditUiMode(ui_mode);
+	if (!fx_edit_ui && ui_mode != UiMode::FxDetail)
 	{
 		fx_window_active = false;
 	}
-	if (!perform_ui)
+	if (!fx_edit_ui)
 	{
 		amp_window_active = false;
 		flt_window_active = false;
@@ -7933,7 +7935,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			}
 		}
 	}
-	else if (!ui_blocked && IsPerformUiMode(ui_mode))
+	else if (!ui_blocked && IsFxEditUiMode(ui_mode))
 	{
 		const bool track_mode = (ui_mode == UiMode::PlayTrack);
 		const bool fx_select_active = (perform_index == kPerformFxIndex && fx_window_active);
@@ -8104,7 +8106,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				if (!has_sample && track_mode)
 				{
 					load_context = LoadContext::Track;
-					load_context_track = perform_context_track;
+					load_context_track = play_edit_track;
 					load_prev_mode = UiMode::PlayTrack;
 					ui_mode = UiMode::Load;
 					load_selected = 0;
@@ -8266,10 +8268,10 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				else if (dr < 0) dr = -1;
 			}
 			AdjustTrimNormalized(dl, dr, shift_held);
-			if (perform_context == PerformContext::Track)
-			{
-				StoreTrackSampleState(perform_context_track);
-			}
+	if (play_edit_context == PlayEditContext::PlayTrack)
+	{
+		StoreTrackSampleState(play_edit_track);
+	}
 		}
 		if (encoder_r_pressed)
 		{
@@ -9208,10 +9210,10 @@ static float last_chorus_wow = -1.0f;
 	const float amp_release_samples = amp_release_ms * 0.001f * out_sr;
 	const bool play_seq_mode = (flags_bits & kFlagPlaySeqMode) != 0;
 	const bool play_master_fx = (flags_bits & kFlagPlayMasterFx) != 0;
-	const int32_t live_track = (perform_context == PerformContext::Track
-		&& perform_context_track >= 0
-		&& perform_context_track < kPlayTrackCount)
-		? perform_context_track
+	const int32_t live_track = (play_edit_context == PlayEditContext::PlayTrack
+		&& play_edit_track >= 0
+		&& play_edit_track < kPlayTrackCount)
+		? play_edit_track
 		: -1;
 	float track_mod_send[kPlayTrackCount] = {};
 	float track_delay_send[kPlayTrackCount] = {};
@@ -9221,9 +9223,9 @@ static float last_chorus_wow = -1.0f;
 		for (int t = 0; t < kPlayTrackCount; ++t)
 		{
 			const bool use_live = (t == live_track);
-			float mod_send = use_live ? params.fx_c_wet : track_perform_state[t].fx_c_wet;
-			float delay_send = use_live ? params.delay_wet : track_perform_state[t].delay_wet;
-			float reverb_send = use_live ? params.reverb_wet : track_perform_state[t].reverb_wet;
+			float mod_send = use_live ? params.fx_c_wet : play_track_state[t].fx_c_wet;
+			float delay_send = use_live ? params.delay_wet : play_track_state[t].delay_wet;
+			float reverb_send = use_live ? params.reverb_wet : play_track_state[t].reverb_wet;
 			if (mod_send < 0.0f) mod_send = 0.0f;
 			if (mod_send > 1.0f) mod_send = 1.0f;
 			if (delay_send < 0.0f) delay_send = 0.0f;
@@ -10213,11 +10215,11 @@ int main(void)
 	{
 		uint32_t bits = 0;
 		const bool in_play_mode = IsPlayUiMode(ui_mode);
-		const bool in_perform_mode = IsPerformUiMode(ui_mode);
+		const bool in_fx_edit_mode = IsFxEditUiMode(ui_mode);
 		if (in_play_mode) bits |= kFlagInPlayMode;
-		if (in_perform_mode) bits |= kFlagInPerformMode;
+		if (in_fx_edit_mode) bits |= kFlagInPerformMode;
 		if (ui_mode == UiMode::Main) bits |= kFlagInMainMode;
-		if (in_perform_mode || in_play_mode || (ui_mode == UiMode::FxDetail))
+		if (in_fx_edit_mode || in_play_mode || (ui_mode == UiMode::FxDetail))
 		{
 			bits |= kFlagFxAllowed;
 		}
@@ -10358,11 +10360,11 @@ int main(void)
 		{
 			uint32_t bits = 0;
 			const bool in_play_mode = IsPlayUiMode(ui_mode);
-			const bool in_perform_mode = IsPerformUiMode(ui_mode);
+			const bool in_fx_edit_mode = IsFxEditUiMode(ui_mode);
 			if (in_play_mode) bits |= kFlagInPlayMode;
-			if (in_perform_mode) bits |= kFlagInPerformMode;
+			if (in_fx_edit_mode) bits |= kFlagInPerformMode;
 			if (ui_mode == UiMode::Main) bits |= kFlagInMainMode;
-			if (in_perform_mode || in_play_mode || (ui_mode == UiMode::FxDetail))
+			if (in_fx_edit_mode || in_play_mode || (ui_mode == UiMode::FxDetail))
 			{
 				bits |= kFlagFxAllowed;
 			}
@@ -10472,7 +10474,7 @@ int main(void)
 				{
 					LogLine("Button1: playback request (unpitched)");
 				}
-				if (IsPerformUiMode(ui_mode))
+				if (IsFxEditUiMode(ui_mode))
 				{
 					StartPerformVoice(kBaseMidiNote);
 				}
@@ -10621,7 +10623,7 @@ int main(void)
 				request_track_sample_load = false;
 				const int32_t track = request_track_sample_index;
 				request_track_sample_index = -1;
-				if (perform_context == PerformContext::Track && track == perform_context_track)
+				if (play_edit_context == PlayEditContext::PlayTrack && track == play_edit_track)
 				{
 					ApplyTrackSampleState(track);
 					request_perform_redraw = true;
@@ -10852,7 +10854,7 @@ int main(void)
 					SetSampleContext(SampleContext::Play);
 					if (fx_detail_prev_mode == UiMode::PlayTrack)
 					{
-						SetFxContext(FxContext::Track, perform_context_track);
+						SetFxContext(FxContext::PlayTrack, play_edit_track);
 					}
 					else
 					{
@@ -10885,9 +10887,9 @@ int main(void)
 			else if (mode == UiMode::PlayTrack)
 			{
 				SetSampleContext(SampleContext::Play);
-				SetFxContext(FxContext::Track, perform_context_track);
+				SetFxContext(FxContext::PlayTrack, play_edit_track);
 			}
-			if (IsPerformUiMode(last_mode) && !IsPerformUiMode(mode))
+			if (IsFxEditUiMode(last_mode) && !IsFxEditUiMode(mode))
 			{
 				ResetPerformVoices();
 			}
@@ -11312,7 +11314,7 @@ int main(void)
 		else
 		{
 				if ((ui_mode == UiMode::Record && record_state == RecordState::Review)
-					|| (IsPerformUiMode(ui_mode) && sample_loaded)
+					|| (IsFxEditUiMode(ui_mode) && sample_loaded)
 					|| (ui_mode == UiMode::FxDetail && sample_loaded)
 					|| (ui_mode == UiMode::Edt && sample_loaded)
 					|| (ui_mode == UiMode::Load && load_context == LoadContext::Edt)
