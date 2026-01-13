@@ -67,6 +67,7 @@ constexpr int kPlayBpm = 120;
 constexpr int32_t kPlayBpmMin = 40;
 constexpr int32_t kPlayBpmMax = 240;
 constexpr int32_t kPlayTrackCount = 4;
+constexpr int32_t kSampleCacheCount = 8;
 constexpr int kPlayStepCount = 16;
 constexpr float kPlayTrackRetriggerFadeMs = 3.0f;
 constexpr uint32_t kPreviewReadBudgetMs = 2;
@@ -882,6 +883,8 @@ volatile LoadDestination request_load_destination = LoadDestination::Play;
 volatile int32_t wav_file_count = 0;
 volatile int32_t load_target_index = -1;
 volatile LoadDestination load_target_selected = LoadDestination::Play;
+static LoadDestination load_destination = LoadDestination::Perform;
+static int32_t load_target_track = -1;
 
 bool sd_mounted = false;
 static bool sd_detected_last = true;
@@ -967,11 +970,11 @@ DSY_SDRAM_BSS int16_t main_sample_buffer_l[kMaxSampleSamples];
 DSY_SDRAM_BSS int16_t main_sample_buffer_r[kMaxSampleSamples];
 DSY_SDRAM_BSS int16_t play_sample_buffer_l[kMaxSampleSamples];
 DSY_SDRAM_BSS int16_t play_sample_buffer_r[kMaxSampleSamples];
-DSY_SDRAM_BSS int16_t track_sample_cache_l[kPlayTrackCount][kMaxSampleSamples];
-DSY_SDRAM_BSS int16_t track_sample_cache_r[kPlayTrackCount][kMaxSampleSamples];
+DSY_SDRAM_BSS int16_t track_sample_cache_l[kSampleCacheCount][kMaxSampleSamples];
+DSY_SDRAM_BSS int16_t track_sample_cache_r[kSampleCacheCount][kMaxSampleSamples];
 // Tracks reference cache buffers; loading never overwrites buffers in use. All file I/O is main-loop chunked.
-static SampleBuffer g_sample_cache[kPlayTrackCount];
-static bool g_buffer_in_use[kPlayTrackCount] = {};
+static SampleBuffer g_sample_cache[kSampleCacheCount];
+static bool g_buffer_in_use[kSampleCacheCount] = {};
 static uint32_t g_sample_cache_use_counter = 0;
 static int16_t* sample_buffer_l = main_sample_buffer_l;
 static int16_t* sample_buffer_r = main_sample_buffer_r;
@@ -3263,7 +3266,7 @@ static void RefreshPlaySampleStateFromTrack(int32_t track)
 		return;
 	}
 	const TrackSampleState& ts = track_samples[track];
-	if (!ts.loaded || ts.buffer_id < 0 || ts.buffer_id >= kPlayTrackCount)
+	if (!ts.loaded || ts.buffer_id < 0 || ts.buffer_id >= kSampleCacheCount)
 	{
 		state.loaded = false;
 		state.length = 0;
@@ -3313,7 +3316,7 @@ static void SetPlaySampleBufferForTrack(int32_t track)
 		return;
 	}
 	const TrackSampleState& ts = track_samples[track];
-	if (ts.loaded && ts.buffer_id >= 0 && ts.buffer_id < kPlayTrackCount)
+	if (ts.loaded && ts.buffer_id >= 0 && ts.buffer_id < kSampleCacheCount)
 	{
 		const SampleBuffer& buf = g_sample_cache[ts.buffer_id];
 		if (buf.valid)
@@ -3329,7 +3332,7 @@ static void SetPlaySampleBufferForTrack(int32_t track)
 
 static bool AnyPlayTrackLoaded()
 {
-	for (int i = 0; i < kPlayTrackCount; ++i)
+	for (int i = 0; i < kSampleCacheCount; ++i)
 	{
 		if (TrackHasSampleState(i))
 		{
@@ -3414,7 +3417,7 @@ static void UpdateMasterFxTailSamples(float sample_rate)
 
 static void InitSampleCache()
 {
-	for (int i = 0; i < kPlayTrackCount; ++i)
+	for (int i = 0; i < kSampleCacheCount; ++i)
 	{
 		g_sample_cache[i].l = track_sample_cache_l[i];
 		g_sample_cache[i].r = track_sample_cache_r[i];
@@ -3429,9 +3432,9 @@ static void InitSampleCache()
 	}
 }
 
-static void UpdateBufferUseFromVoices()
+static void UpdateBufferUseMask()
 {
-	for (int i = 0; i < kPlayTrackCount; ++i)
+	for (int i = 0; i < kSampleCacheCount; ++i)
 	{
 		g_buffer_in_use[i] = false;
 	}
@@ -3445,10 +3448,19 @@ static void UpdateBufferUseFromVoices()
 				continue;
 			}
 			const int32_t buffer_id = voice.buffer_id;
-			if (buffer_id >= 0 && buffer_id < kPlayTrackCount)
+			if (buffer_id >= 0 && buffer_id < kSampleCacheCount)
 			{
 				g_buffer_in_use[buffer_id] = true;
 			}
+		}
+	}
+	for (int track = 0; track < kPlayTrackCount; ++track)
+	{
+		const TrackSampleState& state = track_samples[track];
+		const int32_t buffer_id = state.buffer_id;
+		if (state.loaded && buffer_id >= 0 && buffer_id < kSampleCacheCount)
+		{
+			g_buffer_in_use[buffer_id] = true;
 		}
 	}
 }
@@ -3459,7 +3471,7 @@ static int32_t FindSampleCacheByName(const char* name)
 	{
 		return -1;
 	}
-	for (int i = 0; i < kPlayTrackCount; ++i)
+	for (int i = 0; i < kSampleCacheCount; ++i)
 	{
 		if (g_sample_cache[i].valid && strcmp(g_sample_cache[i].name, name) == 0)
 		{
@@ -3471,7 +3483,7 @@ static int32_t FindSampleCacheByName(const char* name)
 
 static int32_t FindAvailableSampleCacheBuffer()
 {
-	for (int i = 0; i < kPlayTrackCount; ++i)
+	for (int i = 0; i < kSampleCacheCount; ++i)
 	{
 		if (!g_sample_cache[i].valid && !g_sample_cache[i].loading)
 		{
@@ -3501,7 +3513,7 @@ static void AssignTrackBuffer(int32_t track, int32_t buffer_id, bool reset_trim)
 	{
 		return;
 	}
-	if (buffer_id < 0 || buffer_id >= kPlayTrackCount)
+	if (buffer_id < 0 || buffer_id >= kSampleCacheCount)
 	{
 		track_samples[track].loaded = false;
 		track_samples[track].buffer_id = -1;
@@ -3534,7 +3546,7 @@ static bool TrackHasSampleState(int32_t track)
 	{
 		return false;
 	}
-	if (state.buffer_id < 0 || state.buffer_id >= kPlayTrackCount)
+	if (state.buffer_id < 0 || state.buffer_id >= kSampleCacheCount)
 	{
 		return false;
 	}
@@ -3633,7 +3645,7 @@ static void StartSequencerVoiceWindow(size_t window_start,
 									  int32_t track,
 									  int8_t buffer_id)
 {
-	if (buffer_id < 0 || buffer_id >= kPlayTrackCount)
+	if (buffer_id < 0 || buffer_id >= kSampleCacheCount)
 	{
 		return;
 	}
@@ -3731,7 +3743,7 @@ static void TriggerSequencerStep(int32_t step)
 		}
 		const TrackSampleState& state = track_samples[track];
 		const int8_t buffer_id = state.buffer_id;
-		if (buffer_id < 0 || buffer_id >= kPlayTrackCount)
+		if (buffer_id < 0 || buffer_id >= kSampleCacheCount)
 		{
 			continue;
 		}
@@ -4276,7 +4288,7 @@ static bool BeginTrackLoadJob(int32_t track, int32_t buffer_id, const char* name
 	{
 		return false;
 	}
-	if (buffer_id < 0 || buffer_id >= kPlayTrackCount)
+	if (buffer_id < 0 || buffer_id >= kSampleCacheCount)
 	{
 		return false;
 	}
@@ -4383,7 +4395,7 @@ static void FinishTrackLoadJob(bool success)
 		return;
 	}
 	const int32_t buffer_id = g_track_load_job.buffer_id;
-	if (buffer_id >= 0 && buffer_id < kPlayTrackCount)
+	if (buffer_id >= 0 && buffer_id < kSampleCacheCount)
 	{
 		SampleBuffer& buf = g_sample_cache[buffer_id];
 		if (success)
@@ -4424,7 +4436,7 @@ static void TickTrackLoadJob()
 		return;
 	}
 	const int32_t buffer_id = g_track_load_job.buffer_id;
-	if (buffer_id < 0 || buffer_id >= kPlayTrackCount)
+	if (buffer_id < 0 || buffer_id >= kSampleCacheCount)
 	{
 		FinishTrackLoadJob(false);
 		return;
@@ -4443,9 +4455,10 @@ static void TickTrackLoadJob()
 		return;
 	}
 	size_t frames_to_read = total_frames - dest_index;
-	if (frames_to_read > kSampleChunkFrames)
+	const size_t max_frames = playhead_running ? 64 : kSampleChunkFrames;
+	if (frames_to_read > max_frames)
 	{
-		frames_to_read = kSampleChunkFrames;
+		frames_to_read = max_frames;
 	}
 	const size_t bytes_to_read = frames_to_read * g_track_load_job.num_channels * sizeof(int16_t);
 	UINT bytes_read = 0;
@@ -4556,7 +4569,7 @@ static bool ApplyTrackSampleState(int32_t track)
 		request_length_redraw = true;
 		return false;
 	}
-	if (state.buffer_id >= kPlayTrackCount)
+	if (state.buffer_id >= kSampleCacheCount)
 	{
 		return false;
 	}
@@ -8891,6 +8904,16 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				else
 				{
 					edt_prev_mode = ui_mode;
+					if (track_mode)
+					{
+						load_destination = LoadDestination::Play;
+						load_target_track = play_edit_track;
+					}
+					else
+					{
+						load_destination = LoadDestination::Perform;
+						load_target_track = -1;
+					}
 					edt_sample_context = IsPlayUiMode(ui_mode) ? SampleContext::Play : SampleContext::Perform;
 					ui_mode = UiMode::Edt;
 					waveform_ready = true;
@@ -9040,6 +9063,16 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 		{
 			delete_mode = false;
 			delete_confirm = false;
+			if (edt_prev_mode == UiMode::PlayTrack)
+			{
+				load_destination = LoadDestination::Play;
+				load_target_track = play_edit_track;
+			}
+			else
+			{
+				load_destination = LoadDestination::Perform;
+				load_target_track = -1;
+			}
 			edt_sample_context = current_sample_context;
 			load_context = LoadContext::Edt;
 			load_prev_mode = edt_prev_mode;
@@ -10659,7 +10692,7 @@ static float last_chorus_wow = -1.0f;
 				if (play_mode)
 				{
 					const int8_t buffer_id = voice.buffer_id;
-					if (buffer_id < 0 || buffer_id >= kPlayTrackCount)
+					if (buffer_id < 0 || buffer_id >= kSampleCacheCount)
 					{
 						voice.active = false;
 						voice.releasing = false;
@@ -11211,6 +11244,7 @@ int main(void)
 	bool last_edt_playhead_active = false;
 	LoadDestination last_load_target = LoadDestination::Play;
 	uint32_t last_ui_ms = System::GetNow();
+	uint32_t last_track_load_ms = 0;
 	while(1)
 	{
 		// Service pending waveform computation (from audio callback)
@@ -11274,9 +11308,17 @@ int main(void)
 					break;
 			}
 		}
-		UpdateBufferUseFromVoices();
+		UpdateBufferUseMask();
 		ServiceTrackLoadRequest();
-		TickTrackLoadJob();
+		{
+			const uint32_t now = System::GetNow();
+			const uint32_t interval = playhead_running ? 2U : 1U;
+			if ((uint32_t)(now - last_track_load_ms) >= interval)
+			{
+				last_track_load_ms = now;
+				TickTrackLoadJob();
+			}
+		}
 
 		{
 			uint32_t now = System::GetNow();
@@ -11485,85 +11527,109 @@ int main(void)
 				const int32_t index = request_load_index;
 				request_load_index = -1;
 				const LoadDestination dest = request_load_destination;
-				SampleContext target_ctx = SampleContext::Play;
-				if (load_context == LoadContext::Edt)
+				if (load_context == LoadContext::Edt && load_destination == LoadDestination::Play)
 				{
-					target_ctx = edt_sample_context;
-				}
-				else if (load_context == LoadContext::Track)
-				{
-					target_ctx = SampleContext::Play;
-				}
-				else if (dest == LoadDestination::Perform)
-				{
-					target_ctx = SampleContext::Perform;
-				}
-				SetSampleContext(target_ctx);
-				LogLine("Load menu: sample request index=%ld target=%s",
-						static_cast<long>(index),
-						LoadDestinationName(dest));
-				if (index >= 0 && index < wav_file_count)
-				{
-					LogLine("Load menu: sample name=%s", wav_files[index]);
-				}
-				else
-				{
-					LogLine("Load menu: sample name unavailable (count=%ld)", static_cast<long>(wav_file_count));
-				}
-				if (load_context == LoadContext::Track)
-				{
-					const int32_t track = load_context_track;
-					if (index >= 0 && index < wav_file_count && track >= 0 && track < kPlayTrackCount)
+					if (index >= 0 && index < wav_file_count
+						&& load_target_track >= 0 && load_target_track < kPlayTrackCount)
 					{
-						QueueTrackSampleLoad(track, wav_files[index]);
+						QueueTrackSampleLoad(load_target_track, wav_files[index]);
 						play_edit_context = PlayEditContext::PlayTrack;
-						play_edit_track = track;
+						play_edit_track = load_target_track;
 						ui_mode = UiMode::PlayTrack;
 						request_track_sample_load = true;
-						request_track_sample_index = track;
+						request_track_sample_index = load_target_track;
 						request_editor_redraw = true;
-						LogLine("Track load queued, entering TRACK menu");
+						LogLine("EDT load queued for track %ld", static_cast<long>(load_target_track));
 						load_context = LoadContext::Main;
 					}
 					else
 					{
-						LogLine("Track load failed: invalid index/track");
+						LogLine("EDT load failed: invalid index/track");
 						ui_mode = UiMode::Load;
 					}
 				}
-				else if (LoadSampleAtIndex(index))
+				else
 				{
+					SampleContext target_ctx = SampleContext::Play;
 					if (load_context == LoadContext::Edt)
 					{
-						LogLine("Load success, returning to EDT");
-						ui_mode = UiMode::Edt;
-						if (sample_loaded && sample_length > 0)
-						{
-							waveform_ready = true;
-						}
-						waveform_dirty = true;
-						request_length_redraw = true;
+						target_ctx = edt_sample_context;
+					}
+					else if (load_context == LoadContext::Track)
+					{
+						target_ctx = SampleContext::Play;
 					}
 					else if (dest == LoadDestination::Perform)
 					{
-						LogLine("Load success, entering PERFORM menu");
-						ui_mode = UiMode::Perform;
-						menu_index = 2;
+						target_ctx = SampleContext::Perform;
+					}
+					SetSampleContext(target_ctx);
+					LogLine("Load menu: sample request index=%ld target=%s",
+							static_cast<long>(index),
+							LoadDestinationName(dest));
+					if (index >= 0 && index < wav_file_count)
+					{
+						LogLine("Load menu: sample name=%s", wav_files[index]);
 					}
 					else
 					{
-						LogLine("Load success, entering PLAY menu");
-						ui_mode = UiMode::Play;
+						LogLine("Load menu: sample name unavailable (count=%ld)", static_cast<long>(wav_file_count));
 					}
-					load_context = LoadContext::Main;
-				}
-				else
-				{
-					LogLine("Load failed");
-					ui_mode = UiMode::Load;
-					if (load_context != LoadContext::Track)
+					if (load_context == LoadContext::Track)
 					{
+						const int32_t track = load_context_track;
+						if (index >= 0 && index < wav_file_count && track >= 0 && track < kPlayTrackCount)
+						{
+							QueueTrackSampleLoad(track, wav_files[index]);
+							play_edit_context = PlayEditContext::PlayTrack;
+							play_edit_track = track;
+							ui_mode = UiMode::PlayTrack;
+							request_track_sample_load = true;
+							request_track_sample_index = track;
+							request_editor_redraw = true;
+							LogLine("Track load queued, entering TRACK menu");
+							load_context = LoadContext::Main;
+						}
+						else
+						{
+							LogLine("Track load failed: invalid index/track");
+							ui_mode = UiMode::Load;
+						}
+					}
+					else if (LoadSampleAtIndex(index))
+					{
+						if (load_context == LoadContext::Edt)
+						{
+							LogLine("Load success, returning to EDT");
+							ui_mode = UiMode::Edt;
+							if (sample_loaded && sample_length > 0)
+							{
+								waveform_ready = true;
+							}
+							waveform_dirty = true;
+							request_length_redraw = true;
+						}
+						else if (dest == LoadDestination::Perform)
+						{
+							LogLine("Load success, entering PERFORM menu");
+							ui_mode = UiMode::Perform;
+							menu_index = 2;
+						}
+						else
+						{
+							LogLine("Load success, entering PLAY menu");
+							ui_mode = UiMode::Play;
+						}
 						load_context = LoadContext::Main;
+					}
+					else
+					{
+						LogLine("Load failed");
+						ui_mode = UiMode::Load;
+						if (load_context != LoadContext::Track)
+						{
+							load_context = LoadContext::Main;
+						}
 					}
 				}
 			}
