@@ -946,6 +946,19 @@ struct SampleState
 	bool from_recording = false;
 };
 
+struct SampleBuffer
+{
+	int16_t* l = nullptr;
+	int16_t* r = nullptr;
+	uint32_t length = 0;
+	uint32_t sample_rate = 48000;
+	uint16_t channels = 1;
+	bool valid = false;
+	bool loading = false;
+	char name[kMaxWavNameLen] = {};
+	uint32_t last_used_counter = 0;
+};
+
 static SampleState main_sample_state;
 static SampleState play_sample_state;
 static SampleContext current_sample_context = SampleContext::Perform;
@@ -954,6 +967,12 @@ DSY_SDRAM_BSS int16_t main_sample_buffer_l[kMaxSampleSamples];
 DSY_SDRAM_BSS int16_t main_sample_buffer_r[kMaxSampleSamples];
 DSY_SDRAM_BSS int16_t play_sample_buffer_l[kMaxSampleSamples];
 DSY_SDRAM_BSS int16_t play_sample_buffer_r[kMaxSampleSamples];
+DSY_SDRAM_BSS int16_t track_sample_cache_l[kPlayTrackCount][kMaxSampleSamples];
+DSY_SDRAM_BSS int16_t track_sample_cache_r[kPlayTrackCount][kMaxSampleSamples];
+// Tracks reference cache buffers; loading never overwrites buffers in use. All file I/O is main-loop chunked.
+static SampleBuffer g_sample_cache[kPlayTrackCount];
+static bool g_buffer_in_use[kPlayTrackCount] = {};
+static uint32_t g_sample_cache_use_counter = 0;
 static int16_t* sample_buffer_l = main_sample_buffer_l;
 static int16_t* sample_buffer_r = main_sample_buffer_r;
 volatile size_t sample_length = 0;
@@ -984,6 +1003,7 @@ struct ChannelSlot
 	float release_pos = 0.0f;
 	int32_t note = -1;
 	int32_t track = -1;
+	int8_t buffer_id = -1;
 	size_t offset = 0;
 	size_t length = 0;
 	uint32_t env_samples = 0;
@@ -993,6 +1013,7 @@ struct ChannelSlot
 	size_t retrigger_offset = 0;
 	size_t retrigger_length = 0;
 	float retrigger_rate = 1.0f;
+	int8_t retrigger_buffer_id = -1;
 };
 
 static ChannelSlot channel_slots[kChannelSlotCount];
@@ -1050,6 +1071,7 @@ struct TrackSampleState
 {
 	bool loaded = false;
 	char name[kMaxWavNameLen] = {};
+	int8_t buffer_id = -1;
 	float trim_start = 0.0f;
 	float trim_end = 1.0f;
 };
@@ -1083,6 +1105,31 @@ static int32_t load_mode_index = 0;
 static LoadStubMode load_stub_mode = LoadStubMode::Presets;
 static volatile bool request_track_sample_load = false;
 static volatile int32_t request_track_sample_index = -1;
+
+struct TrackLoadRequest
+{
+	bool pending = false;
+	int32_t track = -1;
+	char name[kMaxWavNameLen] = {};
+};
+
+struct TrackLoadJob
+{
+	bool active = false;
+	int32_t track = -1;
+	int32_t buffer_id = -1;
+	char name[kMaxWavNameLen] = {};
+	uint16_t num_channels = 1;
+	uint16_t bits_per_sample = 16;
+	uint32_t sample_rate = 48000;
+	size_t total_frames = 0;
+	size_t frames_loaded = 0;
+	uint32_t data_offset = 0;
+};
+
+static TrackLoadRequest g_track_load_request = {};
+static TrackLoadJob g_track_load_job = {};
+static FIL g_track_load_file;
 
 // Normalized trim window (0..1 over entire sample)
 float trim_start = 0.0f;
@@ -3195,6 +3242,103 @@ static void LoadSampleState(const SampleState& state)
 	waveform_from_recording = state.from_recording;
 }
 
+static bool TrackHasSampleState(int32_t track);
+static bool ApplyTrackSampleState(int32_t track);
+
+static void RefreshPlaySampleStateFromTrack(int32_t track)
+{
+	SampleState& state = play_sample_state;
+	if (track < 0 || track >= kPlayTrackCount)
+	{
+		state.loaded = false;
+		state.length = 0;
+		state.play_start = 0;
+		state.play_end = 0;
+		state.rate = 48000;
+		state.channels = 1;
+		state.name[0] = '\0';
+		state.trim_start = 0.0f;
+		state.trim_end = 1.0f;
+		state.from_recording = false;
+		return;
+	}
+	const TrackSampleState& ts = track_samples[track];
+	if (!ts.loaded || ts.buffer_id < 0 || ts.buffer_id >= kPlayTrackCount)
+	{
+		state.loaded = false;
+		state.length = 0;
+		state.play_start = 0;
+		state.play_end = 0;
+		state.rate = 48000;
+		state.channels = 1;
+		state.name[0] = '\0';
+		state.trim_start = 0.0f;
+		state.trim_end = 1.0f;
+		state.from_recording = false;
+		return;
+	}
+	const SampleBuffer& buf = g_sample_cache[ts.buffer_id];
+	if (!buf.valid)
+	{
+		state.loaded = false;
+		state.length = 0;
+		state.play_start = 0;
+		state.play_end = 0;
+		state.rate = 48000;
+		state.channels = 1;
+		state.name[0] = '\0';
+		state.trim_start = 0.0f;
+		state.trim_end = 1.0f;
+		state.from_recording = false;
+		return;
+	}
+	CopyString(state.name, buf.name, kMaxWavNameLen);
+	state.length = buf.length;
+	state.play_start = 0;
+	state.play_end = buf.length;
+	state.rate = buf.sample_rate;
+	state.channels = buf.channels;
+	state.loaded = true;
+	state.trim_start = ts.trim_start;
+	state.trim_end = ts.trim_end;
+	state.from_recording = false;
+}
+
+static void SetPlaySampleBufferForTrack(int32_t track)
+{
+	if (track < 0 || track >= kPlayTrackCount)
+	{
+		sample_buffer_l = play_sample_buffer_l;
+		sample_buffer_r = play_sample_buffer_r;
+		return;
+	}
+	const TrackSampleState& ts = track_samples[track];
+	if (ts.loaded && ts.buffer_id >= 0 && ts.buffer_id < kPlayTrackCount)
+	{
+		const SampleBuffer& buf = g_sample_cache[ts.buffer_id];
+		if (buf.valid)
+		{
+			sample_buffer_l = buf.l;
+			sample_buffer_r = buf.r;
+			return;
+		}
+	}
+	sample_buffer_l = play_sample_buffer_l;
+	sample_buffer_r = play_sample_buffer_r;
+}
+
+static bool AnyPlayTrackLoaded()
+{
+	for (int i = 0; i < kPlayTrackCount; ++i)
+	{
+		if (TrackHasSampleState(i))
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
 static void SetSampleContext(SampleContext ctx)
 {
 	if (current_sample_context == ctx)
@@ -3211,8 +3355,8 @@ static void SetSampleContext(SampleContext ctx)
 	}
 	else
 	{
-		sample_buffer_l = play_sample_buffer_l;
-		sample_buffer_r = play_sample_buffer_r;
+		RefreshPlaySampleStateFromTrack(play_edit_track);
+		SetPlaySampleBufferForTrack(play_edit_track);
 	}
 	LoadSampleState(SampleStateForContext(ctx));
 	LoadWaveformCache(ctx);
@@ -3268,26 +3412,133 @@ static void UpdateMasterFxTailSamples(float sample_rate)
 	}
 }
 
+static void InitSampleCache()
+{
+	for (int i = 0; i < kPlayTrackCount; ++i)
+	{
+		g_sample_cache[i].l = track_sample_cache_l[i];
+		g_sample_cache[i].r = track_sample_cache_r[i];
+		g_sample_cache[i].length = 0;
+		g_sample_cache[i].sample_rate = 48000;
+		g_sample_cache[i].channels = 1;
+		g_sample_cache[i].valid = false;
+		g_sample_cache[i].loading = false;
+		g_sample_cache[i].name[0] = '\0';
+		g_sample_cache[i].last_used_counter = 0;
+		g_buffer_in_use[i] = false;
+	}
+}
+
+static void UpdateBufferUseFromVoices()
+{
+	for (int i = 0; i < kPlayTrackCount; ++i)
+	{
+		g_buffer_in_use[i] = false;
+	}
+	{
+		daisy::ScopedIrqBlocker irq;
+		for (int v = 0; v < kChannelSlotCount; ++v)
+		{
+			const auto& voice = channel_slots[v];
+			if (!voice.active)
+			{
+				continue;
+			}
+			const int32_t buffer_id = voice.buffer_id;
+			if (buffer_id >= 0 && buffer_id < kPlayTrackCount)
+			{
+				g_buffer_in_use[buffer_id] = true;
+			}
+		}
+	}
+}
+
+static int32_t FindSampleCacheByName(const char* name)
+{
+	if (name == nullptr || name[0] == '\0')
+	{
+		return -1;
+	}
+	for (int i = 0; i < kPlayTrackCount; ++i)
+	{
+		if (g_sample_cache[i].valid && strcmp(g_sample_cache[i].name, name) == 0)
+		{
+			return i;
+		}
+	}
+	return -1;
+}
+
+static int32_t FindAvailableSampleCacheBuffer()
+{
+	for (int i = 0; i < kPlayTrackCount; ++i)
+	{
+		if (!g_sample_cache[i].valid && !g_sample_cache[i].loading)
+		{
+			return i;
+		}
+	}
+	int32_t best = -1;
+	uint32_t best_use = 0;
+	for (int i = 0; i < kPlayTrackCount; ++i)
+	{
+		if (g_sample_cache[i].loading || g_buffer_in_use[i])
+		{
+			continue;
+		}
+		if (best < 0 || g_sample_cache[i].last_used_counter < best_use)
+		{
+			best = i;
+			best_use = g_sample_cache[i].last_used_counter;
+		}
+	}
+	return best;
+}
+
+static void AssignTrackBuffer(int32_t track, int32_t buffer_id, bool reset_trim)
+{
+	if (track < 0 || track >= kPlayTrackCount)
+	{
+		return;
+	}
+	if (buffer_id < 0 || buffer_id >= kPlayTrackCount)
+	{
+		track_samples[track].loaded = false;
+		track_samples[track].buffer_id = -1;
+		track_samples[track].name[0] = '\0';
+		return;
+	}
+	SampleBuffer& buf = g_sample_cache[buffer_id];
+	if (!buf.valid)
+	{
+		return;
+	}
+	track_samples[track].loaded = true;
+	track_samples[track].buffer_id = static_cast<int8_t>(buffer_id);
+	CopyString(track_samples[track].name, buf.name, kMaxWavNameLen);
+	if (reset_trim)
+	{
+		track_samples[track].trim_start = 0.0f;
+		track_samples[track].trim_end = 1.0f;
+	}
+}
+
 static bool TrackHasSampleState(int32_t track)
 {
 	if (track < 0 || track >= kPlayTrackCount)
 	{
 		return false;
 	}
-	return track_samples[track].loaded && track_samples[track].name[0] != '\0';
-}
-
-static bool TrackSampleMatchesLoaded(int32_t track)
-{
-	if (!TrackHasSampleState(track))
+	const TrackSampleState& state = track_samples[track];
+	if (!state.loaded || state.name[0] == '\0')
 	{
 		return false;
 	}
-	if (!sample_loaded || sample_length < 1)
+	if (state.buffer_id < 0 || state.buffer_id >= kPlayTrackCount)
 	{
 		return false;
 	}
-	return strcmp(loaded_sample_name, track_samples[track].name) == 0;
+	return g_sample_cache[state.buffer_id].valid;
 }
 
 static bool ComputeTrimWindowFrames(float trim_start_in,
@@ -3347,12 +3598,14 @@ static inline void InitSequencerVoiceSlot(ChannelSlot& voice,
 										  size_t window_start,
 										  size_t window_end,
 										  int32_t track,
+										  int8_t buffer_id,
 										  float rate)
 {
 	voice.active = true;
 	voice.releasing = false;
 	voice.note = -1;
 	voice.track = track;
+	voice.buffer_id = buffer_id;
 	voice.phase = 0.0f;
 	voice.amp = 1.0f;
 	voice.env = 0.0f;
@@ -3368,33 +3621,43 @@ static inline void InitSequencerVoiceSlot(ChannelSlot& voice,
 	voice.retrigger_offset = 0;
 	voice.retrigger_length = 0;
 	voice.retrigger_rate = 1.0f;
+	voice.retrigger_buffer_id = -1;
 	channel_lpf_l1[voice_index].Reset();
 	channel_lpf_l2[voice_index].Reset();
 	channel_lpf_r1[voice_index].Reset();
 	channel_lpf_r2[voice_index].Reset();
 }
 
-static void StartSequencerVoiceWindow(size_t window_start, size_t window_end, int32_t track)
+static void StartSequencerVoiceWindow(size_t window_start,
+									  size_t window_end,
+									  int32_t track,
+									  int8_t buffer_id)
 {
-	if (!sample_loaded || sample_length < 1)
+	if (buffer_id < 0 || buffer_id >= kPlayTrackCount)
 	{
 		return;
 	}
-	if (window_end > sample_length || window_end == 0)
+	const SampleBuffer& buf = g_sample_cache[buffer_id];
+	if (!buf.valid || buf.length < 1)
 	{
-		window_end = sample_length;
+		return;
+	}
+	g_sample_cache[buffer_id].last_used_counter = ++g_sample_cache_use_counter;
+	if (window_end > buf.length || window_end == 0)
+	{
+		window_end = buf.length;
 	}
 	if (window_end <= window_start)
 	{
 		window_start = 0;
-		window_end = sample_length;
+		window_end = buf.length;
 	}
 	if (window_end <= window_start)
 	{
 		return;
 	}
 
-	const float sr = (sample_rate == 0) ? 48000.0f : static_cast<float>(sample_rate);
+	const float sr = (buf.sample_rate == 0) ? 48000.0f : static_cast<float>(buf.sample_rate);
 	const float rate = sr / hw.AudioSampleRate();
 	int voice_index = -1;
 	for (int i = 0; i < kChannelSlotCount; ++i)
@@ -3447,10 +3710,11 @@ static void StartSequencerVoiceWindow(size_t window_start, size_t window_end, in
 		voice.retrigger_offset = window_start;
 		voice.retrigger_length = window_end - window_start;
 		voice.retrigger_rate = rate;
+		voice.retrigger_buffer_id = buffer_id;
 		return;
 	}
 
-	InitSequencerVoiceSlot(voice, voice_index, window_start, window_end, track, rate);
+	InitSequencerVoiceSlot(voice, voice_index, window_start, window_end, track, buffer_id, rate);
 }
 
 static void TriggerSequencerStep(int32_t step)
@@ -3465,21 +3729,28 @@ static void TriggerSequencerStep(int32_t step)
 		{
 			continue;
 		}
-		if (!TrackSampleMatchesLoaded(track))
+		const TrackSampleState& state = track_samples[track];
+		const int8_t buffer_id = state.buffer_id;
+		if (buffer_id < 0 || buffer_id >= kPlayTrackCount)
+		{
+			continue;
+		}
+		const SampleBuffer& buf = g_sample_cache[buffer_id];
+		if (!buf.valid || buf.length < 1)
 		{
 			continue;
 		}
 		size_t window_start = 0;
 		size_t window_end = 0;
-		if (!ComputeTrimWindowFrames(track_samples[track].trim_start,
-									 track_samples[track].trim_end,
-									 sample_length,
+		if (!ComputeTrimWindowFrames(state.trim_start,
+									 state.trim_end,
+									 buf.length,
 									 window_start,
 									 window_end))
 		{
 			continue;
 		}
-		StartSequencerVoiceWindow(window_start, window_end, track);
+		StartSequencerVoiceWindow(window_start, window_end, track, buffer_id);
 	}
 }
 
@@ -3644,6 +3915,15 @@ static void StoreTrackSampleState(int32_t track)
 	}
 	track_samples[track].loaded = sample_loaded;
 	CopyString(track_samples[track].name, loaded_sample_name, kMaxWavNameLen);
+	if (sample_loaded)
+	{
+		const int32_t buffer_id = FindSampleCacheByName(loaded_sample_name);
+		track_samples[track].buffer_id = (buffer_id >= 0) ? static_cast<int8_t>(buffer_id) : -1;
+	}
+	else
+	{
+		track_samples[track].buffer_id = -1;
+	}
 	track_samples[track].trim_start = trim_start;
 	track_samples[track].trim_end = trim_end;
 }
@@ -3657,6 +3937,7 @@ static void InitTrackStates()
 		play_track_state[t] = default_channel_state;
 		track_samples[t].loaded = false;
 		track_samples[t].name[0] = '\0';
+		track_samples[t].buffer_id = -1;
 		track_samples[t].trim_start = 0.0f;
 		track_samples[t].trim_end = 1.0f;
 	}
@@ -3668,14 +3949,11 @@ static void EnterPlayTrack(int32_t track)
 	{
 		return;
 	}
-	SetSampleContext(SampleContext::Play);
 	play_edit_context = PlayEditContext::PlayTrack;
 	play_edit_track = track;
-	if (!TrackSampleMatchesLoaded(track))
-	{
-		request_track_sample_load = true;
-		request_track_sample_index = track;
-	}
+	SetSampleContext(SampleContext::Play);
+	request_track_sample_load = true;
+	request_track_sample_index = track;
 	ui_mode = UiMode::PlayTrack;
 	request_editor_redraw = true;
 }
@@ -3708,12 +3986,14 @@ static void ResetChannelSlots()
 		voice.offset = 0;
 		voice.length = 0;
 		voice.env_samples = 0;
+		voice.buffer_id = -1;
 		voice.retrigger_fade_total = 0;
 		voice.retrigger_fade_remaining = 0;
 		voice.retrigger_pending = false;
 		voice.retrigger_offset = 0;
 		voice.retrigger_length = 0;
 		voice.retrigger_rate = 1.0f;
+		voice.retrigger_buffer_id = -1;
 	}
 	for (int i = 0; i < kChannelSlotCount; ++i)
 	{
@@ -3724,7 +4004,10 @@ static void ResetChannelSlots()
 	}
 }
 
-static void ApplyLoadedSampleFade(size_t length, uint32_t rate)
+static void ApplyLoadedSampleFadeToBuffer(int16_t* buf_l,
+										  int16_t* buf_r,
+										  size_t length,
+										  uint32_t rate)
 {
 	if (length == 0 || rate == 0)
 	{
@@ -3741,10 +4024,10 @@ static void ApplyLoadedSampleFade(size_t length, uint32_t rate)
 	}
 	if (fade_len == 1)
 	{
-		sample_buffer_l[0] = 0;
-		sample_buffer_r[0] = 0;
-		sample_buffer_l[length - 1] = 0;
-		sample_buffer_r[length - 1] = 0;
+		buf_l[0] = 0;
+		buf_r[0] = 0;
+		buf_l[length - 1] = 0;
+		buf_r[length - 1] = 0;
 		return;
 	}
 	const float denom = static_cast<float>(fade_len - 1);
@@ -3753,11 +4036,16 @@ static void ApplyLoadedSampleFade(size_t length, uint32_t rate)
 		const float fade_in = static_cast<float>(i) / denom;
 		const float fade_out = static_cast<float>(fade_len - 1 - i) / denom;
 		const size_t tail_idx = length - fade_len + i;
-		sample_buffer_l[i] = static_cast<int16_t>(static_cast<float>(sample_buffer_l[i]) * fade_in);
-		sample_buffer_r[i] = static_cast<int16_t>(static_cast<float>(sample_buffer_r[i]) * fade_in);
-		sample_buffer_l[tail_idx] = static_cast<int16_t>(static_cast<float>(sample_buffer_l[tail_idx]) * fade_out);
-		sample_buffer_r[tail_idx] = static_cast<int16_t>(static_cast<float>(sample_buffer_r[tail_idx]) * fade_out);
+		buf_l[i] = static_cast<int16_t>(static_cast<float>(buf_l[i]) * fade_in);
+		buf_r[i] = static_cast<int16_t>(static_cast<float>(buf_r[i]) * fade_in);
+		buf_l[tail_idx] = static_cast<int16_t>(static_cast<float>(buf_l[tail_idx]) * fade_out);
+		buf_r[tail_idx] = static_cast<int16_t>(static_cast<float>(buf_r[tail_idx]) * fade_out);
 	}
+}
+
+static void ApplyLoadedSampleFade(size_t length, uint32_t rate)
+{
+	ApplyLoadedSampleFadeToBuffer(sample_buffer_l, sample_buffer_r, length, rate);
 }
 
 static bool LoadSampleFromPath(const char* path)
@@ -3982,6 +4270,275 @@ static bool LoadSampleAtIndex(int32_t index)
 	return LoadSampleFromPath(path);
 }
 
+static bool BeginTrackLoadJob(int32_t track, int32_t buffer_id, const char* name)
+{
+	if (track < 0 || track >= kPlayTrackCount)
+	{
+		return false;
+	}
+	if (buffer_id < 0 || buffer_id >= kPlayTrackCount)
+	{
+		return false;
+	}
+	if (!BSP_SD_IsDetected())
+	{
+		LogLine("Track load failed: SD not detected");
+		sd_mounted = false;
+		return false;
+	}
+	MountSd();
+	if (!sd_mounted)
+	{
+		SdmmcHandler::Config sd_cfg;
+		sd_cfg.Defaults();
+		sdcard.Init(sd_cfg);
+		fsi.Init(FatFSInterface::Config::MEDIA_SD);
+		const uint8_t init_res = BSP_SD_Init();
+		LogLine("SD init: %u", static_cast<unsigned>(init_res));
+		MountSd();
+	}
+	if (!sd_mounted)
+	{
+		LogLine("Track load failed: SD not mounted");
+		return false;
+	}
+	if (BSP_SD_GetCardState() != SD_TRANSFER_OK)
+	{
+		LogLine("Track load failed: SD not ready");
+		return false;
+	}
+	char path[64];
+	BuildFilePath(name, path, sizeof(path));
+	FIL* file = &g_track_load_file;
+	FRESULT res = f_open(file, path, FA_READ);
+	if (res != FR_OK)
+	{
+		LogLine("Track load failed: f_open %s (%d)", FresultName(res), static_cast<int>(res));
+		return false;
+	}
+	WavInfo wav;
+	if (!ParseWavHeader(file, wav))
+	{
+		f_close(file);
+		return false;
+	}
+	if (wav.bits_per_sample != 16)
+	{
+		LogLine("Track load failed: unsupported bit depth %u", (unsigned)wav.bits_per_sample);
+		f_close(file);
+		return false;
+	}
+	if (wav.num_channels < 1 || wav.num_channels > 2)
+	{
+		LogLine("Track load failed: unsupported channel count %u", (unsigned)wav.num_channels);
+		f_close(file);
+		return false;
+	}
+	const size_t bytes_per_sample = wav.bits_per_sample / 8;
+	const size_t frame_bytes = bytes_per_sample * wav.num_channels;
+	size_t total_frames = (frame_bytes == 0) ? 0 : (wav.data_size / frame_bytes);
+	if (total_frames == 0)
+	{
+		LogLine("Track load failed: no data frames");
+		f_close(file);
+		return false;
+	}
+	if (total_frames > kMaxSampleSamples)
+	{
+		LogLine("Track load truncating to %lu frames", static_cast<unsigned long>(kMaxSampleSamples));
+		total_frames = kMaxSampleSamples;
+	}
+	res = f_lseek(file, wav.data_offset);
+	if (res != FR_OK)
+	{
+		LogLine("Track load failed: f_lseek %s (%d)", FresultName(res), static_cast<int>(res));
+		f_close(file);
+		return false;
+	}
+	SampleBuffer& buf = g_sample_cache[buffer_id];
+	buf.loading = true;
+	buf.valid = false;
+	buf.length = 0;
+	buf.sample_rate = wav.sample_rate;
+	buf.channels = wav.num_channels;
+
+	g_track_load_job.active = true;
+	g_track_load_job.track = track;
+	g_track_load_job.buffer_id = buffer_id;
+	CopyString(g_track_load_job.name, name, kMaxWavNameLen);
+	g_track_load_job.num_channels = wav.num_channels;
+	g_track_load_job.bits_per_sample = wav.bits_per_sample;
+	g_track_load_job.sample_rate = wav.sample_rate;
+	g_track_load_job.total_frames = total_frames;
+	g_track_load_job.frames_loaded = 0;
+	g_track_load_job.data_offset = wav.data_offset;
+	LogLine("Track load start: %s", name);
+	return true;
+}
+
+static void FinishTrackLoadJob(bool success)
+{
+	if (!g_track_load_job.active)
+	{
+		return;
+	}
+	const int32_t buffer_id = g_track_load_job.buffer_id;
+	if (buffer_id >= 0 && buffer_id < kPlayTrackCount)
+	{
+		SampleBuffer& buf = g_sample_cache[buffer_id];
+		if (success)
+		{
+			buf.length = static_cast<uint32_t>(g_track_load_job.frames_loaded);
+			buf.valid = (buf.length > 0);
+			buf.loading = false;
+			CopyString(buf.name, g_track_load_job.name, kMaxWavNameLen);
+			ApplyLoadedSampleFadeToBuffer(buf.l, buf.r, buf.length, buf.sample_rate);
+			buf.last_used_counter = ++g_sample_cache_use_counter;
+			AssignTrackBuffer(g_track_load_job.track, buffer_id, true);
+			if (IsPlayUiMode(ui_mode) && g_track_load_job.track == play_edit_track)
+			{
+				SetSampleContext(SampleContext::Play);
+				ApplyTrackSampleState(play_edit_track);
+				waveform_ready = false;
+				waveform_dirty = true;
+				request_length_redraw = true;
+				JobStartWaveform(SampleContext::Play, true);
+				request_editor_redraw = true;
+			}
+		}
+		else
+		{
+			buf.length = 0;
+			buf.valid = false;
+			buf.loading = false;
+		}
+	}
+	f_close(&g_track_load_file);
+	g_track_load_job.active = false;
+}
+
+static void TickTrackLoadJob()
+{
+	if (!g_track_load_job.active)
+	{
+		return;
+	}
+	const int32_t buffer_id = g_track_load_job.buffer_id;
+	if (buffer_id < 0 || buffer_id >= kPlayTrackCount)
+	{
+		FinishTrackLoadJob(false);
+		return;
+	}
+	SampleBuffer& buf = g_sample_cache[buffer_id];
+	if (!buf.loading)
+	{
+		FinishTrackLoadJob(false);
+		return;
+	}
+	const size_t total_frames = g_track_load_job.total_frames;
+	size_t dest_index = g_track_load_job.frames_loaded;
+	if (dest_index >= total_frames)
+	{
+		FinishTrackLoadJob(true);
+		return;
+	}
+	size_t frames_to_read = total_frames - dest_index;
+	if (frames_to_read > kSampleChunkFrames)
+	{
+		frames_to_read = kSampleChunkFrames;
+	}
+	const size_t bytes_to_read = frames_to_read * g_track_load_job.num_channels * sizeof(int16_t);
+	UINT bytes_read = 0;
+	const FRESULT res = f_read(&g_track_load_file, wav_read, bytes_to_read, &bytes_read);
+	if (res != FR_OK || bytes_read == 0)
+	{
+		LogLine("Track load read error %s (%d) at %lu frames",
+			FresultName(res),
+			static_cast<int>(res),
+			static_cast<unsigned long>(dest_index));
+		FinishTrackLoadJob(false);
+		return;
+	}
+	const size_t frames_read = bytes_read / (g_track_load_job.num_channels * sizeof(int16_t));
+	for (size_t i = 0; i < frames_read; ++i)
+	{
+		if (g_track_load_job.num_channels == 1)
+		{
+			const int16_t samp = wav_read[i];
+			buf.l[dest_index] = samp;
+			buf.r[dest_index] = samp;
+			dest_index++;
+		}
+		else
+		{
+			buf.l[dest_index] = wav_read[i * 2];
+			buf.r[dest_index] = wav_read[i * 2 + 1];
+			dest_index++;
+		}
+		if (dest_index >= kMaxSampleSamples)
+		{
+			break;
+		}
+	}
+	g_track_load_job.frames_loaded = dest_index;
+	if (dest_index >= total_frames || frames_read < frames_to_read)
+	{
+		FinishTrackLoadJob(true);
+	}
+}
+
+static void QueueTrackSampleLoad(int32_t track, const char* name)
+{
+	if (track < 0 || track >= kPlayTrackCount)
+	{
+		return;
+	}
+	const int32_t existing = FindSampleCacheByName(name);
+	if (existing >= 0)
+	{
+		AssignTrackBuffer(track, existing, true);
+		if (IsPlayUiMode(ui_mode) && track == play_edit_track)
+		{
+			SetSampleContext(SampleContext::Play);
+			ApplyTrackSampleState(track);
+			waveform_ready = false;
+			waveform_dirty = true;
+			request_length_redraw = true;
+			JobStartWaveform(SampleContext::Play, true);
+			request_editor_redraw = true;
+		}
+		return;
+	}
+	g_track_load_request.pending = true;
+	g_track_load_request.track = track;
+	CopyString(g_track_load_request.name, name, kMaxWavNameLen);
+}
+
+static void ServiceTrackLoadRequest()
+{
+	if (g_track_load_job.active || !g_track_load_request.pending)
+	{
+		return;
+	}
+	const int32_t track = g_track_load_request.track;
+	const int32_t existing = FindSampleCacheByName(g_track_load_request.name);
+	if (existing >= 0)
+	{
+		AssignTrackBuffer(track, existing, true);
+		g_track_load_request.pending = false;
+		return;
+	}
+	const int32_t buffer_id = FindAvailableSampleCacheBuffer();
+	if (buffer_id < 0)
+	{
+		return;
+	}
+	if (BeginTrackLoadJob(track, buffer_id, g_track_load_request.name))
+	{
+		g_track_load_request.pending = false;
+	}
+}
+
 static bool ApplyTrackSampleState(int32_t track)
 {
 	if (track < 0 || track >= kPlayTrackCount)
@@ -3989,7 +4546,7 @@ static bool ApplyTrackSampleState(int32_t track)
 		return false;
 	}
 	const TrackSampleState& state = track_samples[track];
-	if (!state.loaded || state.name[0] == '\0')
+	if (!state.loaded || state.name[0] == '\0' || state.buffer_id < 0)
 	{
 		sample_loaded = false;
 		sample_length = 0;
@@ -3999,22 +4556,23 @@ static bool ApplyTrackSampleState(int32_t track)
 		request_length_redraw = true;
 		return false;
 	}
-	if (TrackSampleMatchesLoaded(track))
-	{
-		trim_start = state.trim_start;
-		trim_end = state.trim_end;
-		UpdateTrimFrames();
-		waveform_dirty = true;
-		request_length_redraw = true;
-		return true;
-	}
-	char path[64];
-	BuildFilePath(state.name, path, sizeof(path));
-	CopyString(loaded_sample_name, state.name, kMaxWavNameLen);
-	if (!LoadSampleFromPath(path))
+	if (state.buffer_id >= kPlayTrackCount)
 	{
 		return false;
 	}
+	const SampleBuffer& buf = g_sample_cache[state.buffer_id];
+	if (!buf.valid)
+	{
+		return false;
+	}
+	sample_buffer_l = buf.l;
+	sample_buffer_r = buf.r;
+	sample_length = buf.length;
+	sample_rate = buf.sample_rate;
+	sample_channels = buf.channels;
+	sample_loaded = (sample_length > 0);
+	waveform_from_recording = false;
+	CopyString(loaded_sample_name, state.name, kMaxWavNameLen);
 	trim_start = state.trim_start;
 	trim_end = state.trim_end;
 	UpdateTrimFrames();
@@ -7380,12 +7938,20 @@ static void StartChannelSlot(int32_t note)
 	voice.releasing = false;
 	voice.note = note;
 	voice.track = -1;
+	voice.buffer_id = -1;
 	voice.phase = 0.0f;
 	voice.amp = 1.0f;
 	voice.env = 0.0f;
 	voice.release_start = 0.0f;
 	voice.release_pos = 0.0f;
 	voice.env_samples = 0;
+	voice.retrigger_fade_total = 0;
+	voice.retrigger_fade_remaining = 0;
+	voice.retrigger_pending = false;
+	voice.retrigger_offset = 0;
+	voice.retrigger_length = 0;
+	voice.retrigger_rate = 1.0f;
+	voice.retrigger_buffer_id = -1;
 	voice.retrigger_fade_total = 0;
 	voice.retrigger_fade_remaining = 0;
 	voice.retrigger_pending = false;
@@ -10087,11 +10653,60 @@ static float last_chorus_wow = -1.0f;
 				{
 					continue;
 				}
+				const int16_t* buf_l = sample_buffer_l;
+				const int16_t* buf_r = sample_buffer_r;
+				bool voice_stereo = sample_stereo;
+				if (play_mode)
+				{
+					const int8_t buffer_id = voice.buffer_id;
+					if (buffer_id < 0 || buffer_id >= kPlayTrackCount)
+					{
+						voice.active = false;
+						voice.releasing = false;
+						voice.env_samples = 0;
+						continue;
+					}
+					const SampleBuffer& buf = g_sample_cache[buffer_id];
+					if (!buf.valid || buf.length == 0)
+					{
+						voice.active = false;
+						voice.releasing = false;
+						voice.env_samples = 0;
+						continue;
+					}
+					if (voice.offset >= buf.length)
+					{
+						voice.active = false;
+						voice.releasing = false;
+						voice.env_samples = 0;
+						continue;
+					}
+					if (voice.offset + voice.length > buf.length)
+					{
+						voice.length = buf.length - voice.offset;
+						if (voice.length == 0)
+						{
+							voice.active = false;
+							voice.releasing = false;
+							voice.env_samples = 0;
+							continue;
+						}
+					}
+					buf_l = buf.l;
+					buf_r = buf.r;
+					voice_stereo = (buf.channels == 2);
+				}
 				if (voice.retrigger_pending && voice.retrigger_fade_remaining == 0)
 				{
 					const size_t window_start = voice.retrigger_offset;
 					const size_t window_end = window_start + voice.retrigger_length;
-					InitSequencerVoiceSlot(voice, v, window_start, window_end, voice.track, voice.retrigger_rate);
+					InitSequencerVoiceSlot(voice,
+						v,
+						window_start,
+						window_end,
+						voice.track,
+						voice.retrigger_buffer_id,
+						voice.retrigger_rate);
 				}
 				const float attack_samples = slot_attack_samples[v];
 				const float release_samples = slot_release_samples[v];
@@ -10140,10 +10755,10 @@ static float last_chorus_wow = -1.0f;
 					const float amp = voice.amp * env * retrigger_gain;
 					float samp_l = 0.0f;
 					float samp_r = 0.0f;
-					samp_l = static_cast<float>(sample_buffer_l[idx]) * kSampleScale * amp;
-					const float r = sample_stereo
-						? static_cast<float>(sample_buffer_r[idx])
-						: static_cast<float>(sample_buffer_l[idx]);
+					samp_l = static_cast<float>(buf_l[idx]) * kSampleScale * amp;
+					const float r = voice_stereo
+						? static_cast<float>(buf_r[idx])
+						: static_cast<float>(buf_l[idx]);
 					samp_r = r * kSampleScale * amp;
 					if (perform_mode || play_mode)
 					{
@@ -10192,12 +10807,12 @@ static float last_chorus_wow = -1.0f;
 				float l1 = 0.0f;
 				float r0 = 0.0f;
 				float r1 = 0.0f;
-				l0 = static_cast<float>(sample_buffer_l[idx]);
-				l1 = static_cast<float>(sample_buffer_l[idx + 1]);
-				if (sample_stereo)
+				l0 = static_cast<float>(buf_l[idx]);
+				l1 = static_cast<float>(buf_l[idx + 1]);
+				if (voice_stereo)
 				{
-					r0 = static_cast<float>(sample_buffer_r[idx]);
-					r1 = static_cast<float>(sample_buffer_r[idx + 1]);
+					r0 = static_cast<float>(buf_r[idx]);
+					r1 = static_cast<float>(buf_r[idx + 1]);
 				}
 				else
 				{
@@ -10519,6 +11134,7 @@ int main(void)
 	reverb_predelay_l.SetDelay(0.0f);
 	reverb_predelay_r.SetDelay(0.0f);
 
+	InitSampleCache();
 	InitTrackStates();
 	InitSmoothers();
 	UpdateSmoothedParamsPerTick();
@@ -10555,7 +11171,7 @@ int main(void)
 		{
 			bits |= kFlagFxAllowed;
 		}
-		if (in_play_mode && sample_loaded) bits |= kFlagPlaySeqMode;
+		if (in_play_mode && AnyPlayTrackLoaded()) bits |= kFlagPlaySeqMode;
 		if (in_play_mode) bits |= kFlagPlayMasterFx;
 		if (ui_mode == UiMode::Record
 			&& record_state != RecordState::Review
@@ -10658,6 +11274,9 @@ int main(void)
 					break;
 			}
 		}
+		UpdateBufferUseFromVoices();
+		ServiceTrackLoadRequest();
+		TickTrackLoadJob();
 
 		{
 			uint32_t now = System::GetNow();
@@ -10700,7 +11319,7 @@ int main(void)
 			{
 				bits |= kFlagFxAllowed;
 			}
-			if (in_play_mode && sample_loaded) bits |= kFlagPlaySeqMode;
+			if (in_play_mode && AnyPlayTrackLoaded()) bits |= kFlagPlaySeqMode;
 			if (in_play_mode) bits |= kFlagPlayMasterFx;
 			if (ui_mode == UiMode::Record
 				&& record_state != RecordState::Review
@@ -10891,23 +11510,30 @@ int main(void)
 				{
 					LogLine("Load menu: sample name unavailable (count=%ld)", static_cast<long>(wav_file_count));
 				}
-				if (LoadSampleAtIndex(index))
+				if (load_context == LoadContext::Track)
 				{
-					if (load_context == LoadContext::Track)
+					const int32_t track = load_context_track;
+					if (index >= 0 && index < wav_file_count && track >= 0 && track < kPlayTrackCount)
 					{
-						const int32_t track = load_context_track;
-						if (track >= 0 && track < kPlayTrackCount)
-						{
-							track_samples[track].loaded = sample_loaded;
-							CopyString(track_samples[track].name, loaded_sample_name, kMaxWavNameLen);
-							track_samples[track].trim_start = trim_start;
-							track_samples[track].trim_end = trim_end;
-						}
-						LogLine("Load success, entering TRACK menu");
+						QueueTrackSampleLoad(track, wav_files[index]);
+						play_edit_context = PlayEditContext::PlayTrack;
+						play_edit_track = track;
 						ui_mode = UiMode::PlayTrack;
+						request_track_sample_load = true;
+						request_track_sample_index = track;
 						request_editor_redraw = true;
+						LogLine("Track load queued, entering TRACK menu");
+						load_context = LoadContext::Main;
 					}
-					else if (load_context == LoadContext::Edt)
+					else
+					{
+						LogLine("Track load failed: invalid index/track");
+						ui_mode = UiMode::Load;
+					}
+				}
+				else if (LoadSampleAtIndex(index))
+				{
+					if (load_context == LoadContext::Edt)
 					{
 						LogLine("Load success, returning to EDT");
 						ui_mode = UiMode::Edt;
