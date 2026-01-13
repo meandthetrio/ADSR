@@ -984,7 +984,7 @@ volatile size_t sample_play_end = 0;
 volatile uint32_t sample_rate = 48000;
 volatile uint16_t sample_channels = 1;
 volatile bool sample_loaded = false;
-volatile bool playback_active = false;
+volatile bool perform_preview_active = false;
 volatile float playback_rate = 1.0f;
 volatile float playback_phase = 0.0f;
 volatile float playback_amp = 0.0f;
@@ -1429,7 +1429,7 @@ static PlaySelectMode play_select_mode = PlaySelectMode::Bpm;
 static int32_t play_select_row = 0;
 static int32_t play_select_col = 0;
 static bool play_screen_dirty = true;
-static bool playhead_running = false;
+static volatile bool play_transport_running = false;
 static int32_t playhead_step = 0;
 static bool play_steps[kPlayTrackCount][kPlayStepCount] = {};
 volatile bool request_playhead_redraw = false;
@@ -2579,7 +2579,7 @@ static void __attribute__((unused)) ComputeWaveform()
 
 static inline bool JobsAllowedNow()
 {
-	return !playhead_running && record_state != RecordState::Recording;
+	return !play_transport_running && record_state != RecordState::Recording;
 }
 
 enum class JobType : uint8_t
@@ -4065,7 +4065,7 @@ static bool LoadSampleFromPath(const char* path)
 	FIL* file = &wav_file;
 	UINT bytes_read = 0;
 
-	playback_active = false;
+	perform_preview_active = false;
 	playback_phase = 0.0f;
 	sample_loaded = false;
 	editor_attack_norm = 0.0f;
@@ -4455,7 +4455,7 @@ static void TickTrackLoadJob()
 		return;
 	}
 	size_t frames_to_read = total_frames - dest_index;
-	const size_t max_frames = playhead_running ? 64 : kSampleChunkFrames;
+	const size_t max_frames = play_transport_running ? 64 : kSampleChunkFrames;
 	if (frames_to_read > max_frames)
 	{
 		frames_to_read = max_frames;
@@ -5301,7 +5301,7 @@ static void DrawEditorScreen(int32_t selected,
 		{
 			bool has_playhead = false;
 			float norm = 0.0f;
-			if (playback_active)
+			if (perform_preview_active)
 			{
 				norm = playback_phase / static_cast<float>(sample_length - 1);
 				has_playhead = true;
@@ -6108,7 +6108,7 @@ static void StartRecordingAudioSafe()
 	editor_attack_norm = 0.0f;
 	editor_release_norm = 0.0f;
 	ResetChannelSlots();
-	playback_active = false;
+	perform_preview_active = false;
 	sample_channels = 1;
 	sample_rate = 48000;
 	trim_start = 0.0f;
@@ -6818,7 +6818,7 @@ static void DrawPlayScreen()
 					}
 				}
 
-				if (playhead_running)
+				if (play_transport_running)
 				{
 					int step = playhead_step;
 					if (step < 0)
@@ -6961,7 +6961,7 @@ static void DrawWaveform()
 	DrawBracket(start_x, true);
 	DrawBracket(end_x,   false);
 
-	if (ui_mode == UiMode::Edt && playback_active && sample_length > 1)
+	if (ui_mode == UiMode::Edt && perform_preview_active && sample_length > 1)
 	{
 		const float denom = static_cast<float>(sample_length - 1);
 		float norm = playback_phase / denom;
@@ -7811,7 +7811,7 @@ static void StartPlayback(uint8_t note)
 	const float pitch = powf(2.0f, semis / 12.0f);
 	playback_rate = pitch * (static_cast<float>(sample_rate) / hw.AudioSampleRate());
 	playback_phase = static_cast<float>(window_start);
-	playback_active = true;
+	perform_preview_active = true;
 	if (kPlaybackVerboseLog && UiLogEnabled())
 	{
 		LogLine("Playback: start note=%u pitch=%.3f win=[%lu,%lu) rate=%.6f apply_pitch=1",
@@ -7862,7 +7862,7 @@ static void StartPlayback(uint8_t note, bool apply_pitch)
 	const float pitch = powf(2.0f, semis / 12.0f);
 	playback_rate = pitch * (static_cast<float>(sample_rate) / hw.AudioSampleRate());
 	playback_phase = static_cast<float>(window_start);
-	playback_active = true;
+	perform_preview_active = true;
 	if (kPlaybackVerboseLog && UiLogEnabled())
 	{
 		LogLine("Playback: start note=%u pitch=%.3f win=[%lu,%lu) rate=%.6f apply_pitch=%d",
@@ -7879,7 +7879,7 @@ static void StopPlayback(uint8_t note)
 {
 	if (note == current_note)
 	{
-		if (IsPerformUiMode(ui_mode) && playback_active)
+		if (IsPerformUiMode(ui_mode) && perform_preview_active)
 		{
 			playback_release_active = true;
 			playback_release_pos = 0.0f;
@@ -7887,7 +7887,7 @@ static void StopPlayback(uint8_t note)
 		}
 		else
 		{
-			playback_active = false;
+			perform_preview_active = false;
 			playback_env_samples = 0;
 			playback_release_active = false;
 			playback_release_pos = 0.0f;
@@ -8313,7 +8313,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			record_source_index = (record_input == RecordInput::Mic) ? 1 : 0;
 			record_state = RecordState::SourceSelect;
 			record_pos = 0;
-			playback_active = false;
+			perform_preview_active = false;
 			record_anim_start_ms = NowMs();
 			// Deferred logging
 			char defer_msg[96];
@@ -8570,7 +8570,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				sample_channels = 1;
 				sample_rate = 48000;
 				sample_loaded = (sample_length > 0);
-				playback_active = false;
+				perform_preview_active = false;
 				trim_start = 0.0f;
 				trim_end = 1.0f;
 				waveform_from_recording = true;
@@ -8617,7 +8617,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				waveform_ready = false;
 				waveform_dirty = true;
 				waveform_from_recording = false;
-				playback_active = false;
+				perform_preview_active = false;
 				record_state = RecordState::SourceSelect;
 				request_length_redraw = true;
 			}
@@ -8633,7 +8633,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			else if (record_state == RecordState::SourceSelect)
 			{
 				ui_mode = UiMode::Main;
-				playback_active = false;
+				perform_preview_active = false;
 				record_anim_start_ms = -1.0;
 			}
 			else if (record_state == RecordState::BackConfirm)
@@ -8650,7 +8650,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			else
 			{
 				record_state = RecordState::SourceSelect;
-				playback_active = false;
+				perform_preview_active = false;
 				record_anim_start_ms = -1.0;
 			}
 		}
@@ -8881,6 +8881,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			{
 				if (!has_sample && track_mode)
 				{
+					load_destination = LoadDestination::Play;
 					load_context = LoadContext::Track;
 					load_context_track = play_edit_track;
 					load_prev_mode = UiMode::PlayTrack;
@@ -8894,6 +8895,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					delete_mode = false;
 					delete_confirm = false;
 					edt_sample_context = SampleContext::Perform;
+					load_destination = LoadDestination::Perform;
 					load_context = LoadContext::Edt;
 					load_prev_mode = UiMode::Perform;
 					ui_mode = UiMode::Load;
@@ -9579,7 +9581,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	}
 	if (cmd & kCmdPlayStart)
 	{
-		playhead_running = true;
+		play_transport_running = true;
 		playhead_step = 0;
 		g_play_step_for_ui = 0;
 		g_play_step_dirty_for_ui = true;
@@ -9587,7 +9589,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	}
 	if (cmd & kCmdPlayStop)
 	{
-		playhead_running = false;
+		play_transport_running = false;
 	}
 	if (cmd & kCmdTriggerStep0)
 	{
@@ -9684,16 +9686,16 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		window_end = sample_length;
 	}
 	const bool window_valid = (window_end > 0 && window_end > window_start);
-	if (playback_active && !window_valid)
+	if (perform_preview_active && !window_valid)
 	{
-		playback_active = false;
+		perform_preview_active = false;
 		playback_env_samples = 0;
 		playback_release_active = false;
 		playback_release_pos = 0.0f;
 		playback_release_start = 0.0f;
 	}
 
-	if (playhead_running && (flags_bits & kFlagInPlayMode))
+	if (play_transport_running && (flags_bits & kFlagInPlayMode))
 	{
 		step_phase_samples += static_cast<uint32_t>(size);
 		const uint32_t sps = SamplesPerStep(g_play_bpm, out_sr);
@@ -10542,7 +10544,7 @@ static float last_chorus_wow = -1.0f;
 				sample_channels = 1;
 				sample_rate = 48000;
 				sample_loaded = (sample_length > 0);
-				playback_active = false;
+				perform_preview_active = false;
 				request_playback_stop_log = true;
 				trim_start = 0.0f;
 				trim_end = 1.0f;
@@ -10561,7 +10563,7 @@ static float last_chorus_wow = -1.0f;
 					static_cast<int32_t>(sample_length));
 			}
 		}
-		if (sample_loaded && playback_active && record_state != RecordState::Recording && window_valid)
+		if (sample_loaded && perform_preview_active && record_state != RecordState::Recording && window_valid)
 		{
 			float amp_env = 1.0f;
 			if (playback_env_active)
@@ -10624,7 +10626,7 @@ static float last_chorus_wow = -1.0f;
 					sig_l *= amp_env;
 					sig_r *= amp_env;
 				}
-				playback_active = false;
+				perform_preview_active = false;
 			}
 			else
 			{
@@ -10646,17 +10648,17 @@ static float last_chorus_wow = -1.0f;
 					playback_phase += playback_rate;
 					if (playback_phase >= static_cast<float>(window_end - 1))
 					{
-						playback_active = false;
+						perform_preview_active = false;
 						request_playback_stop_log = true;
 					}
 				}
 				else
 				{
-					playback_active = false;
+					perform_preview_active = false;
 					request_playback_stop_log = true;
 				}
 			}
-			if (playback_active)
+			if (perform_preview_active)
 			{
 				++playback_env_samples;
 				if (playback_release_active)
@@ -10667,7 +10669,7 @@ static float last_chorus_wow = -1.0f;
 						: 1.0f;
 					if (playback_release_pos >= release_samples)
 					{
-						playback_active = false;
+						perform_preview_active = false;
 						playback_env_samples = 0;
 						playback_release_active = false;
 						playback_release_pos = 0.0f;
@@ -11195,7 +11197,7 @@ int main(void)
 	g_last_draw_ms = System::GetNow();
 	{
 		uint32_t bits = 0;
-		const bool in_play_mode = IsPlayUiMode(ui_mode);
+		const bool in_play_mode = IsPlayUiMode(ui_mode) || play_transport_running;
 		const bool in_fx_edit_mode = IsPerformUiMode(ui_mode);
 		if (in_play_mode) bits |= kFlagInPlayMode;
 		if (in_fx_edit_mode) bits |= kFlagInEditorMode;
@@ -11235,7 +11237,7 @@ int main(void)
 	int32_t last_file_count = -1;
 	bool last_sd_mounted = false;
 	RecordState last_record_state = RecordState::Armed;
-	bool last_playback_active = false;
+	bool last_perform_preview_active = false;
 	uint8_t last_cpu_pct = 0;
 	int32_t last_playhead_step = -1;
 	uint32_t last_editor_playhead_ms = 0;
@@ -11249,7 +11251,7 @@ int main(void)
 	{
 		// Service pending waveform computation (from audio callback)
 		if (waveform_compute_pending
-			&& !playhead_running
+			&& !play_transport_running
 			&& record_state != RecordState::Recording)
 		{
 			waveform_compute_pending = false;
@@ -11312,7 +11314,7 @@ int main(void)
 		ServiceTrackLoadRequest();
 		{
 			const uint32_t now = System::GetNow();
-			const uint32_t interval = playhead_running ? 2U : 1U;
+			const uint32_t interval = play_transport_running ? 2U : 1U;
 			if ((uint32_t)(now - last_track_load_ms) >= interval)
 			{
 				last_track_load_ms = now;
@@ -11352,7 +11354,7 @@ int main(void)
 		}
 		{
 			uint32_t bits = 0;
-			const bool in_play_mode = IsPlayUiMode(ui_mode);
+			const bool in_play_mode = IsPlayUiMode(ui_mode) || play_transport_running;
 			const bool in_fx_edit_mode = IsPerformUiMode(ui_mode);
 			if (in_play_mode) bits |= kFlagInPlayMode;
 			if (in_fx_edit_mode) bits |= kFlagInEditorMode;
@@ -11442,9 +11444,9 @@ int main(void)
 			button1_press = false;
 			if (!ui_blocked && IsPlayUiMode(ui_mode))
 			{
-			if (!playhead_running)
+			if (!play_transport_running)
 			{
-				playhead_running = true;
+				play_transport_running = true;
 				playhead_step = 0;
 				play_screen_dirty = true;
 				request_playhead_redraw = true;
@@ -11452,7 +11454,7 @@ int main(void)
 			}
 			else
 			{
-				playhead_running = false;
+				play_transport_running = false;
 				play_screen_dirty = true;
 				request_playhead_redraw = true;
 				RequestAudioCmd(kCmdPlayStop);
@@ -11817,7 +11819,7 @@ int main(void)
 		}
 
 		if (record_waveform_pending
-			&& !playhead_running
+			&& !play_transport_running
 			&& record_state != RecordState::Recording)
 		{
 			record_waveform_pending = false;
@@ -11865,9 +11867,12 @@ int main(void)
 			}
 			const bool was_play = IsPlayUiMode(last_mode);
 			const bool is_play = IsPlayUiMode(mode);
-			if (was_play && !is_play)
+			const bool play_load_hold = was_play
+				&& load_destination == LoadDestination::Play
+				&& (mode == UiMode::Load || mode == UiMode::LoadTarget || mode == UiMode::Edt);
+			if (was_play && !is_play && !play_load_hold)
 			{
-				playhead_running = false;
+				play_transport_running = false;
 				playhead_step = 0;
 				play_screen_dirty = true;
 			}
@@ -12058,7 +12063,7 @@ int main(void)
 				else
 				{
 					if (sample_loaded && sample_length > 0
-						&& !playhead_running
+						&& !play_transport_running
 						&& record_state != RecordState::Recording)
 					{
 						JobStartWaveform(current_sample_context, true);
@@ -12281,7 +12286,7 @@ int main(void)
 		const bool editor_playhead_active = (!ui_blocked
 			&& (IsPerformUiMode(mode) || IsPlayTrackUiMode(mode))
 			&& editor_index == kEditorEdtIndex
-			&& (playback_active || AnyChannelSlotActive()));
+			&& (perform_preview_active || AnyChannelSlotActive()));
 		if (editor_playhead_active)
 		{
 			const uint32_t now = System::GetNow();
@@ -12303,7 +12308,7 @@ int main(void)
 		last_editor_playhead_active = editor_playhead_active;
 		const bool edt_playhead_active = (!ui_blocked
 			&& mode == UiMode::Edt
-			&& playback_active);
+			&& perform_preview_active);
 		if (edt_playhead_active)
 		{
 			const uint32_t now = System::GetNow();
@@ -12325,7 +12330,7 @@ int main(void)
 			last_edt_playhead_ms = 0;
 		}
 		last_edt_playhead_active = edt_playhead_active;
-		if (!ui_blocked && (request_playhead_redraw || (playback_active != last_playback_active)))
+		if (!ui_blocked && (request_playhead_redraw || (perform_preview_active != last_perform_preview_active)))
 		{
 			request_playhead_redraw = false;
 			if (mode == UiMode::Play
@@ -12346,7 +12351,7 @@ int main(void)
 				}
 			}
 		}
-		last_playback_active = playback_active;
+		last_perform_preview_active = perform_preview_active;
 		if (request_playback_stop_log)
 		{
 			request_playback_stop_log = false;
@@ -12362,7 +12367,7 @@ int main(void)
 		{
 			led1_phase_ms = 0.0f;
 			led1_level = 0.0f;
-			if (playhead_running)
+			if (play_transport_running)
 			{
 				hw.led1.Set(1.0f, 0.0f, 0.0f);
 			}
