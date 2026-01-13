@@ -1009,11 +1009,13 @@ struct ChannelState
 	float flt_cutoff = 1.0f;
 	float flt_res = 0.02f;
 	float fx_s_wet = 0.0f;
+	float sat_drive = 0.0f;
 	float sat_tape_bump = 0.0f;
 	float sat_bit_reso = 0.0f;
 	float sat_bit_smpl = 0.0f;
 	int32_t sat_mode = 0;
 	float fx_c_wet = 0.0f;
+	float mod_depth = 0.0f;
 	float chorus_rate = 0.0f;
 	float chorus_wow = 0.0f;
 	float tape_rate = 0.0f;
@@ -3534,10 +3536,6 @@ static void SaveFxContext()
 			CaptureChannelState(play_state);
 			break;
 		case FxContext::PlayTrack:
-			if (play_edit_track >= 0 && play_edit_track < kPlayTrackCount)
-			{
-				CaptureChannelState(play_track_state[play_edit_track]);
-			}
 			break;
 		default:
 			break;
@@ -3573,7 +3571,6 @@ static void SetFxContext(FxContext ctx, int32_t track = 0)
 		}
 		play_edit_context = PlayEditContext::PlayTrack;
 		play_edit_track = track;
-		ApplyChannelState(play_track_state[track]);
 	}
 }
 
@@ -3610,7 +3607,8 @@ static void EnterPlayTrack(int32_t track)
 		return;
 	}
 	SetSampleContext(SampleContext::Play);
-	SetFxContext(FxContext::PlayTrack, track);
+	play_edit_context = PlayEditContext::PlayTrack;
+	play_edit_track = track;
 	request_track_sample_load = true;
 	request_track_sample_index = track;
 	ui_mode = UiMode::PlayTrack;
@@ -3621,10 +3619,9 @@ static void ExitPlayTrack()
 {
 	if (play_edit_context == PlayEditContext::PlayTrack)
 	{
-		CaptureChannelState(play_track_state[play_edit_track]);
 		StoreTrackSampleState(play_edit_track);
 	}
-	SetFxContext(FxContext::Play);
+	play_edit_context = PlayEditContext::Main;
 	ui_mode = UiMode::Play;
 	play_screen_dirty = true;
 	request_playhead_redraw = true;
@@ -4385,8 +4382,19 @@ static const char* FxShortLabel(int32_t fx_index)
 	}
 }
 
-static float FxWetValue(int32_t fx_index)
+static float FxWetValueForState(int32_t fx_index, const ChannelState* state)
 {
+	if (state)
+	{
+		switch (fx_index)
+		{
+			case kFxSatIndex: return state->fx_s_wet;
+			case kFxChorusIndex: return state->fx_c_wet;
+			case kFxDelayIndex: return state->delay_wet;
+			case kFxReverbIndex: return state->reverb_wet;
+			default: return 0.0f;
+		}
+	}
 	switch (fx_index)
 	{
 		case kFxSatIndex: return fx_s_wet;
@@ -4409,8 +4417,19 @@ static float FxWetStep(int32_t fx_index)
 	}
 }
 
-static volatile float* FxWetTarget(int32_t fx_index)
+static volatile float* FxWetTargetForState(int32_t fx_index, ChannelState* state)
 {
+	if (state)
+	{
+		switch (fx_index)
+		{
+			case kFxSatIndex: return &state->fx_s_wet;
+			case kFxChorusIndex: return &state->fx_c_wet;
+			case kFxDelayIndex: return &state->delay_wet;
+			case kFxReverbIndex: return &state->reverb_wet;
+			default: return &state->fx_s_wet;
+		}
+	}
 	switch (fx_index)
 	{
 		case kFxSatIndex: return &fx_s_wet;
@@ -4427,7 +4446,8 @@ static void DrawEditorScreen(int32_t selected,
 							  bool amp_select_active,
 							  int32_t amp_selected,
 							  bool flt_select_active,
-							  int32_t flt_selected)
+							  int32_t flt_selected,
+							  const ChannelState* state)
 {
 	constexpr int kMarginX = 2;
 	constexpr int kMarginY = 2;
@@ -4709,7 +4729,12 @@ static void DrawEditorScreen(int32_t selected,
 		if (i == kEditorAmpIndex)
 		{
 			const char* labels[kEditorFaderCount] = {"A", "D", "S", "R"};
-			const float values[kEditorFaderCount] = {amp_attack, amp_decay, amp_sustain, amp_release};
+			const float values[kEditorFaderCount] = {
+				state ? state->amp_attack : amp_attack,
+				state ? state->amp_decay : amp_decay,
+				state ? state->amp_sustain : amp_sustain,
+				state ? state->amp_release : amp_release,
+			};
 			draw_faders(box,
 						is_selected,
 						labels,
@@ -4722,7 +4747,10 @@ static void DrawEditorScreen(int32_t selected,
 		if (i == kEditorFltIndex)
 		{
 			const char* labels[kEditorFltFaderCount] = {"C", "R"};
-			const float values[kEditorFltFaderCount] = {flt_cutoff, flt_res};
+			const float values[kEditorFltFaderCount] = {
+				state ? state->flt_cutoff : flt_cutoff,
+				state ? state->flt_res : flt_res,
+			};
 			draw_faders(box,
 						is_selected,
 						labels,
@@ -4737,7 +4765,7 @@ static void DrawEditorScreen(int32_t selected,
 			int32_t order[kEditorFaderCount];
 			for (int f = 0; f < kEditorFaderCount; ++f)
 			{
-				order[f] = fx_chain_order[f];
+				order[f] = state ? state->fx_chain_order[f] : fx_chain_order[f];
 			}
 			const char* labels[kEditorFaderCount] =
 				{FxShortLabel(order[0]),
@@ -4745,10 +4773,10 @@ static void DrawEditorScreen(int32_t selected,
 				 FxShortLabel(order[2]),
 				 FxShortLabel(order[3])};
 			const float values[kEditorFaderCount] =
-				{FxWetValue(order[0]),
-				 FxWetValue(order[1]),
-				 FxWetValue(order[2]),
-				 FxWetValue(order[3])};
+				{FxWetValueForState(order[0], state),
+				 FxWetValueForState(order[1], state),
+				 FxWetValueForState(order[2], state),
+				 FxWetValueForState(order[3], state)};
 			draw_faders(box,
 						is_selected,
 						labels,
@@ -6535,8 +6563,34 @@ static void DrawVerticalFadersInRect(int x,
 	}
 }
 
-static void DrawFxDetailScreen(int32_t index)
+static void DrawFxDetailScreen(int32_t index, const ChannelState* state)
 {
+	const int32_t fx_detail_param_index = state
+		? state->fx_detail_param_index
+		: ::fx_detail_param_index;
+	const int32_t sat_mode = state ? state->sat_mode : ::sat_mode;
+	const float sat_bit_reso = state ? state->sat_bit_reso : ::sat_bit_reso;
+	const float sat_bit_smpl = state ? state->sat_bit_smpl : ::sat_bit_smpl;
+	const float sat_drive = state ? state->sat_drive : ::sat_drive;
+	const float sat_tape_bump = state ? state->sat_tape_bump : ::sat_tape_bump;
+	const float fx_s_wet = state ? state->fx_s_wet : ::fx_s_wet;
+	const int32_t chorus_mode = state ? state->chorus_mode : ::chorus_mode;
+	const float chorus_wow = state ? state->chorus_wow : ::chorus_wow;
+	const float mod_depth = state ? state->mod_depth : ::mod_depth;
+	const float tape_rate = state ? state->tape_rate : ::tape_rate;
+	const float chorus_rate = state ? state->chorus_rate : ::chorus_rate;
+	const float fx_c_wet = state ? state->fx_c_wet : ::fx_c_wet;
+	const float delay_time = state ? state->delay_time : ::delay_time;
+	const float delay_feedback = state ? state->delay_feedback : ::delay_feedback;
+	const float delay_spread = state ? state->delay_spread : ::delay_spread;
+	const float delay_freeze = state ? state->delay_freeze : ::delay_freeze;
+	const float delay_wet = state ? state->delay_wet : ::delay_wet;
+	const float reverb_pre = state ? state->reverb_pre : ::reverb_pre;
+	const float reverb_damp = state ? state->reverb_damp : ::reverb_damp;
+	const float reverb_decay = state ? state->reverb_decay : ::reverb_decay;
+	const float reverb_wet = state ? state->reverb_wet : ::reverb_wet;
+	const float reverb_shimmer = state ? state->reverb_shimmer : ::reverb_shimmer;
+
 	const char* labels[kEditorFaderCount] = {"SATURATION", "MODULATION", "DELAY", "REVERB"};
 	if (index < 0 || index >= kEditorFaderCount)
 	{
@@ -7475,9 +7529,19 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 	const float out_sr = hw.AudioSampleRate();
 	const uint32_t now_ms = System::GetNow();
 	const bool ui_blocked = (sd_init_in_progress || save_in_progress);
+	ChannelState* fx_detail_state = (ui_mode == UiMode::FxDetail
+		&& fx_detail_prev_mode == UiMode::PlayTrack)
+		? &play_track_state[play_edit_track]
+		: nullptr;
+	const int32_t fx_detail_index_val = fx_detail_state
+		? fx_detail_state->fx_detail_index
+		: fx_detail_index;
+	const float delay_freeze_val = fx_detail_state
+		? fx_detail_state->delay_freeze
+		: delay_freeze;
 	if (ui_mode == UiMode::FxDetail
-		&& fx_detail_index == kFxDelayIndex
-		&& delay_freeze >= 0.5f)
+		&& fx_detail_index_val == kFxDelayIndex
+		&& delay_freeze_val >= 0.5f)
 	{
 		const uint32_t now = System::GetNow();
 		if (now >= delay_snow_next_ms)
@@ -7945,16 +8009,56 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 	else if (!ui_blocked && is_editor_ui)
 	{
 		const bool track_mode = is_play_track_ui;
-		const bool fx_select_active = (editor_index == kEditorFxIndex && fx_window_active);
-		const bool amp_select_active = (editor_index == kEditorAmpIndex && amp_window_active);
-		const bool flt_select_active = (editor_index == kEditorFltIndex && flt_window_active);
+		ChannelState* edit_state = track_mode ? &play_track_state[play_edit_track] : nullptr;
+		volatile int32_t& editor_index_ref = edit_state ? edit_state->editor_index : editor_index;
+		volatile int32_t& fx_fader_index_ref = edit_state ? edit_state->fx_fader_index : fx_fader_index;
+		volatile int32_t& amp_fader_index_ref = edit_state ? edit_state->amp_fader_index : amp_fader_index;
+		volatile int32_t& flt_fader_index_ref = edit_state ? edit_state->flt_fader_index : flt_fader_index;
+		volatile int32_t& fx_detail_index_ref = edit_state ? edit_state->fx_detail_index : fx_detail_index;
+		volatile int32_t& fx_detail_param_index_ref = edit_state ? edit_state->fx_detail_param_index : fx_detail_param_index;
+		volatile int32_t* fx_chain_order_ref = edit_state ? edit_state->fx_chain_order : fx_chain_order;
+		volatile bool& fx_window_active_ref = edit_state ? edit_state->fx_window_active : fx_window_active;
+		volatile bool& amp_window_active_ref = edit_state ? edit_state->amp_window_active : amp_window_active;
+		volatile bool& flt_window_active_ref = edit_state ? edit_state->flt_window_active : flt_window_active;
+		volatile float& amp_attack_ref = edit_state ? edit_state->amp_attack : amp_attack;
+		volatile float& amp_decay_ref = edit_state ? edit_state->amp_decay : amp_decay;
+		volatile float& amp_sustain_ref = edit_state ? edit_state->amp_sustain : amp_sustain;
+		volatile float& amp_release_ref = edit_state ? edit_state->amp_release : amp_release;
+		volatile float& flt_cutoff_ref = edit_state ? edit_state->flt_cutoff : flt_cutoff;
+		volatile float& flt_res_ref = edit_state ? edit_state->flt_res : flt_res;
+		volatile float& sat_drive_ref = edit_state ? edit_state->sat_drive : sat_drive;
+		volatile float& sat_tape_bump_ref = edit_state ? edit_state->sat_tape_bump : sat_tape_bump;
+		volatile float& sat_bit_reso_ref = edit_state ? edit_state->sat_bit_reso : sat_bit_reso;
+		volatile float& sat_bit_smpl_ref = edit_state ? edit_state->sat_bit_smpl : sat_bit_smpl;
+		volatile int32_t& sat_mode_ref = edit_state ? edit_state->sat_mode : sat_mode;
+		volatile float& mod_depth_ref = edit_state ? edit_state->mod_depth : mod_depth;
+		volatile float& chorus_rate_ref = edit_state ? edit_state->chorus_rate : chorus_rate;
+		volatile float& chorus_wow_ref = edit_state ? edit_state->chorus_wow : chorus_wow;
+		volatile float& tape_rate_ref = edit_state ? edit_state->tape_rate : tape_rate;
+		volatile int32_t& chorus_mode_ref = edit_state ? edit_state->chorus_mode : chorus_mode;
+		volatile float& delay_time_ref = edit_state ? edit_state->delay_time : delay_time;
+		volatile float& delay_feedback_ref = edit_state ? edit_state->delay_feedback : delay_feedback;
+		volatile float& delay_spread_ref = edit_state ? edit_state->delay_spread : delay_spread;
+		volatile float& delay_freeze_ref = edit_state ? edit_state->delay_freeze : delay_freeze;
+		volatile float& reverb_pre_ref = edit_state ? edit_state->reverb_pre : reverb_pre;
+		volatile float& reverb_damp_ref = edit_state ? edit_state->reverb_damp : reverb_damp;
+		volatile float& reverb_decay_ref = edit_state ? edit_state->reverb_decay : reverb_decay;
+		volatile float& reverb_shimmer_ref = edit_state ? edit_state->reverb_shimmer : reverb_shimmer;
+		volatile bool& sat_params_initialized_ref = edit_state ? edit_state->sat_params_initialized : sat_params_initialized;
+		volatile bool& reverb_params_initialized_ref = edit_state ? edit_state->reverb_params_initialized : reverb_params_initialized;
+		volatile bool& delay_params_initialized_ref = edit_state ? edit_state->delay_params_initialized : delay_params_initialized;
+		volatile bool& mod_params_initialized_ref = edit_state ? edit_state->mod_params_initialized : mod_params_initialized;
+
+		const bool fx_select_active = (editor_index_ref == kEditorFxIndex && fx_window_active_ref);
+		const bool amp_select_active = (editor_index_ref == kEditorAmpIndex && amp_window_active_ref);
+		const bool flt_select_active = (editor_index_ref == kEditorFltIndex && flt_window_active_ref);
 		const bool fx_reorder_active = fx_select_active && shift_pressed;
 		const bool has_sample = (sample_loaded && sample_length > 0);
 		if (encoder_l_inc != 0)
 		{
 			if (fx_select_active)
 			{
-				int32_t next = fx_fader_index + encoder_l_inc;
+				int32_t next = fx_fader_index_ref + encoder_l_inc;
 				while (next < 0)
 				{
 					next += kEditorFaderCount;
@@ -7963,15 +8067,15 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				{
 					next -= kEditorFaderCount;
 				}
-				if (next != fx_fader_index)
+				if (next != fx_fader_index_ref)
 				{
-					fx_fader_index = next;
+					fx_fader_index_ref = next;
 					request_editor_redraw = true;
 				}
 			}
 			else if (amp_select_active)
 			{
-				int32_t next = amp_fader_index + encoder_l_inc;
+				int32_t next = amp_fader_index_ref + encoder_l_inc;
 				while (next < 0)
 				{
 					next += kEditorFaderCount;
@@ -7980,15 +8084,15 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				{
 					next -= kEditorFaderCount;
 				}
-				if (next != amp_fader_index)
+				if (next != amp_fader_index_ref)
 				{
-					amp_fader_index = next;
+					amp_fader_index_ref = next;
 					request_editor_redraw = true;
 				}
 			}
 			else if (flt_select_active)
 			{
-				int32_t next = flt_fader_index + encoder_l_inc;
+				int32_t next = flt_fader_index_ref + encoder_l_inc;
 				while (next < 0)
 				{
 					next += kEditorFltFaderCount;
@@ -7997,15 +8101,15 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				{
 					next -= kEditorFltFaderCount;
 				}
-				if (next != flt_fader_index)
+				if (next != flt_fader_index_ref)
 				{
-					flt_fader_index = next;
+					flt_fader_index_ref = next;
 					request_editor_redraw = true;
 				}
 			}
 			else
 			{
-				int32_t next = editor_index + encoder_l_inc;
+				int32_t next = editor_index_ref + encoder_l_inc;
 				while (next < 0)
 				{
 					next += kEditorBoxCount;
@@ -8014,71 +8118,71 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				{
 					next -= kEditorBoxCount;
 				}
-				editor_index = next;
+				editor_index_ref = next;
 			}
 		}
 		if (encoder_r_pressed)
 		{
-			if (editor_index == kEditorFxIndex)
+			if (editor_index_ref == kEditorFxIndex)
 			{
-				if (!fx_window_active)
+				if (!fx_window_active_ref)
 				{
-					fx_window_active = true;
-					amp_window_active = false;
-					flt_window_active = false;
+					fx_window_active_ref = true;
+					amp_window_active_ref = false;
+					flt_window_active_ref = false;
 					request_editor_redraw = true;
 				}
 				else
 				{
-					fx_detail_index = fx_chain_order[fx_fader_index];
-					fx_detail_param_index = 0;
-					if (fx_detail_index == kFxSatIndex)
+					fx_detail_index_ref = fx_chain_order_ref[fx_fader_index_ref];
+					fx_detail_param_index_ref = 0;
+					if (fx_detail_index_ref == kFxSatIndex)
 					{
-						if (!sat_params_initialized)
+						if (!sat_params_initialized_ref)
 						{
-							sat_drive = 0.5f;
-							sat_tape_bump = 0.5f;
-							sat_bit_reso = 0.5f;
-							sat_bit_smpl = 0.5f;
-							sat_mode = 0;
-							sat_params_initialized = true;
+							sat_drive_ref = 0.5f;
+							sat_tape_bump_ref = 0.5f;
+							sat_bit_reso_ref = 0.5f;
+							sat_bit_smpl_ref = 0.5f;
+							sat_mode_ref = 0;
+							sat_params_initialized_ref = true;
 							fx_params_dirty = true;
 						}
 					}
-					else if (fx_detail_index == kFxReverbIndex)
+					else if (fx_detail_index_ref == kFxReverbIndex)
 					{
-						if (!reverb_params_initialized)
+						if (!reverb_params_initialized_ref)
 						{
-							reverb_pre = 0.5f;
-							reverb_damp = 0.5f;
-							reverb_decay = 0.5f;
-							reverb_shimmer = 0.5f;
-							reverb_params_initialized = true;
+							reverb_pre_ref = 0.5f;
+							reverb_damp_ref = 0.5f;
+							reverb_decay_ref = 0.5f;
+							reverb_shimmer_ref = 0.5f;
+							reverb_params_initialized_ref = true;
 							fx_params_dirty = true;
 						}
 					}
-					else if (fx_detail_index == kFxDelayIndex)
+					else if (fx_detail_index_ref == kFxDelayIndex)
 					{
-						if (!delay_params_initialized)
+						if (!delay_params_initialized_ref)
 						{
-							delay_time = 0.5f;
-							delay_feedback = 0.5f;
-							delay_spread = 0.5f;
-							delay_freeze = 0.0f;
-							delay_params_initialized = true;
+							delay_time_ref = 0.5f;
+							delay_feedback_ref = 0.5f;
+							delay_spread_ref = 0.5f;
+							delay_freeze_ref = 0.0f;
+							delay_params_initialized_ref = true;
 							fx_params_dirty = true;
 						}
 					}
-					else if (fx_detail_index == kFxChorusIndex)
+					else if (fx_detail_index_ref == kFxChorusIndex)
 					{
-						if (!mod_params_initialized)
+						if (!mod_params_initialized_ref)
 						{
-							mod_depth = 0.5f;
-							chorus_rate = 0.5f;
-							chorus_wow = 0.5f;
-							tape_rate = 0.5f;
-							chorus_mode = 0;
-							mod_params_initialized = true;
+							mod_depth_ref = 0.5f;
+							chorus_rate_ref = 0.5f;
+							chorus_wow_ref = 0.5f;
+							tape_rate_ref = 0.5f;
+							chorus_mode_ref = 0;
+							mod_params_initialized_ref = true;
 							fx_params_dirty = true;
 						}
 					}
@@ -8087,28 +8191,28 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					request_fx_detail_redraw = true;
 				}
 			}
-			else if (editor_index == kEditorAmpIndex)
+			else if (editor_index_ref == kEditorAmpIndex)
 			{
-				if (!amp_window_active)
+				if (!amp_window_active_ref)
 				{
-					amp_window_active = true;
-					fx_window_active = false;
-					flt_window_active = false;
+					amp_window_active_ref = true;
+					fx_window_active_ref = false;
+					flt_window_active_ref = false;
 					request_editor_redraw = true;
 				}
 			}
-			else if (editor_index == kEditorFltIndex)
+			else if (editor_index_ref == kEditorFltIndex)
 			{
-				if (!flt_window_active)
+				if (!flt_window_active_ref)
 				{
-					flt_window_active = true;
-					fx_window_active = false;
-					amp_window_active = false;
+					flt_window_active_ref = true;
+					fx_window_active_ref = false;
+					amp_window_active_ref = false;
 					request_editor_redraw = true;
 				}
 			}
 			else if (!fx_select_active && !amp_select_active && !flt_select_active
-				&& editor_index == kEditorEdtIndex)
+				&& editor_index_ref == kEditorEdtIndex)
 			{
 				if (!has_sample && track_mode)
 				{
@@ -8149,7 +8253,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			int32_t steps = (encoder_r_inc > 0) ? encoder_r_inc : -encoder_r_inc;
 			for (int32_t s = 0; s < steps; ++s)
 			{
-				const int32_t from = fx_fader_index;
+				const int32_t from = fx_fader_index_ref;
 				int32_t to = from + dir;
 				if (to < 0)
 				{
@@ -8159,10 +8263,10 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				{
 					to = 0;
 				}
-				const int32_t temp = fx_chain_order[from];
-				fx_chain_order[from] = fx_chain_order[to];
-				fx_chain_order[to] = temp;
-				fx_fader_index = to;
+				const int32_t temp = fx_chain_order_ref[from];
+				fx_chain_order_ref[from] = fx_chain_order_ref[to];
+				fx_chain_order_ref[to] = temp;
+				fx_fader_index_ref = to;
 			}
 			request_editor_redraw = true;
 			fx_chain_last_move_ms = now_ms;
@@ -8177,9 +8281,9 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 		}
 		else if (fx_select_active && encoder_r_inc != 0)
 		{
-			const int32_t fx_id = fx_chain_order[fx_fader_index];
+			const int32_t fx_id = fx_chain_order_ref[fx_fader_index_ref];
 			const float step = FxWetStep(fx_id);
-			volatile float* target = FxWetTarget(fx_id);
+			volatile float* target = FxWetTargetForState(fx_id, edit_state);
 			const float current = *target;
 			float next = current + (static_cast<float>(encoder_r_inc) * step);
 			if (next < 0.0f)
@@ -8201,8 +8305,8 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 		{
 			const float step = kAmpEnvStep;
 			volatile float* targets[kEditorFaderCount]
-				= {&amp_attack, &amp_decay, &amp_sustain, &amp_release};
-			const int idx = amp_fader_index;
+				= {&amp_attack_ref, &amp_decay_ref, &amp_sustain_ref, &amp_release_ref};
+			const int idx = amp_fader_index_ref;
 			volatile float* target = targets[idx];
 			const float current = *target;
 			float next = current + (static_cast<float>(encoder_r_inc) * step);
@@ -8223,8 +8327,8 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 		else if (flt_select_active && encoder_r_inc != 0)
 		{
 			const float step = kFltParamStep;
-			volatile float* targets[kEditorFltFaderCount] = {&flt_cutoff, &flt_res};
-			const int idx = flt_fader_index;
+			volatile float* targets[kEditorFltFaderCount] = {&flt_cutoff_ref, &flt_res_ref};
+			const int idx = flt_fader_index_ref;
 			volatile float* target = targets[idx];
 			const float current = *target;
 			float next = current + (static_cast<float>(encoder_r_inc) * step);
@@ -8246,9 +8350,9 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 		{
 			if (fx_select_active || amp_select_active || flt_select_active)
 			{
-				fx_window_active = false;
-				amp_window_active = false;
-				flt_window_active = false;
+				fx_window_active_ref = false;
+				amp_window_active_ref = false;
+				flt_window_active_ref = false;
 				request_editor_redraw = true;
 			}
 			else if (track_mode)
@@ -8275,10 +8379,10 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				else if (dr < 0) dr = -1;
 			}
 			AdjustTrimNormalized(dl, dr, shift_held);
-	if (play_edit_context == PlayEditContext::PlayTrack)
-	{
-		StoreTrackSampleState(play_edit_track);
-	}
+			if (play_edit_context == PlayEditContext::PlayTrack)
+			{
+				StoreTrackSampleState(play_edit_track);
+			}
 		}
 		if (encoder_r_pressed)
 		{
@@ -8304,12 +8408,42 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 	}
 	else if (!ui_blocked && ui_mode == UiMode::FxDetail)
 	{
-		if (fx_detail_index == kFxSatIndex)
+		ChannelState* detail_state = (fx_detail_prev_mode == UiMode::PlayTrack)
+			? &play_track_state[play_edit_track]
+			: nullptr;
+		volatile int32_t& fx_detail_index_ref = detail_state ? detail_state->fx_detail_index : fx_detail_index;
+		volatile int32_t& fx_detail_param_index_ref = detail_state
+		                                           ? detail_state->fx_detail_param_index
+		                                           : fx_detail_param_index;
+		volatile int32_t& sat_mode_ref = detail_state ? detail_state->sat_mode : sat_mode;
+		volatile float& sat_drive_ref = detail_state ? detail_state->sat_drive : sat_drive;
+		volatile float& sat_tape_bump_ref = detail_state ? detail_state->sat_tape_bump : sat_tape_bump;
+		volatile float& sat_bit_reso_ref = detail_state ? detail_state->sat_bit_reso : sat_bit_reso;
+		volatile float& sat_bit_smpl_ref = detail_state ? detail_state->sat_bit_smpl : sat_bit_smpl;
+		volatile float& fx_s_wet_ref = detail_state ? detail_state->fx_s_wet : fx_s_wet;
+		volatile int32_t& chorus_mode_ref = detail_state ? detail_state->chorus_mode : chorus_mode;
+		volatile float& chorus_wow_ref = detail_state ? detail_state->chorus_wow : chorus_wow;
+		volatile float& mod_depth_ref = detail_state ? detail_state->mod_depth : mod_depth;
+		volatile float& tape_rate_ref = detail_state ? detail_state->tape_rate : tape_rate;
+		volatile float& chorus_rate_ref = detail_state ? detail_state->chorus_rate : chorus_rate;
+		volatile float& fx_c_wet_ref = detail_state ? detail_state->fx_c_wet : fx_c_wet;
+		volatile float& delay_time_ref = detail_state ? detail_state->delay_time : delay_time;
+		volatile float& delay_feedback_ref = detail_state ? detail_state->delay_feedback : delay_feedback;
+		volatile float& delay_spread_ref = detail_state ? detail_state->delay_spread : delay_spread;
+		volatile float& delay_freeze_ref = detail_state ? detail_state->delay_freeze : delay_freeze;
+		volatile float& delay_wet_ref = detail_state ? detail_state->delay_wet : delay_wet;
+		volatile float& reverb_pre_ref = detail_state ? detail_state->reverb_pre : reverb_pre;
+		volatile float& reverb_damp_ref = detail_state ? detail_state->reverb_damp : reverb_damp;
+		volatile float& reverb_decay_ref = detail_state ? detail_state->reverb_decay : reverb_decay;
+		volatile float& reverb_wet_ref = detail_state ? detail_state->reverb_wet : reverb_wet;
+		volatile float& reverb_shimmer_ref = detail_state ? detail_state->reverb_shimmer : reverb_shimmer;
+
+		if (fx_detail_index_ref == kFxSatIndex)
 		{
 			if (encoder_l_inc != 0)
 			{
 				const int32_t param_count = 4;
-				int32_t next = fx_detail_param_index + encoder_l_inc;
+				int32_t next = fx_detail_param_index_ref + encoder_l_inc;
 				while (next < 0)
 				{
 					next += param_count;
@@ -8318,9 +8452,9 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				{
 					next -= param_count;
 				}
-				if (next != fx_detail_param_index)
+				if (next != fx_detail_param_index_ref)
 				{
-					fx_detail_param_index = next;
+					fx_detail_param_index_ref = next;
 					request_fx_detail_redraw = true;
 				}
 			}
@@ -8328,13 +8462,13 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			{
 				const float steps[3] = {kReverbWetStep, kReverbWetStep, kReverbWetStep};
 				volatile float* targets[3]
-					= {(sat_mode == 1) ? &sat_bit_reso : &sat_drive,
-					   (sat_mode == 1) ? &sat_bit_smpl : &sat_tape_bump,
-					   &fx_s_wet};
-				const int idx = fx_detail_param_index;
+					= {(sat_mode_ref == 1) ? &sat_bit_reso_ref : &sat_drive_ref,
+					   (sat_mode_ref == 1) ? &sat_bit_smpl_ref : &sat_tape_bump_ref,
+					   &fx_s_wet_ref};
+				const int idx = fx_detail_param_index_ref;
 				if (idx == 3)
 				{
-					sat_mode = (sat_mode == 0) ? 1 : 0;
+					sat_mode_ref = (sat_mode_ref == 0) ? 1 : 0;
 					request_fx_detail_redraw = true;
 					fx_params_dirty = true;
 				}
@@ -8343,7 +8477,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					volatile float* target = targets[idx];
 					const float current = *target;
 					float next = current;
-					if (sat_mode == 1 && idx == 0)
+					if (sat_mode_ref == 1 && idx == 0)
 					{
 						const int cur_idx = BitResoIndexFromValue(current);
 						const int next_idx = ClampI(cur_idx + encoder_r_inc, 0, kBitResoStepCount - 1);
@@ -8371,18 +8505,18 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				}
 			}
 		}
-		else if (fx_detail_index == kFxChorusIndex)
+		else if (fx_detail_index_ref == kFxChorusIndex)
 		{
 			if (encoder_r_pressed)
 			{
-				chorus_mode = (chorus_mode == 0) ? 1 : 0;
+				chorus_mode_ref = (chorus_mode_ref == 0) ? 1 : 0;
 				request_fx_detail_redraw = true;
 				fx_params_dirty = true;
 			}
 			if (encoder_l_inc != 0)
 			{
 				const int32_t param_count = 4;
-				int32_t next = fx_detail_param_index + encoder_l_inc;
+				int32_t next = fx_detail_param_index_ref + encoder_l_inc;
 				while (next < 0)
 				{
 					next += param_count;
@@ -8391,17 +8525,17 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				{
 					next -= param_count;
 				}
-				if (next != fx_detail_param_index)
+				if (next != fx_detail_param_index_ref)
 				{
-					fx_detail_param_index = next;
+					fx_detail_param_index_ref = next;
 					request_fx_detail_redraw = true;
 				}
 			}
 			if (encoder_r_inc != 0)
 			{
-				if (fx_detail_param_index == 3)
+				if (fx_detail_param_index_ref == 3)
 				{
-					int32_t next = chorus_mode + encoder_r_inc;
+					int32_t next = chorus_mode_ref + encoder_r_inc;
 					while (next < 0)
 					{
 						next += 2;
@@ -8410,9 +8544,9 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					{
 						next -= 2;
 					}
-					if (next != chorus_mode)
+					if (next != chorus_mode_ref)
 					{
-						chorus_mode = next;
+						chorus_mode_ref = next;
 						request_fx_detail_redraw = true;
 						fx_params_dirty = true;
 					}
@@ -8422,10 +8556,10 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					const float steps[3]
 						= {kReverbWetStep, kChorusRateStep, kReverbWetStep};
 					volatile float* targets[3]
-						= {(chorus_mode == 1) ? &chorus_wow : &mod_depth,
-						   (chorus_mode == 1) ? &tape_rate : &chorus_rate,
-						   &fx_c_wet};
-					const int idx = fx_detail_param_index;
+						= {(chorus_mode_ref == 1) ? &chorus_wow_ref : &mod_depth_ref,
+						   (chorus_mode_ref == 1) ? &tape_rate_ref : &chorus_rate_ref,
+						   &fx_c_wet_ref};
+					const int idx = fx_detail_param_index_ref;
 					if (idx >= 0 && idx < 3)
 					{
 						const float step = steps[idx];
@@ -8450,12 +8584,12 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				}
 			}
 		}
-		else if (fx_detail_index == kFxDelayIndex)
+		else if (fx_detail_index_ref == kFxDelayIndex)
 		{
 			if (encoder_l_inc != 0)
 			{
 				const int32_t param_count = kDelayFaderCount;
-				int32_t next = fx_detail_param_index + encoder_l_inc;
+				int32_t next = fx_detail_param_index_ref + encoder_l_inc;
 				while (next < 0)
 				{
 					next += param_count;
@@ -8464,9 +8598,9 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				{
 					next -= param_count;
 				}
-				if (next != fx_detail_param_index)
+				if (next != fx_detail_param_index_ref)
 				{
-					fx_detail_param_index = next;
+					fx_detail_param_index_ref = next;
 					request_fx_detail_redraw = true;
 				}
 			}
@@ -8479,8 +8613,9 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					   kDelayParamStep,
 					   kDelayWetStep};
 				volatile float* targets[kDelayFaderCount]
-					= {&delay_time, &delay_feedback, &delay_spread, &delay_freeze, &delay_wet};
-				const int idx = fx_detail_param_index;
+					= {&delay_time_ref, &delay_feedback_ref, &delay_spread_ref,
+					   &delay_freeze_ref, &delay_wet_ref};
+				const int idx = fx_detail_param_index_ref;
 				if (idx >= 0 && idx < kDelayFaderCount)
 				{
 					volatile float* target = targets[idx];
@@ -8513,12 +8648,12 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				}
 			}
 		}
-		else if (fx_detail_index == kFxReverbIndex)
+		else if (fx_detail_index_ref == kFxReverbIndex)
 		{
 			if (encoder_l_inc != 0)
 			{
 				const int32_t param_count = kReverbFaderCount;
-				int32_t next = fx_detail_param_index + encoder_l_inc;
+				int32_t next = fx_detail_param_index_ref + encoder_l_inc;
 				while (next < 0)
 				{
 					next += param_count;
@@ -8527,9 +8662,9 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				{
 					next -= param_count;
 				}
-				if (next != fx_detail_param_index)
+				if (next != fx_detail_param_index_ref)
 				{
-					fx_detail_param_index = next;
+					fx_detail_param_index_ref = next;
 					request_fx_detail_redraw = true;
 				}
 			}
@@ -8542,8 +8677,9 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					   kReverbWetStep,
 					   kReverbShimmerStep};
 				volatile float* targets[kReverbFaderCount]
-					= {&reverb_pre, &reverb_damp, &reverb_decay, &reverb_wet, &reverb_shimmer};
-				const int idx = fx_detail_param_index;
+					= {&reverb_pre_ref, &reverb_damp_ref, &reverb_decay_ref,
+					   &reverb_wet_ref, &reverb_shimmer_ref};
+				const int idx = fx_detail_param_index_ref;
 				if (idx >= 0 && idx < kReverbFaderCount)
 				{
 					const float step = steps[idx];
@@ -9207,32 +9343,36 @@ static float last_chorus_wow = -1.0f;
 		delay_line_r.SetDelay(delay_time_smoothed);
 		last_delay_time = delay_time_smoothed;
 	}
-	const bool fx_edit_mode = (flags_bits & kFlagInEditorMode) != 0;
+	const bool play_mode = (flags_bits & kFlagInPlayMode) != 0;
+	const bool perform_mode = (flags_bits & kFlagInEditorMode) != 0;
 	const bool main_mode = (flags_bits & kFlagInMainMode) != 0;
 	const bool fx_allowed = (flags_bits & kFlagFxAllowed) != 0;
-	const bool amp_env_active = fx_edit_mode;
+	const bool playback_env_active = perform_mode;
+	const bool poly_env_active = perform_mode || play_mode;
 	const float amp_attack_ms = AmpEnvMsFromFader(params.amp_attack);
 	const float amp_release_ms = AmpEnvMsFromFader(params.amp_release);
 	const float amp_attack_samples = amp_attack_ms * 0.001f * out_sr;
 	const float amp_release_samples = amp_release_ms * 0.001f * out_sr;
-	const bool play_seq_mode = (flags_bits & kFlagPlaySeqMode) != 0;
-	const bool play_master_fx = (flags_bits & kFlagPlayMasterFx) != 0;
-	const int32_t live_track = (play_edit_context == PlayEditContext::PlayTrack
-		&& play_edit_track >= 0
-		&& play_edit_track < kPlayTrackCount)
-		? play_edit_track
-		: -1;
+	float track_amp_attack_samples[kPlayTrackCount] = {};
+	float track_amp_release_samples[kPlayTrackCount] = {};
+	float track_flt_cutoff_hz[kPlayTrackCount] = {};
+	float track_flt_q[kPlayTrackCount] = {};
 	float track_mod_send[kPlayTrackCount] = {};
 	float track_delay_send[kPlayTrackCount] = {};
 	float track_reverb_send[kPlayTrackCount] = {};
-	if (play_master_fx)
+	if (play_mode)
 	{
+		// PLAY always uses play_track_state[t] for DSP regardless of UI mode. PlayTrack is editor-only.
 		for (int t = 0; t < kPlayTrackCount; ++t)
 		{
-			const bool use_live = (t == live_track);
-			float mod_send = use_live ? params.fx_c_wet : play_track_state[t].fx_c_wet;
-			float delay_send = use_live ? params.delay_wet : play_track_state[t].delay_wet;
-			float reverb_send = use_live ? params.reverb_wet : play_track_state[t].reverb_wet;
+			const ChannelState& ps = play_track_state[t];
+			track_amp_attack_samples[t] = AmpEnvMsFromFader(ps.amp_attack) * 0.001f * out_sr;
+			track_amp_release_samples[t] = AmpEnvMsFromFader(ps.amp_release) * 0.001f * out_sr;
+			track_flt_cutoff_hz[t] = FltCutoffFromFader(ps.flt_cutoff, out_sr);
+			track_flt_q[t] = FltQFromFader(ps.flt_res);
+			float mod_send = ps.fx_c_wet;
+			float delay_send = ps.delay_wet;
+			float reverb_send = ps.reverb_wet;
 			if (mod_send < 0.0f) mod_send = 0.0f;
 			if (mod_send > 1.0f) mod_send = 1.0f;
 			if (delay_send < 0.0f) delay_send = 0.0f;
@@ -9244,29 +9384,74 @@ static float last_chorus_wow = -1.0f;
 			track_reverb_send[t] = reverb_send;
 		}
 	}
+	const bool play_seq_mode = (flags_bits & kFlagPlaySeqMode) != 0;
+	const bool play_master_fx = (flags_bits & kFlagPlayMasterFx) != 0;
 	const bool use_poly = (record_state != RecordState::Recording)
-		&& ((fx_edit_mode && sample_loaded) || play_seq_mode);
+		&& ((perform_mode && sample_loaded) || play_seq_mode);
 	const bool sample_stereo = (sample_channels == 2);
-	const float flt_cutoff_hz = FltCutoffFromFader(params.flt_cutoff, out_sr);
-	const float flt_q = FltQFromFader(params.flt_res);
-	static float last_flt_cutoff = -1.0f;
-	static float last_flt_q = -1.0f;
-	if (flt_cutoff_hz != last_flt_cutoff || flt_q != last_flt_q)
+	if (perform_mode)
+	{
+		const float flt_cutoff_hz = FltCutoffFromFader(params.flt_cutoff, out_sr);
+		const float flt_q = FltQFromFader(params.flt_res);
+		static float last_flt_cutoff = -1.0f;
+		static float last_flt_q = -1.0f;
+		if (flt_cutoff_hz != last_flt_cutoff || flt_q != last_flt_q)
+		{
+			for (int v = 0; v < kChannelSlotCount; ++v)
+			{
+				channel_lpf_l1[v].Set(out_sr, flt_cutoff_hz, flt_q);
+				channel_lpf_l2[v].Set(out_sr, flt_cutoff_hz, flt_q);
+				channel_lpf_r1[v].Set(out_sr, flt_cutoff_hz, flt_q);
+				channel_lpf_r2[v].Set(out_sr, flt_cutoff_hz, flt_q);
+			}
+			last_flt_cutoff = flt_cutoff_hz;
+			last_flt_q = flt_q;
+		}
+	}
+	if (play_mode)
 	{
 		for (int v = 0; v < kChannelSlotCount; ++v)
 		{
+			const auto& slot = channel_slots[v];
+			if (!slot.active)
+			{
+				continue;
+			}
+			const int32_t track = slot.track;
+			if (track < 0 || track >= kPlayTrackCount)
+			{
+				continue;
+			}
+			const float flt_cutoff_hz = track_flt_cutoff_hz[track];
+			const float flt_q = track_flt_q[track];
 			channel_lpf_l1[v].Set(out_sr, flt_cutoff_hz, flt_q);
 			channel_lpf_l2[v].Set(out_sr, flt_cutoff_hz, flt_q);
 			channel_lpf_r1[v].Set(out_sr, flt_cutoff_hz, flt_q);
 			channel_lpf_r2[v].Set(out_sr, flt_cutoff_hz, flt_q);
 		}
-		last_flt_cutoff = flt_cutoff_hz;
-		last_flt_q = flt_q;
 	}
 	int32_t fx_order[kEditorFaderCount];
 	for (int i = 0; i < kEditorFaderCount; ++i)
 	{
 		fx_order[i] = fx_chain_order[i];
+	}
+	float slot_attack_samples[kChannelSlotCount] = {};
+	float slot_release_samples[kChannelSlotCount] = {};
+	for (int v = 0; v < kChannelSlotCount; ++v)
+	{
+		float attack_samples = amp_attack_samples;
+		float release_samples = amp_release_samples;
+		if (play_mode)
+		{
+			const int32_t track = channel_slots[v].track;
+			if (track >= 0 && track < kPlayTrackCount)
+			{
+				attack_samples = track_amp_attack_samples[track];
+				release_samples = track_amp_release_samples[track];
+			}
+		}
+		slot_attack_samples[v] = attack_samples;
+		slot_release_samples[v] = release_samples;
 	}
 
 	auto apply_saturation = [&](float &l, float &r, int32_t track)
@@ -9694,7 +9879,7 @@ static float last_chorus_wow = -1.0f;
 		if (sample_loaded && playback_active && record_state != RecordState::Recording && window_valid)
 		{
 			float amp_env = 1.0f;
-			if (amp_env_active)
+			if (playback_env_active)
 			{
 				float attack_env = 1.0f;
 				if (amp_attack_samples > 1.0f)
@@ -9749,7 +9934,7 @@ static float last_chorus_wow = -1.0f;
 			{
 				sig_l = static_cast<float>(sample_buffer_l[0]) * kSampleScale * playback_amp;
 				sig_r = static_cast<float>(sample_buffer_r[0]) * kSampleScale * playback_amp;
-				if (amp_env_active)
+				if (playback_env_active)
 				{
 					sig_l *= amp_env;
 					sig_r *= amp_env;
@@ -9768,7 +9953,7 @@ static float last_chorus_wow = -1.0f;
 					const float r1 = static_cast<float>(sample_buffer_r[idx + 1]);
 					sig_l = (l0 + (l1 - l0) * frac) * kSampleScale * playback_amp;
 					sig_r = (r0 + (r1 - r0) * frac) * kSampleScale * playback_amp;
-					if (amp_env_active)
+					if (playback_env_active)
 					{
 						sig_l *= amp_env;
 						sig_r *= amp_env;
@@ -9816,12 +10001,14 @@ static float last_chorus_wow = -1.0f;
 				{
 					continue;
 				}
+				const float attack_samples = slot_attack_samples[v];
+				const float release_samples = slot_release_samples[v];
 				float env = 1.0f;
-				if (amp_env_active)
+				if (poly_env_active)
 				{
-					if (amp_attack_samples > 1.0f)
+					if (attack_samples > 1.0f)
 					{
-						env = static_cast<float>(voice.env_samples) / amp_attack_samples;
+						env = static_cast<float>(voice.env_samples) / attack_samples;
 					}
 				}
 				if (env > 1.0f)
@@ -9831,9 +10018,9 @@ static float last_chorus_wow = -1.0f;
 				if (voice.releasing)
 				{
 					float noteoff_env = voice.release_start;
-					if (amp_release_samples > 1.0f)
+					if (release_samples > 1.0f)
 					{
-						noteoff_env *= (1.0f - (voice.release_pos / amp_release_samples));
+						noteoff_env *= (1.0f - (voice.release_pos / release_samples));
 					}
 					if (noteoff_env < 0.0f)
 					{
@@ -9860,7 +10047,7 @@ static float last_chorus_wow = -1.0f;
 						? static_cast<float>(sample_buffer_r[idx])
 						: static_cast<float>(sample_buffer_l[idx]);
 					samp_r = r * kSampleScale * amp;
-					if (fx_edit_mode)
+					if (perform_mode || play_mode)
 					{
 						samp_l = channel_lpf_l2[v].Process(channel_lpf_l1[v].Process(samp_l));
 						samp_r = channel_lpf_r2[v].Process(channel_lpf_r1[v].Process(samp_r));
@@ -9902,7 +10089,7 @@ static float last_chorus_wow = -1.0f;
 				const float amp = voice.amp * env;
 				float samp_l = (l0 + (l1 - l0) * frac) * kSampleScale * amp;
 				float samp_r = (r0 + (r1 - r0) * frac) * kSampleScale * amp;
-				if (fx_edit_mode)
+				if (perform_mode || play_mode)
 				{
 					samp_l = channel_lpf_l2[v].Process(channel_lpf_l1[v].Process(samp_l));
 					samp_r = channel_lpf_r2[v].Process(channel_lpf_r1[v].Process(samp_r));
@@ -9916,7 +10103,7 @@ static float last_chorus_wow = -1.0f;
 				else
 				{
 					voice.release_pos += 1.0f;
-					if (amp_release_samples > 1.0f && voice.release_pos >= amp_release_samples)
+					if (release_samples > 1.0f && voice.release_pos >= release_samples)
 					{
 						voice.active = false;
 						voice.releasing = false;
@@ -10222,7 +10409,7 @@ int main(void)
 	{
 		uint32_t bits = 0;
 		const bool in_play_mode = IsPlayUiMode(ui_mode);
-		const bool in_fx_edit_mode = IsPerformUiMode(ui_mode) || IsPlayTrackUiMode(ui_mode);
+		const bool in_fx_edit_mode = IsPerformUiMode(ui_mode);
 		if (in_play_mode) bits |= kFlagInPlayMode;
 		if (in_fx_edit_mode) bits |= kFlagInEditorMode;
 		if (ui_mode == UiMode::Main) bits |= kFlagInMainMode;
@@ -10367,7 +10554,7 @@ int main(void)
 		{
 			uint32_t bits = 0;
 			const bool in_play_mode = IsPlayUiMode(ui_mode);
-			const bool in_fx_edit_mode = IsPerformUiMode(ui_mode) || IsPlayTrackUiMode(ui_mode);
+			const bool in_fx_edit_mode = IsPerformUiMode(ui_mode);
 			if (in_play_mode) bits |= kFlagInPlayMode;
 			if (in_fx_edit_mode) bits |= kFlagInEditorMode;
 			if (ui_mode == UiMode::Main) bits |= kFlagInMainMode;
@@ -10964,25 +11151,42 @@ int main(void)
 				}
 			else if (mode == UiMode::FxDetail)
 			{
-				DrawFxDetailScreen(fx_detail_index);
-				last_fx_detail_index = fx_detail_index;
-				last_fx_detail_param_index = fx_detail_param_index;
+				const ChannelState* detail_state = (fx_detail_prev_mode == UiMode::PlayTrack)
+					? &play_track_state[play_edit_track]
+					: nullptr;
+				const int32_t detail_index = detail_state
+					? detail_state->fx_detail_index
+					: fx_detail_index;
+				const int32_t detail_param_index = detail_state
+					? detail_state->fx_detail_param_index
+					: fx_detail_param_index;
+				DrawFxDetailScreen(detail_index, detail_state);
+				last_fx_detail_index = detail_index;
+				last_fx_detail_param_index = detail_param_index;
 			}
 			else if (IsPerformUiMode(mode) || IsPlayTrackUiMode(mode))
 			{
-				const bool fx_select_active = (editor_index == kEditorFxIndex)
-					&& fx_window_active;
-				const bool amp_select_active = (editor_index == kEditorAmpIndex)
-					&& amp_window_active;
-				const bool flt_select_active = (editor_index == kEditorFltIndex)
-					&& flt_window_active;
-				DrawEditorScreen(editor_index,
+				const ChannelState* draw_state = IsPlayTrackUiMode(mode)
+					? &play_track_state[play_edit_track]
+					: nullptr;
+				const int32_t draw_index = draw_state ? draw_state->editor_index : editor_index;
+				const int32_t draw_fx_fader = draw_state ? draw_state->fx_fader_index : fx_fader_index;
+				const int32_t draw_amp_fader = draw_state ? draw_state->amp_fader_index : amp_fader_index;
+				const int32_t draw_flt_fader = draw_state ? draw_state->flt_fader_index : flt_fader_index;
+				const bool fx_select_active = (draw_index == kEditorFxIndex)
+					&& (draw_state ? draw_state->fx_window_active : fx_window_active);
+				const bool amp_select_active = (draw_index == kEditorAmpIndex)
+					&& (draw_state ? draw_state->amp_window_active : amp_window_active);
+				const bool flt_select_active = (draw_index == kEditorFltIndex)
+					&& (draw_state ? draw_state->flt_window_active : flt_window_active);
+				DrawEditorScreen(draw_index,
 								  fx_select_active,
-								  fx_fader_index,
+								  draw_fx_fader,
 								  amp_select_active,
-								  amp_fader_index,
+								  draw_amp_fader,
 								  flt_select_active,
-								  flt_fader_index);
+								  draw_flt_fader,
+								  draw_state);
 			}
 				else if (mode == UiMode::LoadTarget)
 				{
@@ -11041,7 +11245,10 @@ int main(void)
 				last_sd_mounted = sd_mounted;
 				last_record_state = record_state;
 				last_load_target = load_target_selected;
-				last_editor_index = editor_index;
+				last_editor_index = (IsPlayTrackUiMode(mode) && play_edit_track >= 0
+					&& play_edit_track < kPlayTrackCount)
+					? play_track_state[play_edit_track].editor_index
+					: editor_index;
 			}
 			else if (mode == UiMode::Main)
 			{
@@ -11057,36 +11264,52 @@ int main(void)
 			}
 			else if (IsPerformUiMode(mode) || IsPlayTrackUiMode(mode))
 			{
-				const int32_t current = editor_index;
+				const ChannelState* draw_state = IsPlayTrackUiMode(mode)
+					? &play_track_state[play_edit_track]
+					: nullptr;
+				const int32_t current = draw_state ? draw_state->editor_index : editor_index;
 				if (request_editor_redraw || current != last_editor_index)
 				{
 					request_editor_redraw = false;
 					const bool fx_select_active = (current == kEditorFxIndex)
-						&& fx_window_active;
+						&& (draw_state ? draw_state->fx_window_active : fx_window_active);
 					const bool amp_select_active = (current == kEditorAmpIndex)
-						&& amp_window_active;
+						&& (draw_state ? draw_state->amp_window_active : amp_window_active);
 					const bool flt_select_active = (current == kEditorFltIndex)
-						&& flt_window_active;
+						&& (draw_state ? draw_state->flt_window_active : flt_window_active);
+					const int32_t draw_fx_fader = draw_state ? draw_state->fx_fader_index : fx_fader_index;
+					const int32_t draw_amp_fader = draw_state ? draw_state->amp_fader_index : amp_fader_index;
+					const int32_t draw_flt_fader = draw_state ? draw_state->flt_fader_index : flt_fader_index;
 					DrawEditorScreen(current,
 									  fx_select_active,
-									  fx_fader_index,
+									  draw_fx_fader,
 									  amp_select_active,
-									  amp_fader_index,
+									  draw_amp_fader,
 									  flt_select_active,
-									  flt_fader_index);
+									  draw_flt_fader,
+									  draw_state);
 					last_editor_index = current;
 				}
 			}
 			else if (mode == UiMode::FxDetail)
 			{
+				const ChannelState* detail_state = (fx_detail_prev_mode == UiMode::PlayTrack)
+					? &play_track_state[play_edit_track]
+					: nullptr;
+				const int32_t detail_index = detail_state
+					? detail_state->fx_detail_index
+					: fx_detail_index;
+				const int32_t detail_param_index = detail_state
+					? detail_state->fx_detail_param_index
+					: fx_detail_param_index;
 				if (request_fx_detail_redraw
-					|| fx_detail_index != last_fx_detail_index
-					|| fx_detail_param_index != last_fx_detail_param_index)
+					|| detail_index != last_fx_detail_index
+					|| detail_param_index != last_fx_detail_param_index)
 				{
 					request_fx_detail_redraw = false;
-					DrawFxDetailScreen(fx_detail_index);
-					last_fx_detail_index = fx_detail_index;
-					last_fx_detail_param_index = fx_detail_param_index;
+					DrawFxDetailScreen(detail_index, detail_state);
+					last_fx_detail_index = detail_index;
+					last_fx_detail_param_index = detail_param_index;
 				}
 			}
 			else if (mode == UiMode::Shift)
