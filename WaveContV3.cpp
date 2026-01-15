@@ -74,6 +74,77 @@ constexpr uint32_t kPreviewReadBudgetMs = 2;
 constexpr size_t kPreviewBufferFrames = 4096;
 constexpr size_t kPreviewReadFrames = 256;
 
+static inline float Clamp(float v, float lo, float hi)
+{
+	if (v < lo)
+	{
+		return lo;
+	}
+	if (v > hi)
+	{
+		return hi;
+	}
+	return v;
+}
+
+static inline float Clamp01(float v)
+{
+	return Clamp(v, 0.0f, 1.0f);
+}
+
+static inline void Clamp01InPlace(float& v)
+{
+	v = Clamp01(v);
+}
+
+static inline int WrapIndex(int i, int n)
+{
+	if (n <= 0)
+	{
+		return 0;
+	}
+	int r = i % n;
+	if (r < 0)
+	{
+		r += n;
+	}
+	return r;
+}
+
+static inline void NormalizeWindow(size_t& start, size_t& end, size_t len, bool reset_to_full = true)
+{
+	if (len == 0)
+	{
+		start = 0;
+		end = 0;
+		return;
+	}
+	if (reset_to_full)
+	{
+		if (end == 0 || end > len)
+		{
+			end = len;
+		}
+		if (end <= start)
+		{
+			start = 0;
+			end = len;
+		}
+	}
+	if (start > len)
+	{
+		start = len;
+	}
+	if (end > len)
+	{
+		end = len;
+	}
+	if (!reset_to_full && end < start)
+	{
+		end = start;
+	}
+}
+
 static const char* kSaveColors[] =
 {
 	"Red",
@@ -583,19 +654,6 @@ private:
 			return y;
 		}
 	};
-
-	static float Clamp(float v, float lo, float hi)
-	{
-		if (v < lo)
-		{
-			return lo;
-		}
-		if (v > hi)
-		{
-			return hi;
-		}
-		return v;
-	}
 
 	static float FastTanh(float x)
 	{
@@ -1320,8 +1378,7 @@ struct SmoothParam
 		const float dt = 1.0f / tick_hz;
 		const float tau = time_ms / 1000.0f;
 		coeff = 1.0f - expf(-dt / tau);
-		if (coeff > 1.0f) coeff = 1.0f;
-		if (coeff < 0.0f) coeff = 0.0f;
+		Clamp01InPlace(coeff);
 	}
 
 	void SetTarget(float t) { target = t; }
@@ -1412,6 +1469,9 @@ static volatile uint32_t g_audio_flags_bits = 0;
 static volatile uint32_t g_play_bpm = kPlayBpm;
 static volatile uint8_t g_play_step_for_ui = 0;
 static volatile bool g_play_step_dirty_for_ui = false;
+static volatile uint8_t g_last_trig_track = 0;
+static volatile uint8_t g_last_trig_step = 0;
+static volatile bool g_trig_event = false;
 
 volatile RecordState record_state = RecordState::Armed;
 volatile int32_t record_source_index = 0;
@@ -2116,6 +2176,28 @@ static void MountSd()
 	}
 }
 
+static uint8_t InitSdCard(const char* log_label)
+{
+	SdmmcHandler::Config sd_cfg;
+	sd_cfg.Defaults();
+	sdcard.Init(sd_cfg);
+	fsi.Init(FatFSInterface::Config::MEDIA_SD);
+	const uint8_t init_res = BSP_SD_Init();
+	LogLine(log_label, static_cast<unsigned>(init_res));
+	return init_res;
+}
+
+static bool EnsureSdMounted(const char* log_label = "SD init: %u")
+{
+	if (sd_mounted)
+	{
+		return true;
+	}
+	InitSdCard(log_label);
+	MountSd();
+	return sd_mounted;
+}
+
 static bool BuildNextSaveName(char* out_name, size_t out_len)
 {
 	if (out_len == 0)
@@ -2375,12 +2457,7 @@ static bool ReinitSdNow()
 	f_mount(0, fsi.GetSDPath(), 0);
 	sd_mounted = false;
 	fsi.DeInit();
-	SdmmcHandler::Config sd_cfg;
-	sd_cfg.Defaults();
-	sdcard.Init(sd_cfg);
-	fsi.Init(FatFSInterface::Config::MEDIA_SD);
-	const uint8_t init_res = BSP_SD_Init();
-	LogLine("SD init (full): %u", static_cast<unsigned>(init_res));
+	InitSdCard("SD init (full): %u");
 	MountSd();
 	return sd_mounted;
 }
@@ -2391,12 +2468,7 @@ static void __attribute__((unused)) ScanSdFiles(bool wav_only)
 	bool detected = BSP_SD_IsDetected();
 	if (!detected)
 	{
-		SdmmcHandler::Config sd_cfg;
-		sd_cfg.Defaults();
-		sdcard.Init(sd_cfg);
-		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		const uint8_t init_res = BSP_SD_Init();
-		LogLine("SD init (detect): %u", static_cast<unsigned>(init_res));
+		InitSdCard("SD init (detect): %u");
 		detected = BSP_SD_IsDetected();
 		if (!detected)
 		{
@@ -2424,13 +2496,7 @@ static void __attribute__((unused)) ScanSdFiles(bool wav_only)
 	{
 		f_mount(0, fsi.GetSDPath(), 0);
 		sd_mounted = false;
-		SdmmcHandler::Config sd_cfg;
-		sd_cfg.Defaults();
-		sdcard.Init(sd_cfg);
-		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		const uint8_t init_res = BSP_SD_Init();
-		LogLine("SD init: %u", static_cast<unsigned>(init_res));
-		MountSd();
+		EnsureSdMounted("SD init: %u");
 		sd_need_reinit = !sd_mounted;
 	}
 
@@ -2566,9 +2632,15 @@ static void __attribute__((unused)) ComputeWaveform()
 	}
 }
 
-static inline bool JobsAllowedNow()
+static inline bool JobsAllowedNowForSdOrHeavy()
 {
 	return !play_transport_running && record_state != RecordState::Recording;
+}
+
+static inline bool WaveformAllowedNow()
+{
+	return record_state != RecordState::Recording
+		&& (!play_transport_running || ui_mode == UiMode::Edt);
 }
 
 enum class JobType : uint8_t
@@ -2696,12 +2768,7 @@ static void FileListJobStart(bool wav_only)
 	bool detected = BSP_SD_IsDetected();
 	if (!detected)
 	{
-		SdmmcHandler::Config sd_cfg;
-		sd_cfg.Defaults();
-		sdcard.Init(sd_cfg);
-		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		const uint8_t init_res = BSP_SD_Init();
-		LogLine("SD init (detect): %u", static_cast<unsigned>(init_res));
+		InitSdCard("SD init (detect): %u");
 		detected = BSP_SD_IsDetected();
 		if (!detected)
 		{
@@ -2729,13 +2796,7 @@ static void FileListJobStart(bool wav_only)
 	{
 		f_mount(0, fsi.GetSDPath(), 0);
 		sd_mounted = false;
-		SdmmcHandler::Config sd_cfg;
-		sd_cfg.Defaults();
-		sdcard.Init(sd_cfg);
-		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		const uint8_t init_res = BSP_SD_Init();
-		LogLine("SD init: %u", static_cast<unsigned>(init_res));
-		MountSd();
+		EnsureSdMounted("SD init: %u");
 		sd_need_reinit = !sd_mounted;
 	}
 
@@ -3034,19 +3095,18 @@ static void JobTick()
 	{
 		return;
 	}
-	if (!JobsAllowedNow())
-	{
-		if (!g_job.foreground)
-		{
-			JobCancel();
-		}
-		return;
-	}
-	constexpr uint32_t kWaveformBudget = 2048;
-	constexpr uint32_t kListBudget = 6;
 	if (g_job.type == JobType::WaveformBuild)
 	{
-		WaveformJobTick(kWaveformBudget);
+		if (!WaveformAllowedNow())
+		{
+			if (!g_job.foreground)
+			{
+				JobCancel();
+			}
+			return;
+		}
+		const uint32_t waveform_budget = play_transport_running ? 256U : 2048U;
+		WaveformJobTick(waveform_budget);
 		const uint32_t total = static_cast<uint32_t>(g_wf_job.frames);
 		uint32_t done = 0;
 		if (total > 0)
@@ -3062,6 +3122,15 @@ static void JobTick()
 	}
 	else if (g_job.type == JobType::FileListScan)
 	{
+		if (!JobsAllowedNowForSdOrHeavy())
+		{
+			if (!g_job.foreground)
+			{
+				JobCancel();
+			}
+			return;
+		}
+		constexpr uint32_t kListBudget = 6;
 		FileListJobTick(kListBudget);
 		const uint32_t done = static_cast<uint32_t>(g_list_job.count);
 		const uint32_t total = kMaxWavFiles;
@@ -3136,6 +3205,14 @@ static void AdjustTrimNormalized(int32_t start_delta, int32_t end_delta, bool fi
 	UpdateTrimFrames();
 	waveform_dirty = true;
 	request_length_redraw = true;
+	if (ui_mode == UiMode::Edt && play_edit_context == PlayEditContext::PlayTrack)
+	{
+		if (play_edit_track >= 0 && play_edit_track < kPlayTrackCount)
+		{
+			track_samples[play_edit_track].trim_start = trim_start;
+			track_samples[play_edit_track].trim_end = trim_end;
+		}
+	}
 }
 
 static bool IsPlayUiMode(UiMode mode)
@@ -3550,10 +3627,8 @@ static bool ComputeTrimWindowFrames(float trim_start_in,
 
 	float start = trim_start_in;
 	float end = trim_end_in;
-	if (start < 0.0f) start = 0.0f;
-	if (end > 1.0f) end = 1.0f;
-	if (end < 0.0f) end = 0.0f;
-	if (start > 1.0f) start = 1.0f;
+	start = Clamp01(start);
+	end = Clamp01(end);
 
 	const float min_norm = 2.0f / static_cast<float>(length);
 	if (end - start < min_norm)
@@ -3631,15 +3706,7 @@ static void StartSequencerVoiceWindow(size_t window_start,
 		return;
 	}
 	g_sample_cache[buffer_id].last_used_counter = ++g_sample_cache_use_counter;
-	if (window_end > buf.length || window_end == 0)
-	{
-		window_end = buf.length;
-	}
-	if (window_end <= window_start)
-	{
-		window_start = 0;
-		window_end = buf.length;
-	}
+	NormalizeWindow(window_start, window_end, buf.length, true);
 	if (window_end <= window_start)
 	{
 		return;
@@ -3739,6 +3806,9 @@ static void TriggerSequencerStep(int32_t step)
 			continue;
 		}
 		StartSequencerVoiceWindow(window_start, window_end, track, buffer_id);
+		g_last_trig_track = static_cast<uint8_t>(track);
+		g_last_trig_step = static_cast<uint8_t>(step);
+		g_trig_event = true;
 	}
 }
 
@@ -4228,13 +4298,7 @@ static bool LoadSampleAtIndex(int32_t index)
 	MountSd();
 	if (!sd_mounted)
 	{
-		SdmmcHandler::Config sd_cfg;
-		sd_cfg.Defaults();
-		sdcard.Init(sd_cfg);
-		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		const uint8_t init_res = BSP_SD_Init();
-		LogLine("SD init: %u", static_cast<unsigned>(init_res));
-		MountSd();
+		EnsureSdMounted("SD init: %u");
 	}
 	if (!sd_mounted)
 	{
@@ -4277,13 +4341,7 @@ static bool BeginTrackLoadJob(int32_t track, int32_t buffer_id, const char* name
 	MountSd();
 	if (!sd_mounted)
 	{
-		SdmmcHandler::Config sd_cfg;
-		sd_cfg.Defaults();
-		sdcard.Init(sd_cfg);
-		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		const uint8_t init_res = BSP_SD_Init();
-		LogLine("SD init: %u", static_cast<unsigned>(init_res));
-		MountSd();
+		EnsureSdMounted("SD init: %u");
 	}
 	if (!sd_mounted)
 	{
@@ -4596,13 +4654,7 @@ static bool BeginPreviewAtIndex(int32_t index)
 	MountSd();
 	if (!sd_mounted)
 	{
-		SdmmcHandler::Config sd_cfg;
-		sd_cfg.Defaults();
-		sdcard.Init(sd_cfg);
-		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		const uint8_t init_res = BSP_SD_Init();
-		LogLine("SD init: %u", static_cast<unsigned>(init_res));
-		MountSd();
+		EnsureSdMounted("SD init: %u");
 	}
 	if (!sd_mounted)
 	{
@@ -4772,13 +4824,7 @@ static bool DeleteFileAtIndex(int32_t index)
 	MountSd();
 	if (!sd_mounted)
 	{
-		SdmmcHandler::Config sd_cfg;
-		sd_cfg.Defaults();
-		sdcard.Init(sd_cfg);
-		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		const uint8_t init_res = BSP_SD_Init();
-		LogLine("SD init: %u", static_cast<unsigned>(init_res));
-		MountSd();
+		EnsureSdMounted("SD init: %u");
 	}
 	if (!sd_mounted)
 	{
@@ -5391,7 +5437,7 @@ static void DrawLoadMenu(int32_t top_index, int32_t selected)
 	{
 		const bool list_scan_active = (g_job.active && g_job.type == JobType::FileListScan);
 		const bool list_scan_pending = list_build_pending;
-		const bool jobs_blocked = !JobsAllowedNow();
+		const bool jobs_blocked = !JobsAllowedNowForSdOrHeavy();
 		const bool scan_blocked = jobs_blocked || sd_init_in_progress || save_in_progress;
 		if (!wav_list_valid && (list_scan_active || list_scan_pending))
 		{
@@ -5956,14 +6002,7 @@ static inline int ClampI(int v, int lo, int hi);
 
 static int BitResoIndexFromValue(float value)
 {
-	if (value < 0.0f)
-	{
-		value = 0.0f;
-	}
-	else if (value > 1.0f)
-	{
-		value = 1.0f;
-	}
+	value = Clamp01(value);
 	const int max_idx = kBitResoStepCount - 1;
 	const int idx = static_cast<int>(value * static_cast<float>(max_idx) + 0.5f);
 	return ClampI(idx, 0, max_idx);
@@ -6247,14 +6286,7 @@ static inline int ClampI(int v, int lo, int hi)
 
 static float AmpEnvMsFromFader(float value)
 {
-	if (value < 0.0f)
-	{
-		value = 0.0f;
-	}
-	else if (value > 1.0f)
-	{
-		value = 1.0f;
-	}
+	value = Clamp01(value);
 	int steps = static_cast<int>(value / kAmpEnvStep + 0.5f);
 	if (steps < 0)
 	{
@@ -6276,14 +6308,7 @@ static float AmpEnvMsFromFader(float value)
 
 static float FltCutoffFromFader(float value, float sample_rate)
 {
-	if (value < 0.0f)
-	{
-		value = 0.0f;
-	}
-	else if (value > 1.0f)
-	{
-		value = 1.0f;
-	}
+	value = Clamp01(value);
 	const float min_hz = 20.0f;
 	const float max_hz = 20000.0f;
 	const float shaped = sqrtf(value);
@@ -6298,14 +6323,7 @@ static float FltCutoffFromFader(float value, float sample_rate)
 
 static float FltQFromFader(float value)
 {
-	if (value < 0.0f)
-	{
-		value = 0.0f;
-	}
-	else if (value > 1.0f)
-	{
-		value = 1.0f;
-	}
+	value = Clamp01(value);
 	float q = value * 5.0f;
 	if (q < 0.001f)
 	{
@@ -6835,22 +6853,6 @@ static void DrawWaveform()
 
 	DrawBracket(start_x, true);
 	DrawBracket(end_x,   false);
-
-	if (ui_mode == UiMode::Edt && perform_preview_active && sample_length > 1)
-	{
-		const float denom = static_cast<float>(sample_length - 1);
-		float norm = playback_phase / denom;
-		if (norm < 0.0f)
-		{
-			norm = 0.0f;
-		}
-		else if (norm > 1.0f)
-		{
-			norm = 1.0f;
-		}
-		const int play_x = ClampI(static_cast<int>(norm * static_cast<float>(W - 1) + 0.5f), 0, W - 1);
-		display.DrawLine(play_x, text_h, play_x, H - 1, true);
-	}
 
 	display.SetCursor(0, 0);
 	display.WriteString(waveform_title ? waveform_title : loaded_sample_name, Font_6x8, true);
@@ -7659,15 +7661,7 @@ static void StartPlayback(uint8_t note)
 	}
 	size_t window_start = sample_play_start;
 	size_t window_end = sample_play_end;
-	if (window_end > sample_length || window_end == 0)
-	{
-		window_end = sample_length;
-	}
-	if (window_end <= window_start)
-	{
-		window_start = 0;
-		window_end = sample_length;
-	}
+	NormalizeWindow(window_start, window_end, sample_length, true);
 	if (window_end == 0)
 	{
 		if (kPlaybackVerboseLog && UiLogEnabled())
@@ -7710,15 +7704,7 @@ static void StartPlayback(uint8_t note, bool apply_pitch)
 	}
 	size_t window_start = sample_play_start;
 	size_t window_end = sample_play_end;
-	if (window_end > sample_length || window_end == 0)
-	{
-		window_end = sample_length;
-	}
-	if (window_end <= window_start)
-	{
-		window_start = 0;
-		window_end = sample_length;
-	}
+	NormalizeWindow(window_start, window_end, sample_length, true);
 	if (window_end == 0)
 	{
 		if (kPlaybackVerboseLog && UiLogEnabled())
@@ -7782,15 +7768,7 @@ static void StartChannelSlot(int32_t note)
 	}
 	window_start = sample_play_start;
 	window_end = sample_play_end;
-	if (window_end > sample_length || window_end == 0)
-	{
-		window_end = sample_length;
-	}
-	if (window_end <= window_start)
-	{
-		window_start = 0;
-		window_end = sample_length;
-	}
+	NormalizeWindow(window_start, window_end, sample_length, true);
 	if (window_end <= window_start)
 	{
 		return;
@@ -7869,14 +7847,7 @@ static void StopChannelSlot(int32_t note)
 				voice.releasing = true;
 				voice.release_pos = 0.0f;
 				voice.release_start = voice.env;
-				if (voice.release_start < 0.0f)
-				{
-					voice.release_start = 0.0f;
-				}
-				else if (voice.release_start > 1.0f)
-				{
-					voice.release_start = 1.0f;
-				}
+				Clamp01InPlace(voice.release_start);
 			}
 		}
 	}
@@ -8118,15 +8089,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 	{
 		if (encoder_l_inc != 0)
 		{
-			int32_t next = shift_menu_index + encoder_l_inc;
-			while (next < 0)
-			{
-				next += kShiftMenuCount;
-			}
-			while (next >= kShiftMenuCount)
-			{
-				next -= kShiftMenuCount;
-			}
+			int32_t next = WrapIndex(shift_menu_index + encoder_l_inc, kShiftMenuCount);
 			shift_menu_index = next;
 			request_shift_redraw = true;
 		}
@@ -8245,15 +8208,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			{
 				const int32_t count = wav_file_count;
 				const int32_t visible_lines = LoadVisibleLines();
-				int32_t next = load_selected + encoder_l_inc;
-				while (next < 0)
-				{
-					next += count;
-				}
-				while (next >= count)
-				{
-					next -= count;
-				}
+				int32_t next = WrapIndex(load_selected + encoder_l_inc, count);
 				load_selected = next;
 				int32_t max_top = count - visible_lines;
 				if (max_top < 0)
@@ -8324,15 +8279,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 	{
 		if (encoder_l_inc != 0)
 		{
-			int32_t next = load_mode_index + encoder_l_inc;
-			while (next < 0)
-			{
-				next += 2;
-			}
-			while (next >= 2)
-			{
-				next -= 2;
-			}
+			int32_t next = WrapIndex(load_mode_index + encoder_l_inc, 2);
 			load_mode_index = next;
 		}
 		if (encoder_r_pressed)
@@ -8364,15 +8311,8 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 	{
 		if (encoder_l_inc != 0)
 		{
-			int32_t next = LoadTargetDisplayIndex(load_target_selected) + encoder_l_inc;
-			while (next < 0)
-			{
-				next += kLoadTargetCount;
-			}
-			while (next >= kLoadTargetCount)
-			{
-				next -= kLoadTargetCount;
-			}
+			int32_t next = WrapIndex(LoadTargetDisplayIndex(load_target_selected) + encoder_l_inc,
+									 kLoadTargetCount);
 			load_target_selected = LoadTargetFromDisplayIndex(next);
 		}
 		if (encoder_r_pressed && load_target_index >= 0 && load_target_index < wav_file_count)
@@ -8392,15 +8332,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 		{
 			if (encoder_l_inc != 0)
 			{
-				int32_t next = record_source_index + encoder_l_inc;
-				while (next < 0)
-				{
-					next += 2;
-				}
-				while (next >= 2)
-				{
-					next -= 2;
-				}
+				int32_t next = WrapIndex(record_source_index + encoder_l_inc, 2);
 				record_source_index = next;
 			}
 			if (encoder_r_pressed)
@@ -8420,15 +8352,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 		{
 			if (encoder_l_inc != 0)
 			{
-				int32_t next = record_target_index + encoder_l_inc;
-				while (next < 0)
-				{
-					next += kRecordTargetCount;
-				}
-				while (next >= kRecordTargetCount)
-				{
-					next -= kRecordTargetCount;
-				}
+				int32_t next = WrapIndex(record_target_index + encoder_l_inc, kRecordTargetCount);
 				record_target_index = next;
 			}
 		}
@@ -8599,15 +8523,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 		{
 			if (fx_select_active)
 			{
-				int32_t next = fx_fader_index_ref + encoder_l_inc;
-				while (next < 0)
-				{
-					next += kEditorFaderCount;
-				}
-				while (next >= kEditorFaderCount)
-				{
-					next -= kEditorFaderCount;
-				}
+				int32_t next = WrapIndex(fx_fader_index_ref + encoder_l_inc, kEditorFaderCount);
 				if (next != fx_fader_index_ref)
 				{
 					fx_fader_index_ref = next;
@@ -8616,15 +8532,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			}
 			else if (amp_select_active)
 			{
-				int32_t next = amp_fader_index_ref + encoder_l_inc;
-				while (next < 0)
-				{
-					next += kEditorFaderCount;
-				}
-				while (next >= kEditorFaderCount)
-				{
-					next -= kEditorFaderCount;
-				}
+				int32_t next = WrapIndex(amp_fader_index_ref + encoder_l_inc, kEditorFaderCount);
 				if (next != amp_fader_index_ref)
 				{
 					amp_fader_index_ref = next;
@@ -8633,15 +8541,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			}
 			else if (flt_select_active)
 			{
-				int32_t next = flt_fader_index_ref + encoder_l_inc;
-				while (next < 0)
-				{
-					next += kEditorFltFaderCount;
-				}
-				while (next >= kEditorFltFaderCount)
-				{
-					next -= kEditorFltFaderCount;
-				}
+				int32_t next = WrapIndex(flt_fader_index_ref + encoder_l_inc, kEditorFltFaderCount);
 				if (next != flt_fader_index_ref)
 				{
 					flt_fader_index_ref = next;
@@ -8650,16 +8550,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			}
 			else
 			{
-				int32_t next = editor_index_ref + encoder_l_inc;
-				while (next < 0)
-				{
-					next += kEditorBoxCount;
-				}
-				while (next >= kEditorBoxCount)
-				{
-					next -= kEditorBoxCount;
-				}
-				editor_index_ref = next;
+				editor_index_ref = WrapIndex(editor_index_ref + encoder_l_inc, kEditorBoxCount);
 			}
 		}
 		if (encoder_r_pressed)
@@ -8845,14 +8736,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			volatile float* target = FxWetTargetForState(fx_id, edit_state);
 			const float current = *target;
 			float next = current + (static_cast<float>(encoder_r_inc) * step);
-			if (next < 0.0f)
-			{
-				next = 0.0f;
-			}
-			if (next > 1.0f)
-			{
-				next = 1.0f;
-			}
+			Clamp01InPlace(next);
 			if (next != current)
 			{
 				*target = next;
@@ -8869,14 +8753,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			volatile float* target = targets[idx];
 			const float current = *target;
 			float next = current + (static_cast<float>(encoder_r_inc) * step);
-			if (next < 0.0f)
-			{
-				next = 0.0f;
-			}
-			if (next > 1.0f)
-			{
-				next = 1.0f;
-			}
+			Clamp01InPlace(next);
 			if (next != current)
 			{
 				*target = next;
@@ -8891,14 +8768,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			volatile float* target = targets[idx];
 			const float current = *target;
 			float next = current + (static_cast<float>(encoder_r_inc) * step);
-			if (next < 0.0f)
-			{
-				next = 0.0f;
-			}
-			if (next > 1.0f)
-			{
-				next = 1.0f;
-			}
+			Clamp01InPlace(next);
 			if (next != current)
 			{
 				*target = next;
@@ -9015,15 +8885,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			if (encoder_l_inc != 0)
 			{
 				const int32_t param_count = 4;
-				int32_t next = fx_detail_param_index_ref + encoder_l_inc;
-				while (next < 0)
-				{
-					next += param_count;
-				}
-				while (next >= param_count)
-				{
-					next -= param_count;
-				}
+				int32_t next = WrapIndex(fx_detail_param_index_ref + encoder_l_inc, param_count);
 				if (next != fx_detail_param_index_ref)
 				{
 					fx_detail_param_index_ref = next;
@@ -9059,14 +8921,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					{
 						const float step = steps[idx];
 						next = current + (static_cast<float>(encoder_r_inc) * step);
-						if (next < 0.0f)
-						{
-							next = 0.0f;
-						}
-						if (next > 1.0f)
-						{
-							next = 1.0f;
-						}
+						Clamp01InPlace(next);
 					}
 					if (next != current)
 					{
@@ -9088,15 +8943,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			if (encoder_l_inc != 0)
 			{
 				const int32_t param_count = 4;
-				int32_t next = fx_detail_param_index_ref + encoder_l_inc;
-				while (next < 0)
-				{
-					next += param_count;
-				}
-				while (next >= param_count)
-				{
-					next -= param_count;
-				}
+				int32_t next = WrapIndex(fx_detail_param_index_ref + encoder_l_inc, param_count);
 				if (next != fx_detail_param_index_ref)
 				{
 					fx_detail_param_index_ref = next;
@@ -9107,15 +8954,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			{
 				if (fx_detail_param_index_ref == 3)
 				{
-					int32_t next = chorus_mode_ref + encoder_r_inc;
-					while (next < 0)
-					{
-						next += 2;
-					}
-					while (next >= 2)
-					{
-						next -= 2;
-					}
+					int32_t next = WrapIndex(chorus_mode_ref + encoder_r_inc, 2);
 					if (next != chorus_mode_ref)
 					{
 						chorus_mode_ref = next;
@@ -9138,14 +8977,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 						volatile float* target = targets[idx];
 						const float current = *target;
 						float next = current + (static_cast<float>(encoder_r_inc) * step);
-						if (next < 0.0f)
-						{
-							next = 0.0f;
-						}
-						if (next > 1.0f)
-						{
-							next = 1.0f;
-						}
+						Clamp01InPlace(next);
 						if (next != current)
 						{
 							*target = next;
@@ -9161,15 +8993,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			if (encoder_l_inc != 0)
 			{
 				const int32_t param_count = kDelayFaderCount;
-				int32_t next = fx_detail_param_index_ref + encoder_l_inc;
-				while (next < 0)
-				{
-					next += param_count;
-				}
-				while (next >= param_count)
-				{
-					next -= param_count;
-				}
+				int32_t next = WrapIndex(fx_detail_param_index_ref + encoder_l_inc, param_count);
 				if (next != fx_detail_param_index_ref)
 				{
 					fx_detail_param_index_ref = next;
@@ -9202,14 +9026,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					{
 						const float step = steps[idx];
 						next = current + (static_cast<float>(encoder_r_inc) * step);
-						if (next < 0.0f)
-						{
-							next = 0.0f;
-						}
-						if (next > 1.0f)
-						{
-							next = 1.0f;
-						}
+						Clamp01InPlace(next);
 					}
 					if (next != current)
 					{
@@ -9225,15 +9042,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			if (encoder_l_inc != 0)
 			{
 				const int32_t param_count = kReverbFaderCount;
-				int32_t next = fx_detail_param_index_ref + encoder_l_inc;
-				while (next < 0)
-				{
-					next += param_count;
-				}
-				while (next >= param_count)
-				{
-					next -= param_count;
-				}
+				int32_t next = WrapIndex(fx_detail_param_index_ref + encoder_l_inc, param_count);
 				if (next != fx_detail_param_index_ref)
 				{
 					fx_detail_param_index_ref = next;
@@ -9258,14 +9067,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					volatile float* target = targets[idx];
 					const float current = *target;
 					float next = current + (static_cast<float>(encoder_r_inc) * step);
-					if (next < 0.0f)
-					{
-						next = 0.0f;
-					}
-					if (next > 1.0f)
-					{
-						next = 1.0f;
-					}
+					Clamp01InPlace(next);
 					if (next != current)
 					{
 						*target = next;
@@ -9561,15 +9363,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	const float out_sr = hw.AudioSampleRate();
 	size_t window_start = sample_play_start;
 	size_t window_end = sample_play_end;
-	if (window_end > sample_length || window_end == 0)
-	{
-		window_end = sample_length;
-	}
-	if (window_end <= window_start)
-	{
-		window_start = 0;
-		window_end = sample_length;
-	}
+	NormalizeWindow(window_start, window_end, sample_length, true);
 	const bool window_valid = (window_end > 0 && window_end > window_start);
 	if (perform_preview_active && !window_valid)
 	{
@@ -9668,46 +9462,26 @@ static float last_chorus_wow = -1.0f;
 		cached_reverb_decay = params.reverb_decay;
 		cached_reverb_shimmer = params.reverb_shimmer;
 
-		if (cached_sat_drive < 0.0f) cached_sat_drive = 0.0f;
-		if (cached_sat_drive > 1.0f) cached_sat_drive = 1.0f;
-		if (cached_sat_mix < 0.0f) cached_sat_mix = 0.0f;
-		if (cached_sat_mix > 1.0f) cached_sat_mix = 1.0f;
-		if (cached_sat_bump < 0.0f) cached_sat_bump = 0.0f;
-		if (cached_sat_bump > 1.0f) cached_sat_bump = 1.0f;
-		if (cached_sat_smpl < 0.0f) cached_sat_smpl = 0.0f;
-		if (cached_sat_smpl > 1.0f) cached_sat_smpl = 1.0f;
-		if (cached_sat_reso < 0.0f) cached_sat_reso = 0.0f;
-		if (cached_sat_reso > 1.0f) cached_sat_reso = 1.0f;
-		if (cached_chorus_depth < 0.0f) cached_chorus_depth = 0.0f;
-		if (cached_chorus_depth > 1.0f) cached_chorus_depth = 1.0f;
-		if (cached_chorus_mix < 0.0f) cached_chorus_mix = 0.0f;
-		if (cached_chorus_mix > 1.0f) cached_chorus_mix = 1.0f;
-		if (cached_chorus_rate < 0.0f) cached_chorus_rate = 0.0f;
-		if (cached_chorus_rate > 1.0f) cached_chorus_rate = 1.0f;
-		if (cached_chorus_wow < 0.0f) cached_chorus_wow = 0.0f;
-		if (cached_chorus_wow > 1.0f) cached_chorus_wow = 1.0f;
-		if (cached_tape_rate < 0.0f) cached_tape_rate = 0.0f;
-		if (cached_tape_rate > 1.0f) cached_tape_rate = 1.0f;
-		if (cached_delay_wet < 0.0f) cached_delay_wet = 0.0f;
-		if (cached_delay_wet > 1.0f) cached_delay_wet = 1.0f;
-		if (cached_delay_time < 0.0f) cached_delay_time = 0.0f;
-		if (cached_delay_time > 1.0f) cached_delay_time = 1.0f;
-		if (cached_delay_feedback < 0.0f) cached_delay_feedback = 0.0f;
-		if (cached_delay_feedback > 1.0f) cached_delay_feedback = 1.0f;
-		if (cached_delay_spread < 0.0f) cached_delay_spread = 0.0f;
-		if (cached_delay_spread > 1.0f) cached_delay_spread = 1.0f;
-		if (cached_delay_freeze < 0.0f) cached_delay_freeze = 0.0f;
-		if (cached_delay_freeze > 1.0f) cached_delay_freeze = 1.0f;
-		if (cached_reverb_wet < 0.0f) cached_reverb_wet = 0.0f;
-		if (cached_reverb_wet > 1.0f) cached_reverb_wet = 1.0f;
-		if (cached_reverb_pre < 0.0f) cached_reverb_pre = 0.0f;
-		if (cached_reverb_pre > 1.0f) cached_reverb_pre = 1.0f;
-		if (cached_reverb_damp < 0.0f) cached_reverb_damp = 0.0f;
-		if (cached_reverb_damp > 1.0f) cached_reverb_damp = 1.0f;
-		if (cached_reverb_decay < 0.0f) cached_reverb_decay = 0.0f;
-		if (cached_reverb_decay > 1.0f) cached_reverb_decay = 1.0f;
-		if (cached_reverb_shimmer < 0.0f) cached_reverb_shimmer = 0.0f;
-		if (cached_reverb_shimmer > 1.0f) cached_reverb_shimmer = 1.0f;
+		Clamp01InPlace(cached_sat_drive);
+		Clamp01InPlace(cached_sat_mix);
+		Clamp01InPlace(cached_sat_bump);
+		Clamp01InPlace(cached_sat_smpl);
+		Clamp01InPlace(cached_sat_reso);
+		Clamp01InPlace(cached_chorus_depth);
+		Clamp01InPlace(cached_chorus_mix);
+		Clamp01InPlace(cached_chorus_rate);
+		Clamp01InPlace(cached_chorus_wow);
+		Clamp01InPlace(cached_tape_rate);
+		Clamp01InPlace(cached_delay_wet);
+		Clamp01InPlace(cached_delay_time);
+		Clamp01InPlace(cached_delay_feedback);
+		Clamp01InPlace(cached_delay_spread);
+		Clamp01InPlace(cached_delay_freeze);
+		Clamp01InPlace(cached_reverb_wet);
+		Clamp01InPlace(cached_reverb_pre);
+		Clamp01InPlace(cached_reverb_damp);
+		Clamp01InPlace(cached_reverb_decay);
+		Clamp01InPlace(cached_reverb_shimmer);
 
 		cached_reverb_gain = 1.0f;
 		const float decay_ms = kReverbDecayMinMs
@@ -9945,12 +9719,9 @@ static float last_chorus_wow = -1.0f;
 			float mod_send = ps.fx_c_wet;
 			float delay_send = ps.delay_wet;
 			float reverb_send = ps.reverb_wet;
-			if (mod_send < 0.0f) mod_send = 0.0f;
-			if (mod_send > 1.0f) mod_send = 1.0f;
-			if (delay_send < 0.0f) delay_send = 0.0f;
-			if (delay_send > 1.0f) delay_send = 1.0f;
-			if (reverb_send < 0.0f) reverb_send = 0.0f;
-			if (reverb_send > 1.0f) reverb_send = 1.0f;
+			Clamp01InPlace(mod_send);
+			Clamp01InPlace(delay_send);
+			Clamp01InPlace(reverb_send);
 			track_mod_send[t] = mod_send;
 			track_delay_send[t] = delay_send;
 			track_reverb_send[t] = reverb_send;
@@ -11136,8 +10907,7 @@ int main(void)
 	{
 		// Service pending waveform computation (from audio callback)
 		if (waveform_compute_pending
-			&& !play_transport_running
-			&& record_state != RecordState::Recording)
+			&& WaveformAllowedNow())
 		{
 			waveform_compute_pending = false;
 			if (sample_loaded && !waveform_ready)
@@ -11285,6 +11055,34 @@ int main(void)
 				g_play_step_dirty_for_ui = false;
 			}
 		}
+		const bool ui_blocked = (sd_init_in_progress || save_in_progress);
+		if (!ui_blocked
+			&& ui_mode == UiMode::Edt
+			&& load_destination == LoadDestination::Play)
+		{
+			uint8_t trig_track = 0;
+			bool trig_event = false;
+			{
+				daisy::ScopedIrqBlocker irq;
+				if (g_trig_event)
+				{
+					trig_event = true;
+					trig_track = g_last_trig_track;
+					g_trig_event = false;
+				}
+			}
+			if (trig_event && trig_track == static_cast<uint8_t>(play_edit_track))
+			{
+				if (play_edit_track >= 0 && play_edit_track < kPlayTrackCount)
+				{
+					trim_start = track_samples[play_edit_track].trim_start;
+					trim_end = track_samples[play_edit_track].trim_end;
+					UpdateTrimFrames();
+					waveform_dirty = true;
+					request_length_redraw = true;
+				}
+			}
+		}
 		const uint8_t cpu_pct_ui = static_cast<uint8_t>(cpu_load_pct + 0.5f);
 		if (play_ui)
 		{
@@ -11312,7 +11110,6 @@ int main(void)
 				LogLine("Encoder R button pressed");
 			}
 		}
-		const bool ui_blocked = (sd_init_in_progress || save_in_progress);
 		if (button2_press)
 		{
 			button2_press = false;
@@ -11376,7 +11173,7 @@ int main(void)
 		}
 		if (list_build_pending)
 		{
-			if (!ui_blocked && JobsAllowedNow())
+			if (!ui_blocked && JobsAllowedNowForSdOrHeavy())
 			{
 				if (kLoadPresetsPlaceholder && load_context == LoadContext::Main && !delete_mode)
 				{
@@ -11391,7 +11188,7 @@ int main(void)
 		}
 		if (request_delete_scan)
 		{
-			if (!ui_blocked && JobsAllowedNow())
+			if (!ui_blocked && JobsAllowedNowForSdOrHeavy())
 			{
 				request_delete_scan = false;
 				JobStartFileList(fsi.GetSDPath(), false, true);
@@ -11789,7 +11586,19 @@ int main(void)
 			}
 			else if (mode == UiMode::Edt)
 			{
-				SetSampleContext(edt_sample_context);
+				if (edt_prev_mode == UiMode::PlayTrack)
+				{
+					SetSampleContext(SampleContext::Play);
+					ApplyTrackSampleState(play_edit_track);
+					waveform_ready = false;
+					waveform_dirty = true;
+					request_length_redraw = true;
+					JobStartWaveform(SampleContext::Play, true);
+				}
+				else
+				{
+					SetSampleContext(edt_sample_context);
+				}
 				SetFxContext((edt_sample_context == SampleContext::Play)
 					? FxContext::Play
 					: FxContext::Perform);
