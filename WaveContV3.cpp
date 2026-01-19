@@ -72,41 +72,6 @@ constexpr uint32_t kPreviewReadBudgetMs = 2;
 constexpr size_t kPreviewBufferFrames = 4096;
 constexpr size_t kPreviewReadFrames = 256;
 
-static const char* kSaveColors[] =
-{
-	"Red",
-	"White",
-	"Orange",
-	"Amber",
-	"Gold",
-	"Yellow",
-	"Lime",
-	"Green",
-	"Emerald",
-	"Teal",
-	"Cyan",
-	"Azure",
-	"Blue",
-	"Indigo",
-	"Violet",
-	"Magenta",
-	"Pink",
-	"Rose",
-	"Crimson",
-	"Scarlet",
-	"Maroon",
-	"Purple",
-	"Plum",
-	"Lavender",
-	"Lemon",
-	"Sage",
-	"Olive",
-	"Brown",
-	"Umber",
-	"Slate",
-	"Black",
-};
-
 static const char* kSaveAdjectives[] =
 {
 	"Calm",
@@ -147,7 +112,7 @@ static const char* kSaveAdjectives[] =
 	"Snow",
 	"Ice",
 	"Orbit",
-	"Nova",
+	"Terrain",
 	"Comet",
 	"Star",
 	"Sky",
@@ -165,7 +130,7 @@ static const char* kSaveAdjectives[] =
 	"Omni",
 	"Sad",
 	"Harp",
-	"Viola",
+	"Vast",
 	"Bass",
 	"Organ",
 	"Flute",
@@ -173,12 +138,12 @@ static const char* kSaveAdjectives[] =
 	"Scale",
 	"Note",
 	"Desert",
-	"Heath",
+	"Hearth",
 	"Cove",
 	"Delta",
 	"Bland",
 	"Reef",
-	"Loam",
+	"Erase",
 	"Glint",
 	"Fable",
 	"Verse",
@@ -206,7 +171,7 @@ static const char* kSaveNouns[] =
 	"Mound",
 	"Stillness",
 	"Moonlight",
-	"Ash",
+	"Volcano",
 	"Breeze",
 	"Meadow",
 	"Shadow",
@@ -237,7 +202,7 @@ static const char* kSaveNouns[] =
 	"Canter",
 	"Fogbank",
 	"Reflection",
-	"Raindrop",
+	"Rain",
 	"Skyward",
 	"Tempest",
 	"Arrow",
@@ -245,18 +210,18 @@ static const char* kSaveNouns[] =
 	"Glow",
 	"Thunderhead",
 	"Pathway",
-	"Snowdrift",
+	"Snowflake",
 	"Again",
 	"Breath",
 	"Overcast",
 	"Pool",
 	"Petal",
-	"Lilt",
+	"Light",
 	"Club",
 	"Cradle",
-	"Moonrise",
+	"Death",
 	"Erosion",
-	"Sunshower",
+	"Flag",
 	"Branch",
 	"Gales",
 	"Pool",
@@ -267,20 +232,20 @@ static const char* kSaveNouns[] =
 	"Solstice",
 	"Driftwood",
 	"Clearing",
-	"Glowfly",
+	"Poison",
 	"Buffalo",
 	"Carnage",
 	"Basin",
-	"Frostline",
-	"Skyscape",
+	"Frost",
+	"Skyscraper",
 	"Undertone",
 	"Wreckage",
 	"Lichen",
 	"Daybreak",
 	"Haze",
-	"Bramble",
-	"Rainlight",
-	"Snowmelt",
+	"Rambler",
+	"Shelf",
+	"Passenger",
 	"Stones",
 	"Backwind",
 	"Twilight",
@@ -289,14 +254,14 @@ static const char* kSaveNouns[] =
 	"Quiver",
 	"Shadowland",
 	"Fieldnote",
-	"Softrain",
+	"Viper",
 	"String",
 	"Sundown",
 	"Nightmoves",
 	"Tiger",
 	"Mother",
 	"Lowtide",
-	"Earthsong",
+	"Fang",
 };
 constexpr int kPerformVoiceCount = 5;
 constexpr float kReverbFeedback = 0.85f;
@@ -2070,18 +2035,16 @@ static bool BuildNextSaveName(char* out_name, size_t out_len)
 		return save_name_seed;
 	};
 
-	const size_t color_count = ArraySize(kSaveColors);
 	const size_t adj_count = ArraySize(kSaveAdjectives);
 	const size_t noun_count = ArraySize(kSaveNouns);
 
 	for (int attempt = 0; attempt < 5000; ++attempt)
 	{
 		const char* adj = kSaveAdjectives[next_rand() % adj_count];
-		const char* color = kSaveColors[next_rand() % color_count];
 		const char* noun = kSaveNouns[next_rand() % noun_count];
 
 		char base[64];
-		const int base_len = snprintf(base, sizeof(base), "%s%s%s", adj, color, noun);
+		const int base_len = snprintf(base, sizeof(base), "%s%s", adj, noun);
 		if (base_len <= 0)
 		{
 			continue;
@@ -8882,11 +8845,6 @@ static float cached_sat_bump = 0.0f;
 static float cached_sat_smpl = 0.0f;
 static float cached_sat_reso = 0.0f;
 static int32_t cached_sat_mode = 0;
-static float cached_bit_step = 1.0f;
-static float cached_bit_inv_step = 1.0f;
-static float cached_bit_reso = -1.0f;
-static float cached_bit_smpl = -1.0f;
-static int cached_bit_hold_samples = 1;
 static float cached_chorus_depth = 0.0f;
 static float cached_chorus_mix = 0.0f;
 static float cached_chorus_rate = 0.0f;
@@ -8928,28 +8886,28 @@ static float last_chorus_wow = -1.0f;
 	{
 		fx_params_dirty = false;
 
-		cached_sat_drive = params.sat_drive;
-		cached_sat_mix = params.fx_s_wet;
-		cached_sat_bump = params.sat_tape_bump;
-		cached_sat_smpl = params.sat_bit_smpl;
-		cached_sat_reso = params.sat_bit_reso;
+		cached_sat_drive = sat_drive;
+		cached_sat_mix = fx_s_wet;
+		cached_sat_bump = sat_tape_bump;
+		cached_sat_smpl = sat_bit_smpl;
+		cached_sat_reso = sat_bit_reso;
 		cached_sat_mode = sat_mode;
-		cached_chorus_depth = params.mod_depth;
-		cached_chorus_mix = params.fx_c_wet;
-		cached_chorus_rate = params.chorus_rate;
+		cached_chorus_depth = mod_depth;
+		cached_chorus_mix = fx_c_wet;
+		cached_chorus_rate = chorus_rate;
 		cached_chorus_mode = chorus_mode;
-		cached_chorus_wow = params.chorus_wow;
-		cached_tape_rate = params.tape_rate;
-		cached_delay_wet = params.delay_wet;
-		cached_delay_time = params.delay_time;
-		cached_delay_feedback = params.delay_feedback;
-		cached_delay_spread = params.delay_spread;
-		cached_delay_freeze = params.delay_freeze;
-		cached_reverb_wet = params.reverb_wet;
-		cached_reverb_pre = params.reverb_pre;
-		cached_reverb_damp = params.reverb_damp;
-		cached_reverb_decay = params.reverb_decay;
-		cached_reverb_shimmer = params.reverb_shimmer;
+		cached_chorus_wow = chorus_wow;
+		cached_tape_rate = tape_rate;
+		cached_delay_wet = delay_wet;
+		cached_delay_time = delay_time;
+		cached_delay_feedback = delay_feedback;
+		cached_delay_spread = delay_spread;
+		cached_delay_freeze = delay_freeze;
+		cached_reverb_wet = reverb_wet;
+		cached_reverb_pre = reverb_pre;
+		cached_reverb_damp = reverb_damp;
+		cached_reverb_decay = reverb_decay;
+		cached_reverb_shimmer = reverb_shimmer;
 
 		if (cached_sat_drive < 0.0f) cached_sat_drive = 0.0f;
 		if (cached_sat_drive > 1.0f) cached_sat_drive = 1.0f;
@@ -9012,34 +8970,6 @@ static float last_chorus_wow = -1.0f;
 		if (cached_sat_mode != last_sat_mode)
 		{
 			last_sat_mode = cached_sat_mode;
-			cached_bit_reso = -1.0f;
-			cached_bit_smpl = -1.0f;
-		}
-		if (cached_sat_mode == 1)
-		{
-			const float reso = cached_sat_reso;
-			const float smpl = cached_sat_smpl;
-			if (fabsf(reso - cached_bit_reso) > 1e-6f
-				|| fabsf(smpl - cached_bit_smpl) > 1e-6f)
-			{
-				const int bits_idx = BitResoIndexFromValue(reso);
-				int bits = kBitResoSteps[bits_idx];
-				if (bits < 2) bits = 2;
-				if (bits > 16) bits = 16;
-				cached_bit_step = ldexpf(1.0f, -(bits - 1));
-				cached_bit_inv_step = (cached_bit_step > 0.0f)
-					? (1.0f / cached_bit_step)
-					: 1.0f;
-				int hold_samples = 1
-					+ static_cast<int>(smpl * static_cast<float>(kBitcrushMaxHold - 1));
-				if (hold_samples < 1)
-				{
-					hold_samples = 1;
-				}
-				cached_bit_hold_samples = hold_samples;
-				cached_bit_reso = reso;
-				cached_bit_smpl = smpl;
-			}
 		}
 		if (cached_sat_mode == 0)
 		{
@@ -9149,11 +9079,16 @@ static float last_chorus_wow = -1.0f;
 	static float drop_target = 1.0f;
 	static int drop_hold = 0;
 	static uint32_t drop_rng = 0x12345678;
+	static int bit_hold = 0;
+	static float bit_hold_l = 0.0f;
+	static float bit_hold_r = 0.0f;
 	static float reverb_tail_gain = 0.0f;
 
 	const int32_t sat_mode_local = cached_sat_mode;
 	const float sat_mix = cached_sat_mix;
 	const bool sat_active = (sat_mix > kFxParamEpsilon);
+	const float bit_reso = cached_sat_reso;
+	const float bit_smpl = cached_sat_smpl;
 	const int32_t chorus_mode_local = cached_chorus_mode;
 	const float chorus_mix = cached_chorus_mix;
 	const float delay_mix = cached_delay_wet;
@@ -9198,16 +9133,16 @@ static float last_chorus_wow = -1.0f;
 		delay_line_r.SetDelay(delay_time_smoothed);
 		last_delay_time = delay_time_smoothed;
 	}
-	const bool perform_mode = (flags_bits & kFlagInPerformMode) != 0;
-	const bool main_mode = (flags_bits & kFlagInMainMode) != 0;
-	const bool fx_allowed = (flags_bits & kFlagFxAllowed) != 0;
+	const bool perform_mode = IsPerformUiMode(ui_mode);
+	const bool main_mode = (ui_mode == UiMode::Main);
+	const bool fx_allowed = perform_mode || IsPlayUiMode(ui_mode) || ui_mode == UiMode::FxDetail;
 	const bool amp_env_active = perform_mode;
-	const float amp_attack_ms = AmpEnvMsFromFader(params.amp_attack);
-	const float amp_release_ms = AmpEnvMsFromFader(params.amp_release);
+	const float amp_attack_ms = AmpEnvMsFromFader(amp_attack);
+	const float amp_release_ms = AmpEnvMsFromFader(amp_release);
 	const float amp_attack_samples = amp_attack_ms * 0.001f * out_sr;
 	const float amp_release_samples = amp_release_ms * 0.001f * out_sr;
-	const bool play_seq_mode = (flags_bits & kFlagPlaySeqMode) != 0;
-	const bool play_master_fx = (flags_bits & kFlagPlayMasterFx) != 0;
+	const bool play_seq_mode = IsPlayUiMode(ui_mode) && sample_loaded;
+	const bool play_master_fx = IsPlayUiMode(ui_mode);
 	const int32_t live_track = (perform_context == PerformContext::Track
 		&& perform_context_track >= 0
 		&& perform_context_track < kPlayTrackCount)
@@ -9221,9 +9156,9 @@ static float last_chorus_wow = -1.0f;
 		for (int t = 0; t < kPlayTrackCount; ++t)
 		{
 			const bool use_live = (t == live_track);
-			float mod_send = use_live ? params.fx_c_wet : track_perform_state[t].fx_c_wet;
-			float delay_send = use_live ? params.delay_wet : track_perform_state[t].delay_wet;
-			float reverb_send = use_live ? params.reverb_wet : track_perform_state[t].reverb_wet;
+			float mod_send = use_live ? fx_c_wet : track_perform_state[t].fx_c_wet;
+			float delay_send = use_live ? delay_wet : track_perform_state[t].delay_wet;
+			float reverb_send = use_live ? reverb_wet : track_perform_state[t].reverb_wet;
 			if (mod_send < 0.0f) mod_send = 0.0f;
 			if (mod_send > 1.0f) mod_send = 1.0f;
 			if (delay_send < 0.0f) delay_send = 0.0f;
@@ -9238,8 +9173,8 @@ static float last_chorus_wow = -1.0f;
 	const bool use_poly = (record_state != RecordState::Recording)
 		&& ((perform_mode && sample_loaded) || play_seq_mode);
 	const bool sample_stereo = (sample_channels == 2);
-	const float flt_cutoff_hz = FltCutoffFromFader(params.flt_cutoff, out_sr);
-	const float flt_q = FltQFromFader(params.flt_res);
+	const float flt_cutoff_hz = FltCutoffFromFader(flt_cutoff, out_sr);
+	const float flt_q = FltQFromFader(flt_res);
 	static float last_flt_cutoff = -1.0f;
 	static float last_flt_q = -1.0f;
 	if (flt_cutoff_hz != last_flt_cutoff || flt_q != last_flt_q)
@@ -9260,7 +9195,7 @@ static float last_chorus_wow = -1.0f;
 		fx_order[i] = fx_chain_order[i];
 	}
 
-	auto apply_saturation = [&](float &l, float &r, int32_t track)
+	auto apply_saturation = [&](float &l, float &r)
 	{
 		if (sat_mix <= kFxParamEpsilon)
 		{
@@ -9277,24 +9212,26 @@ static float last_chorus_wow = -1.0f;
 		}
 		else
 		{
-			BitCrushState* state = &g_sat_bit_state;
-			if (track >= 0 && track < kPlayTrackCount)
+			int hold_samples = 1 + static_cast<int>(bit_smpl * static_cast<float>(kBitcrushMaxHold - 1));
+			if (hold_samples < 1)
 			{
-				state = &g_sat_bit_state_tracks[track];
+				hold_samples = 1;
 			}
-			if (state->hold <= 0)
+			if (bit_hold <= 0)
 			{
-				state->hold = cached_bit_hold_samples;
-				state->hold_l = l;
-				state->hold_r = r;
+				bit_hold = hold_samples;
+				bit_hold_l = l;
+				bit_hold_r = r;
 			}
 			else
 			{
-				--state->hold;
+				--bit_hold;
 			}
-			// Do not call powf in sample loop; cached params only.
-			wet_l = roundf(state->hold_l * cached_bit_inv_step) * cached_bit_step;
-			wet_r = roundf(state->hold_r * cached_bit_inv_step) * cached_bit_step;
+			const int bits_idx = BitResoIndexFromValue(bit_reso);
+			const int bits = kBitResoSteps[bits_idx];
+			const float step = 1.0f / powf(2.0f, static_cast<float>(bits - 1));
+			wet_l = roundf(bit_hold_l / step) * step;
+			wet_r = roundf(bit_hold_r / step) * step;
 			if (wet_l > 1.0f) wet_l = 1.0f;
 			if (wet_l < -1.0f) wet_l = -1.0f;
 			if (wet_r > 1.0f) wet_r = 1.0f;
@@ -9302,10 +9239,6 @@ static float last_chorus_wow = -1.0f;
 		}
 		l = (dry_l * (1.0f - sat_mix)) + (wet_l * sat_mix);
 		r = (dry_r * (1.0f - sat_mix)) + (wet_r * sat_mix);
-	};
-	auto apply_saturation_master = [&](float &l, float &r)
-	{
-		apply_saturation(l, r, -1);
 	};
 
 	auto apply_chorus = [&](float &l, float &r)
@@ -9602,7 +9535,12 @@ static float last_chorus_wow = -1.0f;
 				reverb_send_r += v_r * reverb_send;
 			}
 		};
-		const bool monitor_active = (flags_bits & kFlagMonitorEnabled) != 0;
+		const bool monitor_active =
+			(ui_mode == UiMode::Record
+				&& record_state != RecordState::Review
+				&& record_state != RecordState::SourceSelect
+				&& record_state != RecordState::BackConfirm
+				&& record_state != RecordState::TargetSelect);
 		float monitor_l = 0.0f;
 		float monitor_r = 0.0f;
 		if (monitor_active)
@@ -9672,14 +9610,14 @@ static float last_chorus_wow = -1.0f;
 				record_waveform_pending = true;
 				if (sample_loaded)
 				{
-					// Request waveform computation from main loop instead
-					waveform_compute_ctx = current_sample_context;
-					waveform_compute_pending = true;
+					ComputeWaveform();
+					waveform_ready = true;
+					waveform_dirty = true;
 					UpdateTrimFrames();
 					request_length_redraw = true;
 				}
-				PushLogEvent(LogEventType::RecordAutoStop,
-					static_cast<int32_t>(sample_length));
+				LogLine("Record: auto-stop at max frames=%lu",
+						static_cast<unsigned long>(sample_length));
 			}
 		}
 		if (sample_loaded && playback_active && record_state != RecordState::Recording && window_valid)
@@ -10026,7 +9964,7 @@ static float last_chorus_wow = -1.0f;
 			{
 				if (sat_active)
 				{
-					apply_saturation_master(fx_l, fx_r);
+					apply_saturation(fx_l, fx_r);
 				}
 				float mod_out_l = 0.0f;
 				float mod_out_r = 0.0f;
@@ -10062,7 +10000,7 @@ static float last_chorus_wow = -1.0f;
 			{
 				switch (fx_order[stage])
 				{
-					case kFxSatIndex: apply_saturation_master(fx_l, fx_r); break;
+					case kFxSatIndex: apply_saturation(fx_l, fx_r); break;
 					case kFxChorusIndex: apply_chorus(fx_l, fx_r); break;
 					case kFxDelayIndex: apply_delay(fx_l, fx_r); break;
 					case kFxReverbIndex: apply_reverb(fx_l, fx_r); break;
@@ -10945,14 +10883,14 @@ int main(void)
 				play_screen_dirty = true;
 				DrawPlayScreen();
 			}
-				else if (mode == UiMode::PlayTrack)
-				{
-					request_perform_redraw = true;
-				}
-				else if (mode == UiMode::Edt)
-				{
-					DrawEdtScreen();
-				}
+			else if (mode == UiMode::PlayTrack)
+			{
+				request_perform_redraw = true;
+			}
+			else if (mode == UiMode::Edt)
+			{
+				DrawEdtScreen();
+			}
 			else if (mode == UiMode::FxDetail)
 			{
 				DrawFxDetailScreen(fx_detail_index);
@@ -10975,12 +10913,12 @@ int main(void)
 								  flt_select_active,
 								  flt_fader_index);
 			}
-				else if (mode == UiMode::LoadTarget)
-				{
-					DrawLoadTargetMenu(load_target_selected);
-					LogLine("Load target: %s",
-							LoadDestinationName(load_target_selected));
-				}
+			else if (mode == UiMode::LoadTarget)
+			{
+				DrawLoadTargetMenu(load_target_selected);
+				LogLine("Load target: %s",
+						LoadDestinationName(load_target_selected));
+			}
 			else if (mode == UiMode::Shift)
 			{
 				DrawShiftMenu(shift_menu_index);
@@ -11024,66 +10962,66 @@ int main(void)
 					DrawRecordReview();
 				}
 			}
-				last_mode = mode;
-				last_menu = menu_index;
-				last_scroll = load_scroll;
-				last_selected = load_selected;
-				last_file_count = wav_file_count;
-				last_sd_mounted = sd_mounted;
-				last_record_state = record_state;
-				last_load_target = load_target_selected;
-				last_perform_index = perform_index;
-			}
-			else if (mode == UiMode::Main)
-			{
-				const int32_t current = menu_index;
+			last_mode = mode;
+			last_menu = menu_index;
+			last_scroll = load_scroll;
+			last_selected = load_selected;
+			last_file_count = wav_file_count;
+			last_sd_mounted = sd_mounted;
+			last_record_state = record_state;
+			last_load_target = load_target_selected;
+			last_perform_index = perform_index;
+		}
+		else if (mode == UiMode::Main)
+		{
+			const int32_t current = menu_index;
 			if (current != last_menu)
 			{
 				LogLine("Menu highlight: %s (%ld)",
 						MenuLabelForIndex(current),
 						static_cast<long>(current));
 				DrawMenu(current);
-					last_menu = current;
-				}
+				last_menu = current;
 			}
-			else if (mode == UiMode::Perform || mode == UiMode::PlayTrack)
+		}
+		else if (mode == UiMode::Perform || mode == UiMode::PlayTrack)
+		{
+			const int32_t current = perform_index;
+			if (request_perform_redraw || current != last_perform_index)
 			{
-				const int32_t current = perform_index;
-				if (request_perform_redraw || current != last_perform_index)
-				{
-					request_perform_redraw = false;
-					const bool fx_select_active = (current == kPerformFxIndex)
-						&& fx_window_active;
-					const bool amp_select_active = (current == kPerformAmpIndex)
-						&& amp_window_active;
-					const bool flt_select_active = (current == kPerformFltIndex)
-						&& flt_window_active;
-					DrawPerformScreen(current,
-									  fx_select_active,
-									  fx_fader_index,
-									  amp_select_active,
-									  amp_fader_index,
-									  flt_select_active,
-									  flt_fader_index);
-					last_perform_index = current;
-				}
+				request_perform_redraw = false;
+				const bool fx_select_active = (current == kPerformFxIndex)
+					&& fx_window_active;
+				const bool amp_select_active = (current == kPerformAmpIndex)
+					&& amp_window_active;
+				const bool flt_select_active = (current == kPerformFltIndex)
+					&& flt_window_active;
+				DrawPerformScreen(current,
+								  fx_select_active,
+								  fx_fader_index,
+								  amp_select_active,
+								  amp_fader_index,
+								  flt_select_active,
+								  flt_fader_index);
+				last_perform_index = current;
 			}
-			else if (mode == UiMode::FxDetail)
+		}
+		else if (mode == UiMode::FxDetail)
+		{
+			if (request_fx_detail_redraw
+				|| fx_detail_index != last_fx_detail_index
+				|| fx_detail_param_index != last_fx_detail_param_index)
 			{
-				if (request_fx_detail_redraw
-					|| fx_detail_index != last_fx_detail_index
-					|| fx_detail_param_index != last_fx_detail_param_index)
-				{
-					request_fx_detail_redraw = false;
-					DrawFxDetailScreen(fx_detail_index);
-					last_fx_detail_index = fx_detail_index;
-					last_fx_detail_param_index = fx_detail_param_index;
-				}
+				request_fx_detail_redraw = false;
+				DrawFxDetailScreen(fx_detail_index);
+				last_fx_detail_index = fx_detail_index;
+				last_fx_detail_param_index = fx_detail_param_index;
 			}
-			else if (mode == UiMode::Shift)
+		}
+		else if (mode == UiMode::Shift)
+		{
+			if (!ui_blocked)
 			{
-				if (!ui_blocked)
-				{
 				const int32_t current = shift_menu_index;
 				if (current != last_shift_menu)
 				{
