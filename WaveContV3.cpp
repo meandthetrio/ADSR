@@ -1,5 +1,7 @@
 #include "daisy_pod.h"
 #include "daisysp.h"
+#include "daisysp-lgpl.h"
+#include "stm32h7xx.h"
 #include "dev/oled_ssd130x.h"
 #include "fatfs.h"
 #include "per/tim.h"
