@@ -58,6 +58,7 @@ constexpr float kLedBlinkPeriodMs = 25.0f;
 constexpr float kLedBlinkDuty = 0.5f;
 constexpr uint32_t kPerformPlayheadIntervalMs = 33;
 constexpr uint32_t kPerformPlayheadIntervalActiveMs = 66;
+constexpr int32_t kPerformEncoderScale = 4;
 constexpr float kPi = 3.14159265f;
 constexpr float kTwoPi = 6.2831853f;
 constexpr int kDisplayW = 128;
@@ -7443,6 +7444,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 		const bool flt_select_active = (perform_index == kPerformFltIndex && flt_window_active);
 		const bool fx_reorder_active = fx_select_active && shift_pressed;
 		const bool has_sample = (sample_loaded && sample_length > 0);
+		const int32_t perf_r_inc = encoder_r_inc * kPerformEncoderScale;
 		if (encoder_l_inc != 0)
 		{
 			if (fx_select_active)
@@ -7659,13 +7661,13 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				fx_chain_pause_pending = true;
 			}
 		}
-		else if (fx_select_active && encoder_r_inc != 0)
+		else if (fx_select_active && perf_r_inc != 0)
 		{
 			const int32_t fx_id = fx_chain_order[fx_fader_index];
 			const float step = FxWetStep(fx_id);
 			volatile float* target = FxWetTarget(fx_id);
 			const float current = *target;
-			float next = current + (static_cast<float>(encoder_r_inc) * step);
+			float next = current + (static_cast<float>(perf_r_inc) * step);
 			if (next < 0.0f)
 			{
 				next = 0.0f;
@@ -7681,7 +7683,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				fx_params_dirty = true;
 			}
 		}
-		else if (amp_select_active && encoder_r_inc != 0)
+		else if (amp_select_active && perf_r_inc != 0)
 		{
 			const float step = kAmpEnvStep;
 			volatile float* targets[kPerformFaderCount]
@@ -7689,7 +7691,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			const int idx = amp_fader_index;
 			volatile float* target = targets[idx];
 			const float current = *target;
-			float next = current + (static_cast<float>(encoder_r_inc) * step);
+			float next = current + (static_cast<float>(perf_r_inc) * step);
 			if (next < 0.0f)
 			{
 				next = 0.0f;
@@ -7704,14 +7706,14 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				request_perform_redraw = true;
 			}
 		}
-		else if (flt_select_active && encoder_r_inc != 0)
+		else if (flt_select_active && perf_r_inc != 0)
 		{
 			const float step = kFltParamStep;
 			volatile float* targets[kPerformFltFaderCount] = {&flt_cutoff, &flt_res};
 			const int idx = flt_fader_index;
 			volatile float* target = targets[idx];
 			const float current = *target;
-			float next = current + (static_cast<float>(encoder_r_inc) * step);
+			float next = current + (static_cast<float>(perf_r_inc) * step);
 			if (next < 0.0f)
 			{
 				next = 0.0f;
