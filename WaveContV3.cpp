@@ -316,7 +316,7 @@ constexpr float kFxParamEpsilon = 1e-5f;
 constexpr float kAmpEnvStep = 0.02f;
 constexpr float kFltParamStep = 0.02f;
 constexpr float kAmpEnvMinMs = 5.0f;
-constexpr float kAmpEnvMaxMs = 1000.0f;
+constexpr float kAmpEnvMaxMs = 5000.0f;
 constexpr float kAmpEnvStepMs = 20.0f;
 
 enum class UiMode : int32_t
@@ -7789,6 +7789,8 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 	}
 	else if (!ui_blocked && ui_mode == UiMode::FxDetail)
 	{
+		const int32_t fx_r_inc = encoder_r_inc * kPerformEncoderScale;
+		const int32_t fx_r_dir = (encoder_r_inc > 0) ? 1 : (encoder_r_inc < 0 ? -1 : 0);
 		if (fx_detail_index == kFxSatIndex)
 		{
 			if (encoder_l_inc != 0)
@@ -7819,7 +7821,10 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				const int idx = fx_detail_param_index;
 				if (idx == 3)
 				{
-					sat_mode = (sat_mode == 0) ? 1 : 0;
+					if (fx_r_dir != 0)
+					{
+						sat_mode = (sat_mode == 0) ? 1 : 0;
+					}
 					request_fx_detail_redraw = true;
 					fx_params_dirty = true;
 				}
@@ -7831,13 +7836,13 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					if (sat_mode == 1 && idx == 0)
 					{
 						const int cur_idx = BitResoIndexFromValue(current);
-						const int next_idx = ClampI(cur_idx + encoder_r_inc, 0, kBitResoStepCount - 1);
+						const int next_idx = ClampI(cur_idx + fx_r_inc, 0, kBitResoStepCount - 1);
 						next = BitResoValueFromIndex(next_idx);
 					}
 					else
 					{
 						const float step = steps[idx];
-						next = current + (static_cast<float>(encoder_r_inc) * step);
+						next = current + (static_cast<float>(fx_r_inc) * step);
 						if (next < 0.0f)
 						{
 							next = 0.0f;
@@ -7886,7 +7891,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			{
 				if (fx_detail_param_index == 3)
 				{
-					int32_t next = chorus_mode + encoder_r_inc;
+					int32_t next = chorus_mode + fx_r_dir;
 					while (next < 0)
 					{
 						next += 2;
@@ -7916,7 +7921,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 						const float step = steps[idx];
 						volatile float* target = targets[idx];
 						const float current = *target;
-						float next = current + (static_cast<float>(encoder_r_inc) * step);
+						float next = current + (static_cast<float>(fx_r_inc) * step);
 						if (next < 0.0f)
 						{
 							next = 0.0f;
@@ -7974,12 +7979,15 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					if (idx == 3)
 					{
 						const bool freeze_on = (current >= 0.5f);
-						next = freeze_on ? 0.0f : 1.0f;
+						if (fx_r_dir != 0)
+						{
+							next = freeze_on ? 0.0f : 1.0f;
+						}
 					}
 					else
 					{
 						const float step = steps[idx];
-						next = current + (static_cast<float>(encoder_r_inc) * step);
+						next = current + (static_cast<float>(fx_r_inc) * step);
 						if (next < 0.0f)
 						{
 							next = 0.0f;
@@ -8034,7 +8042,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					const float step = steps[idx];
 					volatile float* target = targets[idx];
 					const float current = *target;
-					float next = current + (static_cast<float>(encoder_r_inc) * step);
+					float next = current + (static_cast<float>(fx_r_inc) * step);
 					if (next < 0.0f)
 					{
 						next = 0.0f;
