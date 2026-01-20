@@ -17,7 +17,6 @@ using namespace daisysp;
 
 using PodDisplay = OledDisplay<SSD130xI2c128x64Driver>;
 
-constexpr bool kLogEnabled = true;
 constexpr int32_t kMenuCount = 4;
 constexpr int32_t kShiftMenuCount = 2;
 constexpr int32_t kLoadTargetCount = 2;
@@ -58,7 +57,7 @@ constexpr int32_t kLoadProgressStep = 5;
 constexpr float kLedBlinkPeriodMs = 25.0f;
 constexpr float kLedBlinkDuty = 0.5f;
 constexpr uint32_t kPerformPlayheadIntervalMs = 33;
-constexpr bool kPlaybackVerboseLog = false;
+constexpr uint32_t kPerformPlayheadIntervalActiveMs = 66;
 constexpr float kPi = 3.14159265f;
 constexpr float kTwoPi = 6.2831853f;
 constexpr int kDisplayW = 128;
@@ -71,6 +70,9 @@ constexpr int kPlayStepCount = 16;
 constexpr uint32_t kPreviewReadBudgetMs = 2;
 constexpr size_t kPreviewBufferFrames = 4096;
 constexpr size_t kPreviewReadFrames = 256;
+constexpr uint32_t kUiTickMs = 1;
+constexpr uint32_t kUiTickPlaybackMs = 5;
+constexpr uint32_t kLoadScanGraceMs = 300;
 
 static const char* kSaveAdjectives[] =
 {
@@ -743,8 +745,6 @@ static volatile uint8_t g_midi_cmd_wr = 0;
 static volatile uint8_t g_midi_cmd_rd = 0;
 static volatile bool g_midi_rx_started = false;
 
-static uint32_t g_midi_note_latency_max_ms = 0;
-static uint32_t g_midi_note_latency_window_start_ms = 0;
 
 static inline void MidiCmdPushIsr(uint8_t kind, uint8_t note, uint8_t vel)
 {
@@ -816,7 +816,6 @@ ChorusEngine chorus_r;
 TapeSaturator sat_l;
 TapeSaturator sat_r;
 static BitCrushState g_sat_bit_state;
-static BitCrushState g_sat_bit_state_tracks[kPlayTrackCount];
 BiquadLp perform_lpf_l1[kPerformVoiceCount];
 BiquadLp perform_lpf_l2[kPerformVoiceCount];
 BiquadLp perform_lpf_r1[kPerformVoiceCount];
@@ -889,6 +888,7 @@ char loaded_sample_name[kMaxWavNameLen] = {0};
 int32_t load_lines = 1;
 int32_t load_line_height = 1;
 int32_t load_chars_per_line = 1;
+static uint32_t load_scan_start_ms = 0;
 
 enum class SampleContext : int32_t
 {
@@ -1128,45 +1128,6 @@ static void RequestContextSwitch(SampleContext ctx)
 	}
 }
 
-// Deferred logging ring buffer (for non-blocking logs from AudioCallback)
-constexpr size_t kLogBufSize = 96;
-constexpr size_t kLogRingSize = 8;
-struct LogMsg {
-	char buf[kLogBufSize];
-};
-static volatile LogMsg g_log_ring[kLogRingSize];
-static volatile uint32_t g_log_head = 0;
-static volatile uint32_t g_log_tail = 0;
-
-enum class LogEventType : uint8_t
-{
-	None = 0,
-	RecordAutoStop,
-};
-
-struct LogEvent
-{
-	LogEventType type;
-	int32_t a;
-	int32_t b;
-};
-
-static constexpr uint32_t kLogEvtRingSize = 16;
-static volatile uint32_t g_logevt_head = 0;
-static volatile uint32_t g_logevt_tail = 0;
-static LogEvent g_logevt_ring[kLogEvtRingSize];
-
-static inline void PushLogEvent(LogEventType t, int32_t a = 0, int32_t b = 0)
-{
-	daisy::ScopedIrqBlocker irq;
-	const uint32_t next = (g_logevt_head + 1) % kLogEvtRingSize;
-	if (next != g_logevt_tail)
-	{
-		g_logevt_ring[g_logevt_head] = {t, a, b};
-		g_logevt_head = next;
-	}
-}
-
 struct WaveformJob
 {
 	bool active;
@@ -1402,7 +1363,6 @@ alignas(32) static int16_t preview_buffer[kPreviewBufferFrames];
 alignas(32) static int16_t preview_read_buf[kPreviewReadFrames * 2];
 float led1_level = 0.0f;
 float led1_phase_ms = 0.0f;
-constexpr bool kUiLogsEnabled = false;
 static double record_anim_start_ms = -1.0;
 static uint8_t record_text_mask[kDisplayH][kDisplayW];
 static uint8_t record_invert_mask[kDisplayH][kDisplayW];
@@ -1411,23 +1371,22 @@ static uint8_t record_bold_mask[kDisplayH][kDisplayW];
 static bool request_shift_redraw = false;
 static bool request_perform_redraw = false;
 static bool request_fx_detail_redraw = false;
+static uint32_t perform_redraw_next_ms = 0;
+static float last_perform_amp_vals[kPerformFaderCount] = {-1.0f, -1.0f, -1.0f, -1.0f};
+static float last_perform_flt_vals[kPerformFltFaderCount] = {-1.0f, -1.0f};
+static float last_perform_fx_vals[kPerformFaderCount] = {-1.0f, -1.0f, -1.0f, -1.0f};
+static int32_t last_perform_fx_order[kPerformFaderCount] = {-1, -1, -1, -1};
+static bool last_perform_fx_select_active = false;
+static bool last_perform_amp_select_active = false;
+static bool last_perform_flt_select_active = false;
+static int32_t last_perform_fx_selected = -1;
+static int32_t last_perform_amp_selected = -1;
+static int32_t last_perform_flt_selected = -1;
 static uint32_t delay_snow_next_ms = 0;
 static uint32_t midi_ignore_until_ms = 0;
 
-static inline bool UiLogEnabled()
-{
-	if (!kUiLogsEnabled)
-	{
-		return false;
-	}
-	if (ui_mode == UiMode::Record && record_state == RecordState::Review)
-	{
-		return false;
-	}
-	return true;
-}
-
 static void __attribute__((unused)) ComputeWaveform();
+static bool AnyPerformVoiceActive();
 
 static double NowMs()
 {
@@ -1589,138 +1548,29 @@ static int32_t NextMenuIndex(int32_t current, int32_t delta)
 }
 const char* kShiftMenuLabels[kShiftMenuCount] = {"SAVE PRESET", "DELETE"};
 
-template <typename... Va>
-static void LogLine(const char* format, Va... va)
+static int32_t NextPerformIndex(int32_t current, int32_t delta)
 {
-	if (kLogEnabled)
+	static const int32_t order[kPerformBoxCount]
+		= {kPerformEdtIndex, kPerformAmpIndex, kPerformFxIndex, kPerformFltIndex};
+	int32_t pos = 0;
+	for (int32_t i = 0; i < kPerformBoxCount; ++i)
 	{
-		DaisySeed::PrintLine(format, va...);
+		if (order[i] == current)
+		{
+			pos = i;
+			break;
+		}
 	}
-	else
+	pos += delta;
+	while (pos < 0)
 	{
-		(void)format;
-		(void)sizeof...(va);
+		pos += kPerformBoxCount;
 	}
-}
-
-// Deferred logging for AudioCallback (non-blocking, uses ring buffer)
-static void DeferLog(const char* msg)
-{
-	__disable_irq();
-	uint32_t next_head = (g_log_head + 1) % kLogRingSize;
-	if (next_head != g_log_tail)
+	while (pos >= kPerformBoxCount)
 	{
-		strncpy((char*)g_log_ring[g_log_head].buf, msg, kLogBufSize - 1);
-		g_log_ring[g_log_head].buf[kLogBufSize - 1] = '\0';
-		g_log_head = next_head;
+		pos -= kPerformBoxCount;
 	}
-	__enable_irq();
-}
-
-static const char* FresultName(FRESULT res)
-{
-	switch (res)
-	{
-		case FR_OK: return "FR_OK";
-		case FR_DISK_ERR: return "FR_DISK_ERR";
-		case FR_INT_ERR: return "FR_INT_ERR";
-		case FR_NOT_READY: return "FR_NOT_READY";
-		case FR_NO_FILE: return "FR_NO_FILE";
-		case FR_NO_PATH: return "FR_NO_PATH";
-		case FR_INVALID_NAME: return "FR_INVALID_NAME";
-		case FR_DENIED: return "FR_DENIED";
-		case FR_EXIST: return "FR_EXIST";
-		case FR_INVALID_OBJECT: return "FR_INVALID_OBJECT";
-		case FR_WRITE_PROTECTED: return "FR_WRITE_PROTECTED";
-		case FR_INVALID_DRIVE: return "FR_INVALID_DRIVE";
-		case FR_NOT_ENABLED: return "FR_NOT_ENABLED";
-		case FR_NO_FILESYSTEM: return "FR_NO_FILESYSTEM";
-		case FR_MKFS_ABORTED: return "FR_MKFS_ABORTED";
-		case FR_TIMEOUT: return "FR_TIMEOUT";
-		case FR_LOCKED: return "FR_LOCKED";
-		case FR_NOT_ENOUGH_CORE: return "FR_NOT_ENOUGH_CORE";
-		case FR_TOO_MANY_OPEN_FILES: return "FR_TOO_MANY_OPEN_FILES";
-		case FR_INVALID_PARAMETER: return "FR_INVALID_PARAMETER";
-		default: return "FR_UNKNOWN";
-	}
-}
-
-static const char* UiModeName(UiMode mode)
-{
-	switch (mode)
-	{
-		case UiMode::Main: return "MAIN";
-		case UiMode::Load: return "LOAD";
-		case UiMode::LoadModeSelect: return "LOAD_MODE";
-		case UiMode::LoadStub: return "LOAD_STUB";
-		case UiMode::LoadTarget: return "LOAD_TARGET";
-		case UiMode::Perform: return "PERFORM";
-		case UiMode::Edt: return "EDT";
-		case UiMode::FxDetail: return "FX_DETAIL";
-		case UiMode::Play: return "PLAY";
-		case UiMode::PlayTrack: return "PLAY_TRACK";
-		case UiMode::Record: return "RECORD";
-		case UiMode::PresetSaveStub: return "PRESET_SAVE_STUB";
-		case UiMode::Shift: return "SHIFT";
-		default: return "UNKNOWN";
-	}
-}
-
-static const char* LoadDestinationName(LoadDestination dest)
-{
-	switch (dest)
-	{
-		case LoadDestination::Play: return "PLAY";
-		case LoadDestination::Perform: return "PERFORM";
-		default: return "UNKNOWN";
-	}
-}
-
-static const char* MenuLabelForIndex(int32_t index)
-{
-	if (index < 0 || index >= kMenuCount)
-	{
-		return "UNKNOWN";
-	}
-	return kMenuLabels[index];
-}
-
-static const char* RegionForAddress(uintptr_t addr)
-{
-	if (addr >= 0x20000000 && addr < 0x20020000)
-	{
-		return "DTCM";
-	}
-	if (addr >= 0x24000000 && addr < 0x24080000)
-	{
-		return "SRAM";
-	}
-	if (addr >= 0x30000000 && addr < 0x30048000)
-	{
-		return "RAM_D2";
-	}
-	if (addr >= 0x38000000 && addr < 0x38010000)
-	{
-		return "RAM_D3";
-	}
-	if (addr >= 0xC0000000 && addr < 0xC4000000)
-	{
-		return "SDRAM";
-	}
-	return "OTHER";
-}
-
-static void LogSdCardStatus()
-{
-	const uint8_t detected = BSP_SD_IsDetected();
-	const uint8_t state = BSP_SD_GetCardState();
-	LogLine("SD status: detected=%u state=%u", static_cast<unsigned>(detected), static_cast<unsigned>(state));
-	BSP_SD_CardInfo info;
-	BSP_SD_GetCardInfo(&info);
-	LogLine("SD info: block_size=%lu blocks=%lu speed=%lu",
-			static_cast<unsigned long>(info.BlockSize),
-			static_cast<unsigned long>(info.BlockNbr),
-			static_cast<unsigned long>(info.CardSpeed));
+	return order[pos];
 }
 
 struct WavInfo
@@ -1746,40 +1596,21 @@ static bool ParseWavHeader(FIL* file, WavInfo& info)
 
 	FRESULT fres;
 	UINT bytes_read = 0;
-	const uintptr_t riff_addr = reinterpret_cast<uintptr_t>(wav_riff_hdr);
-	const uintptr_t chunk_addr = reinterpret_cast<uintptr_t>(wav_chunk_hdr);
-	const uintptr_t fmt_addr = reinterpret_cast<uintptr_t>(wav_fmt_buf);
-	const uintptr_t file_addr = reinterpret_cast<uintptr_t>(file);
-	LogLine("WAV parse buffers: riff=0x%08lx (%s) chunk=0x%08lx (%s) fmt=0x%08lx (%s)",
-			(unsigned long)riff_addr,
-			RegionForAddress(riff_addr),
-			(unsigned long)chunk_addr,
-			RegionForAddress(chunk_addr),
-			(unsigned long)fmt_addr,
-			RegionForAddress(fmt_addr));
-	LogLine("WAV parse file: 0x%08lx (%s)", (unsigned long)file_addr, RegionForAddress(file_addr));
-
 	fres = f_lseek(file, 0);
 	if (fres != FR_OK)
 	{
-		LogLine("Load failed: f_lseek error %s (%d)", FresultName(fres), (int)fres);
 		return false;
 	}
 
 	fres = f_read(file, wav_riff_hdr, sizeof(wav_riff_hdr), &bytes_read);
 	if (fres != FR_OK || bytes_read != sizeof(wav_riff_hdr))
 	{
-		LogLine("Load failed: RIFF header read %s (%d), bytes=%u",
-				FresultName(fres),
-				(int)fres,
-				(unsigned)bytes_read);
 		return false;
 	}
 
 	if (std::memcmp(wav_riff_hdr, "RIFF", 4) != 0
 		|| std::memcmp(wav_riff_hdr + 8, "WAVE", 4) != 0)
 	{
-		LogLine("Load failed: not a RIFF/WAVE file");
 		return false;
 	}
 
@@ -1792,10 +1623,6 @@ static bool ParseWavHeader(FIL* file, WavInfo& info)
 		fres = f_read(file, wav_chunk_hdr, sizeof(wav_chunk_hdr), &bytes_read);
 		if (fres != FR_OK || bytes_read != sizeof(wav_chunk_hdr))
 		{
-			LogLine("Load failed: chunk header read %s (%d), bytes=%u",
-					FresultName(fres),
-					(int)fres,
-					(unsigned)bytes_read);
 			return false;
 		}
 
@@ -1812,10 +1639,6 @@ static bool ParseWavHeader(FIL* file, WavInfo& info)
 			fres = f_read(file, wav_fmt_buf, to_read, &bytes_read);
 			if (fres != FR_OK || bytes_read < 16)
 			{
-				LogLine("Load failed: fmt chunk read %s (%d), bytes=%u",
-						FresultName(fres),
-						(int)fres,
-						(unsigned)bytes_read);
 				return false;
 			}
 
@@ -1833,7 +1656,6 @@ static bool ParseWavHeader(FIL* file, WavInfo& info)
 
 			if (audio_format != WAVE_FORMAT_PCM)
 			{
-				LogLine("Load failed: unsupported WAV format (fmt=%u)", (unsigned)audio_format);
 				return false;
 			}
 
@@ -1845,9 +1667,6 @@ static bool ParseWavHeader(FIL* file, WavInfo& info)
 				fres = f_lseek(file, f_tell(file) + skip);
 				if (fres != FR_OK)
 				{
-					LogLine("Load failed: f_lseek skipping fmt %s (%d)",
-							FresultName(fres),
-							(int)fres);
 					return false;
 				}
 			}
@@ -1864,9 +1683,6 @@ static bool ParseWavHeader(FIL* file, WavInfo& info)
 			fres = f_lseek(file, skip_to);
 			if (fres != FR_OK)
 			{
-				LogLine("Load failed: f_lseek skipping chunk %s (%d)",
-						FresultName(fres),
-						(int)fres);
 				return false;
 			}
 		}
@@ -1874,18 +1690,9 @@ static bool ParseWavHeader(FIL* file, WavInfo& info)
 
 	if (!fmt_found || !data_found)
 	{
-		LogLine("Load failed: missing fmt or data chunk (fmt=%d data=%d)",
-				(int)fmt_found,
-				(int)data_found);
 		return false;
 	}
 
-	LogLine("WAV header OK: channels=%u sr=%lu bits=%u data_size=%lu data_offset=%lu",
-			(unsigned)info.num_channels,
-			(unsigned long)info.sample_rate,
-			(unsigned)info.bits_per_sample,
-			(unsigned long)info.data_size,
-			(unsigned long)info.data_offset);
 
 	return true;
 }
@@ -2004,17 +1811,14 @@ static void MountSd()
 	}
 	if (!BSP_SD_IsDetected())
 	{
-		LogLine("SD mount skipped: no card detected");
 		return;
 	}
 	sd_mounted = (f_mount(&fsi.GetSDFileSystem(), fsi.GetSDPath(), 1) == FR_OK);
 	if (sd_mounted)
 	{
-		LogLine("SD mount OK at %s", fsi.GetSDPath());
 	}
 	else
 	{
-		LogLine("SD mount failed");
 	}
 }
 
@@ -2133,18 +1937,15 @@ static bool BeginSaveRecordedSample()
 {
 	if (!sample_loaded || sample_length == 0 || !waveform_from_recording)
 	{
-		LogLine("Save skipped: no recorded sample");
 		return false;
 	}
 	MountSd();
 	if (!sd_mounted)
 	{
-		LogLine("Save failed: SD not mounted");
 		return false;
 	}
 	if (!BuildNextSaveName(save_filename, sizeof(save_filename)))
 	{
-		LogLine("Save failed: no free filename");
 		return false;
 	}
 	char path[64];
@@ -2153,7 +1954,6 @@ static bool BeginSaveRecordedSample()
 	const FRESULT open_res = f_open(&save_file, path, FA_WRITE | FA_CREATE_NEW);
 	if (open_res != FR_OK)
 	{
-		LogLine("Save failed: f_open %s (%d)", FresultName(open_res), (int)open_res);
 		return false;
 	}
 	save_file_open = true;
@@ -2181,7 +1981,6 @@ static bool BeginSaveRecordedSample()
 	save_last_error = f_write(&save_file, &header, sizeof(header), &written);
 	if (save_last_error != FR_OK || written != sizeof(header))
 	{
-		LogLine("Save failed: header write %s (%d)", FresultName(save_last_error), (int)save_last_error);
 		f_close(&save_file);
 		save_file_open = false;
 		return false;
@@ -2233,7 +2032,6 @@ static bool StepSaveRecordedSample(bool& done)
 		}
 		if (save_last_error != FR_OK)
 		{
-			LogLine("Save failed: data write %s (%d)", FresultName(save_last_error), (int)save_last_error);
 			f_close(&save_file);
 			save_file_open = false;
 			return false;
@@ -2250,7 +2048,6 @@ static bool StepSaveRecordedSample(bool& done)
 		save_last_error = f_sync(&save_file);
 		if (save_last_error != FR_OK)
 		{
-			LogLine("Save failed: f_sync %s (%d)", FresultName(save_last_error), (int)save_last_error);
 			f_close(&save_file);
 			save_file_open = false;
 			return false;
@@ -2258,7 +2055,6 @@ static bool StepSaveRecordedSample(bool& done)
 		f_close(&save_file);
 		save_file_open = false;
 		done = true;
-		LogLine("Save OK: %s (%lu frames)", save_filename, (unsigned long)sample_length);
 		CopyString(loaded_sample_name, save_filename, kMaxWavNameLen);
 		return true;
 	}
@@ -2269,7 +2065,6 @@ static bool ReinitSdNow()
 {
 	if (!BSP_SD_IsDetected())
 	{
-		LogLine("SD init (full): no card detected");
 		return false;
 	}
 	f_mount(0, fsi.GetSDPath(), 0);
@@ -2279,15 +2074,13 @@ static bool ReinitSdNow()
 	sd_cfg.Defaults();
 	sdcard.Init(sd_cfg);
 	fsi.Init(FatFSInterface::Config::MEDIA_SD);
-	const uint8_t init_res = BSP_SD_Init();
-	LogLine("SD init (full): %u", static_cast<unsigned>(init_res));
+	(void)BSP_SD_Init();
 	MountSd();
 	return sd_mounted;
 }
 
 static void __attribute__((unused)) ScanSdFiles(bool wav_only)
 {
-	LogLine("Scanning WAV files...");
 	bool detected = BSP_SD_IsDetected();
 	if (!detected)
 	{
@@ -2295,8 +2088,7 @@ static void __attribute__((unused)) ScanSdFiles(bool wav_only)
 		sd_cfg.Defaults();
 		sdcard.Init(sd_cfg);
 		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		const uint8_t init_res = BSP_SD_Init();
-		LogLine("SD init (detect): %u", static_cast<unsigned>(init_res));
+		(void)BSP_SD_Init();
 		detected = BSP_SD_IsDetected();
 		if (!detected)
 		{
@@ -2306,7 +2098,6 @@ static void __attribute__((unused)) ScanSdFiles(bool wav_only)
 			wav_file_count = 0;
 			load_selected = 0;
 			load_scroll = 0;
-			LogLine("Scan aborted: SD not detected");
 			return;
 		}
 	}
@@ -2317,7 +2108,6 @@ static void __attribute__((unused)) ScanSdFiles(bool wav_only)
 		wav_file_count = 0;
 		load_selected = 0;
 		load_scroll = 0;
-		LogLine("Scan aborted: SD not ready");
 		return;
 	}
 	if (detected && !sd_detected_last)
@@ -2334,8 +2124,7 @@ static void __attribute__((unused)) ScanSdFiles(bool wav_only)
 		sd_cfg.Defaults();
 		sdcard.Init(sd_cfg);
 		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		const uint8_t init_res = BSP_SD_Init();
-		LogLine("SD init: %u", static_cast<unsigned>(init_res));
+		(void)BSP_SD_Init();
 		MountSd();
 		sd_need_reinit = !sd_mounted;
 	}
@@ -2349,7 +2138,6 @@ static void __attribute__((unused)) ScanSdFiles(bool wav_only)
 		wav_file_count = 0;
 		load_selected = 0;
 		load_scroll = 0;
-		LogLine("Scan aborted: SD not mounted");
 		return;
 	}
 
@@ -2361,7 +2149,6 @@ static void __attribute__((unused)) ScanSdFiles(bool wav_only)
 		wav_file_count = 0;
 		load_selected = 0;
 		load_scroll = 0;
-		LogLine("Scan failed: f_opendir error %d", static_cast<int>(res));
 		return;
 	}
 
@@ -2390,7 +2177,6 @@ static void __attribute__((unused)) ScanSdFiles(bool wav_only)
 	}
 	f_closedir(&dir);
 	wav_file_count = count;
-	LogLine("Scan complete: %ld files", static_cast<long>(wav_file_count));
 	if (wav_file_count <= 0)
 	{
 		load_selected = 0;
@@ -2480,7 +2266,15 @@ static void __attribute__((unused)) ComputeWaveform()
 
 static inline bool JobsAllowedNow()
 {
-	return !playhead_running && record_state != RecordState::Recording;
+	if (record_state == RecordState::Recording)
+	{
+		return false;
+	}
+	if (playhead_running || playback_active || AnyPerformVoiceActive())
+	{
+		return false;
+	}
+	return true;
 }
 
 enum class JobType : uint8_t
@@ -2604,7 +2398,6 @@ static void FileListJobCancel()
 static void FileListJobStart(bool wav_only)
 {
 	FileListJobCancel();
-	LogLine("Scanning WAV files...");
 	bool detected = BSP_SD_IsDetected();
 	if (!detected)
 	{
@@ -2612,8 +2405,7 @@ static void FileListJobStart(bool wav_only)
 		sd_cfg.Defaults();
 		sdcard.Init(sd_cfg);
 		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		const uint8_t init_res = BSP_SD_Init();
-		LogLine("SD init (detect): %u", static_cast<unsigned>(init_res));
+		(void)BSP_SD_Init();
 		detected = BSP_SD_IsDetected();
 		if (!detected)
 		{
@@ -2623,7 +2415,6 @@ static void FileListJobStart(bool wav_only)
 			wav_file_count = 0;
 			load_selected = 0;
 			load_scroll = 0;
-			LogLine("Scan aborted: SD not detected");
 			return;
 		}
 	}
@@ -2634,7 +2425,6 @@ static void FileListJobStart(bool wav_only)
 		wav_file_count = 0;
 		load_selected = 0;
 		load_scroll = 0;
-		LogLine("Scan aborted: SD not ready");
 		return;
 	}
 	if (detected && !sd_detected_last)
@@ -2651,8 +2441,7 @@ static void FileListJobStart(bool wav_only)
 		sd_cfg.Defaults();
 		sdcard.Init(sd_cfg);
 		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		const uint8_t init_res = BSP_SD_Init();
-		LogLine("SD init: %u", static_cast<unsigned>(init_res));
+		(void)BSP_SD_Init();
 		MountSd();
 		sd_need_reinit = !sd_mounted;
 	}
@@ -2666,7 +2455,6 @@ static void FileListJobStart(bool wav_only)
 		wav_file_count = 0;
 		load_selected = 0;
 		load_scroll = 0;
-		LogLine("Scan aborted: SD not mounted");
 		return;
 	}
 
@@ -2676,7 +2464,6 @@ static void FileListJobStart(bool wav_only)
 		wav_file_count = 0;
 		load_selected = 0;
 		load_scroll = 0;
-		LogLine("Scan failed: f_opendir error %d", static_cast<int>(res));
 		return;
 	}
 
@@ -2691,7 +2478,6 @@ static void FileListJobStart(bool wav_only)
 static void FinalizeFileList()
 {
 	wav_file_count = g_list_job.count;
-	LogLine("Scan complete: %ld files", static_cast<long>(wav_file_count));
 	if (wav_file_count <= 0)
 	{
 		load_selected = 0;
@@ -3569,7 +3355,6 @@ static void EnterPlayTrack(int32_t track)
 	request_track_sample_load = true;
 	request_track_sample_index = track;
 	ui_mode = UiMode::PlayTrack;
-	request_perform_redraw = true;
 }
 
 static void ExitPlayTrack()
@@ -3663,32 +3448,24 @@ static bool LoadSampleFromPath(const char* path)
 	trim_start = 0.0f;
 	trim_end = 1.0f;
 
-	LogLine("Loading sample: %s", path);
 	FILINFO finfo;
 	FRESULT res = f_stat(path, &finfo);
 	if (res == FR_OK)
 	{
-		LogLine("f_stat: size=%lu attrib=0x%02x", static_cast<unsigned long>(finfo.fsize), static_cast<unsigned>(finfo.fattrib));
 	}
 	else
 	{
-		LogLine("f_stat failed: %s (%d)", FresultName(res), static_cast<int>(res));
 	}
 
 	if (BSP_SD_GetCardState() != SD_TRANSFER_OK)
 	{
-		LogLine("Load failed: SD not ready");
 		return false;
 	}
 	res = f_open(file, path, FA_READ);
 	if (res != FR_OK)
 	{
-		LogLine("Load failed: f_open %s (%d)", FresultName(res), static_cast<int>(res));
 		return false;
 	}
-	LogLine("f_open ok: size=%lu tell=%lu",
-			static_cast<unsigned long>(f_size(file)),
-			static_cast<unsigned long>(f_tell(file)));
 
 	WavInfo wav;
 	if (!ParseWavHeader(file, wav))
@@ -3699,14 +3476,12 @@ static bool LoadSampleFromPath(const char* path)
 
 	if (wav.bits_per_sample != 16)
 	{
-		LogLine("Load failed: unsupported bit depth %u", (unsigned)wav.bits_per_sample);
 		f_close(file);
 		return false;
 	}
 
 	if (wav.num_channels < 1 || wav.num_channels > 2)
 	{
-		LogLine("Load failed: unsupported channel count %u", (unsigned)wav.num_channels);
 		f_close(file);
 		return false;
 	}
@@ -3715,19 +3490,13 @@ static bool LoadSampleFromPath(const char* path)
 	const size_t bytes_per_sample = wav.bits_per_sample / 8;
 	const size_t frame_bytes = bytes_per_sample * wav.num_channels;
 	size_t total_frames = (frame_bytes == 0) ? 0 : (wav.data_size / frame_bytes);
-	LogLine("WAV info: %lu frames @ %luHz, channels=%u",
-			static_cast<unsigned long>(total_frames),
-			static_cast<unsigned long>(wav.sample_rate),
-			static_cast<unsigned>(wav.num_channels));
 	if (total_frames == 0)
 	{
-		LogLine("Load failed: no data frames");
 		f_close(file);
 		return false;
 	}
 	if (total_frames > kMaxSampleSamples)
 	{
-		LogLine("Truncating to %lu frames", static_cast<unsigned long>(kMaxSampleSamples));
 		total_frames = kMaxSampleSamples;
 	}
 
@@ -3735,16 +3504,12 @@ static bool LoadSampleFromPath(const char* path)
 	res = f_lseek(file, data_offset);
 	if (res != FR_OK)
 	{
-		LogLine("Load failed: f_lseek %s (%d)", FresultName(res), static_cast<int>(res));
-		LogLine("f_error=%u f_eof=%u", static_cast<unsigned>(f_error(file)), static_cast<unsigned>(f_eof(file)));
-		LogSdCardStatus();
 		f_close(file);
 		return false;
 	}
 
 	size_t dest_index = 0;
 	int32_t last_percent = 0;
-	LogLine("Load progress: 0%%");
 	while (dest_index < total_frames)
 	{
 		size_t frames_to_read = total_frames - dest_index;
@@ -3758,12 +3523,6 @@ static bool LoadSampleFromPath(const char* path)
 		if (res != FR_OK
 			|| bytes_read == 0)
 		{
-			LogLine("Load read error %s (%d) at %lu frames",
-					FresultName(res),
-					static_cast<int>(res),
-					static_cast<unsigned long>(dest_index));
-			LogLine("f_error=%u f_eof=%u", static_cast<unsigned>(f_error(file)), static_cast<unsigned>(f_eof(file)));
-			LogSdCardStatus();
 			break;
 		}
 		const size_t frames_read = bytes_read / (wav.num_channels * sizeof(int16_t));
@@ -3793,7 +3552,6 @@ static bool LoadSampleFromPath(const char* path)
 				(dest_index * 100U) / total_frames);
 			if (percent >= last_percent + kLoadProgressStep || percent == 100)
 			{
-				LogLine("Load progress: %ld%%", static_cast<long>(percent));
 				last_percent = percent;
 			}
 		}
@@ -3806,22 +3564,17 @@ static bool LoadSampleFromPath(const char* path)
 
 	if (dest_index < total_frames)
 	{
-		LogLine("Load finished early: %lu/%lu frames",
-				static_cast<unsigned long>(dest_index),
-				static_cast<unsigned long>(total_frames));
 	}
 	sample_length = dest_index;
 	sample_rate = wav.sample_rate;
 	sample_loaded = (sample_length > 0);
 	if (!sample_loaded)
 	{
-		LogLine("Load failed: no audio data read");
 		return false;
 	}
 	ApplyLoadedSampleFade(sample_length, sample_rate);
 	trim_start = 0.0f;
 	trim_end = 1.0f;
-	LogLine("Load complete: %lu frames", static_cast<unsigned long>(sample_length));
 	waveform_from_recording = false;
 	JobStartWaveform(current_sample_context, true);
 	UpdateTrimFrames();
@@ -3832,7 +3585,6 @@ static bool LoadSampleAtIndex(int32_t index)
 {
 	if (!BSP_SD_IsDetected())
 	{
-		LogLine("Load failed: SD not detected");
 		sd_mounted = false;
 		return false;
 	}
@@ -3843,29 +3595,24 @@ static bool LoadSampleAtIndex(int32_t index)
 		sd_cfg.Defaults();
 		sdcard.Init(sd_cfg);
 		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		const uint8_t init_res = BSP_SD_Init();
-		LogLine("SD init: %u", static_cast<unsigned>(init_res));
+		(void)BSP_SD_Init();
 		MountSd();
 	}
 	if (!sd_mounted)
 	{
-		LogLine("Load failed: SD not mounted");
 		return false;
 	}
 	if (BSP_SD_GetCardState() != SD_TRANSFER_OK)
 	{
-		LogLine("Load failed: SD not ready");
 		return false;
 	}
 	if (index < 0 || index >= wav_file_count)
 	{
-		LogLine("Load failed: invalid index %ld", static_cast<long>(index));
 		return false;
 	}
 	char path[64];
 	BuildFilePath(wav_files[index], path, sizeof(path));
 	CopyString(loaded_sample_name, wav_files[index], kMaxWavNameLen);
-	LogLine("Load request: %s", loaded_sample_name);
 	return LoadSampleFromPath(path);
 }
 
@@ -3920,7 +3667,6 @@ static bool BeginPreviewAtIndex(int32_t index)
 {
 	if (!BSP_SD_IsDetected())
 	{
-		LogLine("Preview failed: SD not detected");
 		sd_mounted = false;
 		return false;
 	}
@@ -3931,28 +3677,23 @@ static bool BeginPreviewAtIndex(int32_t index)
 		sd_cfg.Defaults();
 		sdcard.Init(sd_cfg);
 		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		const uint8_t init_res = BSP_SD_Init();
-		LogLine("SD init: %u", static_cast<unsigned>(init_res));
+		(void)BSP_SD_Init();
 		MountSd();
 	}
 	if (!sd_mounted)
 	{
-		LogLine("Preview failed: SD not mounted");
 		return false;
 	}
 	if (BSP_SD_GetCardState() != SD_TRANSFER_OK)
 	{
-		LogLine("Preview failed: SD not ready");
 		return false;
 	}
 	if (index < 0 || index >= wav_file_count)
 	{
-		LogLine("Preview failed: invalid index %ld", static_cast<long>(index));
 		return false;
 	}
 	char path[64];
 	BuildFilePath(wav_files[index], path, sizeof(path));
-	LogLine("Preview request: %s", wav_files[index]);
 
 	if (preview_file_open)
 	{
@@ -3962,7 +3703,6 @@ static bool BeginPreviewAtIndex(int32_t index)
 	const FRESULT open_res = f_open(&preview_file, path, FA_READ);
 	if (open_res != FR_OK)
 	{
-		LogLine("Preview failed: f_open %s (%d)", FresultName(open_res), (int)open_res);
 		return false;
 	}
 	preview_file_open = true;
@@ -3976,14 +3716,12 @@ static bool BeginPreviewAtIndex(int32_t index)
 	}
 	if (wav.bits_per_sample != 16)
 	{
-		LogLine("Preview failed: unsupported bit depth %u", (unsigned)wav.bits_per_sample);
 		f_close(&preview_file);
 		preview_file_open = false;
 		return false;
 	}
 	if (wav.num_channels < 1 || wav.num_channels > 2)
 	{
-		LogLine("Preview failed: unsupported channel count %u", (unsigned)wav.num_channels);
 		f_close(&preview_file);
 		preview_file_open = false;
 		return false;
@@ -3996,7 +3734,6 @@ static bool BeginPreviewAtIndex(int32_t index)
 	FRESULT seek_res = f_lseek(&preview_file, preview_data_offset);
 	if (seek_res != FR_OK)
 	{
-		LogLine("Preview failed: f_lseek %s (%d)", FresultName(seek_res), (int)seek_res);
 		f_close(&preview_file);
 		preview_file_open = false;
 		return false;
@@ -4051,7 +3788,6 @@ static void FillPreviewBuffer()
 		FRESULT res = f_read(&preview_file, preview_read_buf, bytes_to_read, &bytes_read);
 		if (res != FR_OK)
 		{
-			LogLine("Preview read error %s (%d)", FresultName(res), (int)res);
 			StopPreview();
 			return;
 		}
@@ -4060,7 +3796,6 @@ static void FillPreviewBuffer()
 			FRESULT seek_res = f_lseek(&preview_file, preview_data_offset);
 			if (seek_res != FR_OK)
 			{
-				LogLine("Preview loop seek failed %s (%d)", FresultName(seek_res), (int)seek_res);
 				StopPreview();
 				return;
 			}
@@ -4096,7 +3831,6 @@ static bool DeleteFileAtIndex(int32_t index)
 {
 	if (!BSP_SD_IsDetected())
 	{
-		LogLine("Delete failed: SD not detected");
 		sd_mounted = false;
 		return false;
 	}
@@ -4107,35 +3841,28 @@ static bool DeleteFileAtIndex(int32_t index)
 		sd_cfg.Defaults();
 		sdcard.Init(sd_cfg);
 		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		const uint8_t init_res = BSP_SD_Init();
-		LogLine("SD init: %u", static_cast<unsigned>(init_res));
+		(void)BSP_SD_Init();
 		MountSd();
 	}
 	if (!sd_mounted)
 	{
-		LogLine("Delete failed: SD not mounted");
 		return false;
 	}
 	if (BSP_SD_GetCardState() != SD_TRANSFER_OK)
 	{
-		LogLine("Delete failed: SD not ready");
 		return false;
 	}
 	if (index < 0 || index >= wav_file_count)
 	{
-		LogLine("Delete failed: invalid index %ld", static_cast<long>(index));
 		return false;
 	}
 	char path[64];
 	BuildFilePath(wav_files[index], path, sizeof(path));
-	LogLine("Delete request: %s", wav_files[index]);
 	const FRESULT res = f_unlink(path);
 	if (res != FR_OK)
 	{
-		LogLine("Delete failed: f_unlink %s (%d)", FresultName(res), (int)res);
 		return false;
 	}
-	LogLine("Delete OK: %s", wav_files[index]);
 	return true;
 }
 
@@ -4382,7 +4109,8 @@ static void DrawPerformScreen(int32_t selected,
 							  bool amp_select_active,
 							  int32_t amp_selected,
 							  bool flt_select_active,
-							  int32_t flt_selected)
+							  int32_t flt_selected,
+							  uint8_t redraw_mask = 0x0F)
 {
 	constexpr int kMarginX = 2;
 	constexpr int kMarginY = 2;
@@ -4392,7 +4120,10 @@ static void DrawPerformScreen(int32_t selected,
 	constexpr int kBoxH = (kDisplayH - (kMarginY * 2) - kGapY) / 2;
 	constexpr int kLabelPadX = 2;
 	constexpr int kLabelPadY = 1;
-	display.Fill(false);
+	if (redraw_mask == 0x0F)
+	{
+		display.Fill(false);
+	}
 
 	struct Box
 	{
@@ -4523,125 +4254,36 @@ static void DrawPerformScreen(int32_t selected,
 		}
 	};
 
-	auto draw_waveform_preview = [&](const Box& box, bool is_selected)
+	auto draw_edit_label = [&](const Box& box, bool is_selected)
 	{
-		if (!sample_loaded || sample_length == 0)
-		{
-			const char* line1 = "SELECT";
-			const char* line2 = "WAV";
-			const int text_w1 = TinyStringWidth(line1);
-			const int text_w2 = TinyStringWidth(line2);
-			const int text_x1 = box.x + (kBoxW - text_w1) / 2;
-			const int text_x2 = box.x + (kBoxW - text_w2) / 2;
-			const int text_y = box.y + (kBoxH - (Font5x7::H * 2) - 2) / 2;
-			DrawTinyString(line1, text_x1, text_y, !is_selected);
-			DrawTinyString(line2, text_x2, text_y + Font5x7::H + 2, !is_selected);
-			return;
-		}
-		const int preview_x0 = box.x + kLabelPadX + Font5x7::W + 4;
-		const int preview_x1 = box.x + kBoxW - 2;
-		const int preview_y0 = box.y + kLabelPadY + 1;
-		const int preview_y1 = box.y + kBoxH - kLabelPadY - 1;
-		if (preview_x1 <= preview_x0 || preview_y1 <= preview_y0)
-		{
-			return;
-		}
-		const int preview_w = preview_x1 - preview_x0 + 1;
-		const int preview_h = preview_y1 - preview_y0 + 1;
-		if (preview_h < 3)
-		{
-			return;
-		}
-		const int mid = preview_y0 + (preview_h / 2);
-		float scale = static_cast<float>((preview_h / 2) - 1) / 28.0f;
-		if (scale <= 0.0f)
-		{
-			scale = 1.0f / 28.0f;
-		}
 		const bool on = !is_selected;
-		for (int x = 0; x < preview_w; ++x)
-		{
-			const int wf_idx = (preview_w > 1) ? ((x * 127) / (preview_w - 1)) : 0;
-			int top = mid + static_cast<int>(static_cast<float>(waveform_min[wf_idx]) * scale);
-			int bottom = mid + static_cast<int>(static_cast<float>(waveform_max[wf_idx]) * scale);
-			if (top > bottom)
-			{
-				const int tmp = top;
-				top = bottom;
-				bottom = tmp;
-			}
-			if (top < preview_y0)
-			{
-				top = preview_y0;
-			}
-			if (bottom > preview_y1)
-			{
-				bottom = preview_y1;
-			}
-			display.DrawLine(preview_x0 + x, top, preview_x0 + x, bottom, on);
-		}
-
-		if (sample_length > 1)
-		{
-			bool has_playhead = false;
-			float norm = 0.0f;
-			if (playback_active)
-			{
-				norm = playback_phase / static_cast<float>(sample_length - 1);
-				has_playhead = true;
-			}
-			else
-			{
-				for (int v = 0; v < kPerformVoiceCount; ++v)
-				{
-					const auto& voice = perform_voices[v];
-					if (voice.active && voice.length > 0)
-					{
-						const float pos = static_cast<float>(voice.offset) + voice.phase;
-						norm = pos / static_cast<float>(sample_length - 1);
-						has_playhead = true;
-						break;
-					}
-				}
-			}
-			if (has_playhead)
-			{
-				if (norm < 0.0f)
-				{
-					norm = 0.0f;
-				}
-				else if (norm > 1.0f)
-				{
-					norm = 1.0f;
-				}
-				int trim_x0 = preview_x0
-					+ static_cast<int>(trim_start * static_cast<float>(preview_w - 1) + 0.5f);
-				int trim_x1 = preview_x0
-					+ static_cast<int>(trim_end * static_cast<float>(preview_w - 1) + 0.5f);
-				if (trim_x0 > trim_x1)
-				{
-					const int tmp = trim_x0;
-					trim_x0 = trim_x1;
-					trim_x1 = tmp;
-				}
-				int play_x = preview_x0
-					+ static_cast<int>(norm * static_cast<float>(preview_w - 1) + 0.5f);
-				if (play_x < trim_x0)
-				{
-					play_x = trim_x0;
-				}
-				else if (play_x > trim_x1)
-				{
-					play_x = trim_x1;
-				}
-				display.DrawLine(play_x, preview_y0, play_x, preview_y1, on);
-			}
-		}
+		const char* line1 = "WAV";
+		const char* line2 = "EDITOR";
+		const int w1 = TinyStringWidth(line1);
+		const int w2 = TinyStringWidth(line2);
+		const int text_x1 = box.x + (kBoxW - w1) / 2;
+		const int text_x2 = box.x + (kBoxW - w2) / 2;
+		const int text_y = box.y + (kBoxH - (Font5x7::H * 2) - 2) / 2;
+		DrawTinyString(line1, text_x1, text_y, on);
+		DrawTinyString(line2, text_x2, text_y + Font5x7::H + 2, on);
 	};
 
 	for (int i = 0; i < kPerformBoxCount; ++i)
 	{
+		if ((redraw_mask & (1u << i)) == 0)
+		{
+			continue;
+		}
 		const auto& box = boxes[i];
+		if (redraw_mask != 0x0F)
+		{
+			display.DrawRect(box.x,
+							 box.y,
+							 box.x + kBoxW - 1,
+							 box.y + kBoxH - 1,
+							 false,
+							 true);
+		}
 		const bool is_selected = (i == selected);
 		if (is_selected && kBoxW > 2 && kBoxH > 2)
 		{
@@ -4652,14 +4294,17 @@ static void DrawPerformScreen(int32_t selected,
 							 true,
 							 true);
 		}
-		DrawTinyVerticalStringBold(box.label,
-								   box.x + kLabelPadX,
-								   box.y + kLabelPadY,
-								   kBoxH - (kLabelPadY * 2),
-								   !is_selected);
+		if (i != kPerformEdtIndex)
+		{
+			DrawTinyVerticalStringBold(box.label,
+									   box.x + kLabelPadX,
+									   box.y + kLabelPadY,
+									   kBoxH - (kLabelPadY * 2),
+									   !is_selected);
+		}
 		if (i == kPerformEdtIndex)
 		{
-			draw_waveform_preview(box, is_selected);
+			draw_edit_label(box, is_selected);
 		}
 		if (i == kPerformAmpIndex)
 		{
@@ -4714,20 +4359,6 @@ static void DrawPerformScreen(int32_t selected,
 						false);
 		}
 	}
-	{
-		const FontDef font = Font_6x8;
-		char midi_label[12];
-		snprintf(midi_label, sizeof(midi_label), "M %lums",
-			static_cast<unsigned long>(g_midi_note_latency_max_ms));
-		const int text_w = static_cast<int>(StrLen(midi_label)) * font.FontWidth;
-		int x = kDisplayW - text_w - 1;
-		if (x < 0)
-		{
-			x = 0;
-		}
-		display.SetCursor(x, 0);
-		display.WriteString(midi_label, font, true);
-	}
 	RequestDisplayUpdate();
 }
 
@@ -4772,20 +4403,6 @@ static void DrawLoadMessage(const char* line1, const char* line2)
 	RequestDisplayUpdate();
 }
 
-static void DrawJobOverlay()
-{
-	if (!g_job.active || !g_job.foreground)
-	{
-		return;
-	}
-	const FontDef font = Font_6x8;
-	char buf[24];
-	const uint32_t pct = g_job.progress / 10U;
-	snprintf(buf, sizeof(buf), "WORK %lu%%", static_cast<unsigned long>(pct));
-	display.SetCursor(0, kDisplayH - font.FontHeight);
-	display.WriteString(buf, font, true);
-}
-
 static void DrawLoadMenu(int32_t top_index, int32_t selected)
 {
 	const FontDef font = Font_6x8;
@@ -4809,13 +4426,16 @@ static void DrawLoadMenu(int32_t top_index, int32_t selected)
 	 }
 	if (wav_file_count == 0)
 	{
+		const uint32_t now = System::GetNow();
+		const bool grace_active = (load_scan_start_ms != 0)
+			&& (uint32_t)(now - load_scan_start_ms) < kLoadScanGraceMs;
 		if (delete_mode)
 		{
-			DrawLoadMessage("NO", "FILES");
+			DrawLoadMessage(grace_active ? "SCANNING" : "NO", "FILES");
 		}
 		else
 		{
-			DrawLoadMessage("NO WAV", "FILES");
+			DrawLoadMessage(grace_active ? "SCANNING" : "NO WAV", "FILES");
 		}
 		return;
 	}
@@ -4861,7 +4481,6 @@ static void DrawLoadMenu(int32_t top_index, int32_t selected)
 						 !is_selected,
 						 load_chars_per_line);
 	}
-	DrawJobOverlay();
 	RequestDisplayUpdate();
 }
 
@@ -5284,7 +4903,6 @@ static void DrawRecordReadyScreen()
 		}
 	}
 
-	DrawJobOverlay();
 	RequestDisplayUpdate();
 }
 
@@ -5404,7 +5022,6 @@ static void StartRecordingAudioSafe()
 static void StartRecording()
 {
 	StartRecordingAudioSafe();
-	LogLine("Record: start (monitor ON)");
 }
 
 static void DrawRecordCountdown()
@@ -5859,27 +5476,6 @@ static void DrawPlayScreen()
 		}
 		DrawPlayTinyText(cpu_x, label_y, cpu_label, true);
 
-		char midi_label[12];
-		snprintf(midi_label, sizeof(midi_label), "M %lums",
-			static_cast<unsigned long>(g_midi_note_latency_max_ms));
-		const int midi_len = static_cast<int>(StrLen(midi_label));
-		const int midi_w = (midi_len > 0)
-			? (midi_len * kPlayTinyW + (midi_len - 1) * kPlayTinySpacing)
-			: 0;
-		if (midi_w > 0)
-		{
-			int midi_x = cpu_x + cpu_w + 4;
-			const int max_x = kDisplayW - midi_w - 1;
-			if (midi_x > max_x)
-			{
-				midi_x = max_x;
-			}
-			if (midi_x < 0)
-			{
-				midi_x = 0;
-			}
-			DrawPlayTinyText(midi_x, label_y, midi_label, true);
-		}
 	}
 
 	const int line_y2 = label_y + kPlayTinyH + 2;
@@ -6256,7 +5852,6 @@ static void DrawWaveform()
 	display.SetCursor(0, 0);
 	display.WriteString(waveform_title ? waveform_title : loaded_sample_name, Font_6x8, true);
 
-	DrawJobOverlay();
 	RequestDisplayUpdate();
 }
 
@@ -7026,10 +6621,6 @@ static void StartPlayback(uint8_t note)
 {
 	if (!sample_loaded || sample_length < 1)
 	{
-		if (kPlaybackVerboseLog && UiLogEnabled())
-		{
-			LogLine("Playback: start rejected (no sample)");
-		}
 		return;
 	}
 	size_t window_start = sample_play_start;
@@ -7045,10 +6636,6 @@ static void StartPlayback(uint8_t note)
 	}
 	if (window_end == 0)
 	{
-		if (kPlaybackVerboseLog && UiLogEnabled())
-		{
-			LogLine("Playback: start rejected (empty window)");
-		}
 		return;
 	}
 	current_note = note;
@@ -7062,25 +6649,12 @@ static void StartPlayback(uint8_t note)
 	playback_rate = pitch * (static_cast<float>(sample_rate) / hw.AudioSampleRate());
 	playback_phase = static_cast<float>(window_start);
 	playback_active = true;
-	if (kPlaybackVerboseLog && UiLogEnabled())
-	{
-		LogLine("Playback: start note=%u pitch=%.3f win=[%lu,%lu) rate=%.6f apply_pitch=1",
-				static_cast<unsigned>(note),
-				static_cast<double>(pitch),
-				static_cast<unsigned long>(window_start),
-				static_cast<unsigned long>(window_end),
-				static_cast<double>(playback_rate));
-	}
 }
 
 static void StartPlayback(uint8_t note, bool apply_pitch)
 {
 	if (!sample_loaded || sample_length < 1)
 	{
-		if (kPlaybackVerboseLog && UiLogEnabled())
-		{
-			LogLine("Playback: start rejected (no sample)");
-		}
 		return;
 	}
 	size_t window_start = sample_play_start;
@@ -7096,10 +6670,6 @@ static void StartPlayback(uint8_t note, bool apply_pitch)
 	}
 	if (window_end == 0)
 	{
-		if (kPlaybackVerboseLog && UiLogEnabled())
-		{
-			LogLine("Playback: start rejected (empty window)");
-		}
 		return;
 	}
 	current_note = note;
@@ -7113,16 +6683,6 @@ static void StartPlayback(uint8_t note, bool apply_pitch)
 	playback_rate = pitch * (static_cast<float>(sample_rate) / hw.AudioSampleRate());
 	playback_phase = static_cast<float>(window_start);
 	playback_active = true;
-	if (kPlaybackVerboseLog && UiLogEnabled())
-	{
-		LogLine("Playback: start note=%u pitch=%.3f win=[%lu,%lu) rate=%.6f apply_pitch=%d",
-				static_cast<unsigned>(note),
-				static_cast<double>(pitch),
-				static_cast<unsigned long>(window_start),
-				static_cast<unsigned long>(window_end),
-				static_cast<double>(playback_rate),
-				static_cast<int>(apply_pitch));
-	}
 }
 
 static void StopPlayback(uint8_t note)
@@ -7482,13 +7042,6 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 		}
 		if (encoder_r_pressed)
 		{
-			// Deferred logging
-			if (shift_menu_index < kShiftMenuCount)
-			{
-				char defer_msg[96];
-				snprintf(defer_msg, sizeof(defer_msg), "Shift menu select: %s", kShiftMenuLabels[shift_menu_index]);
-				DeferLog(defer_msg);
-			}
 			if (shift_menu_index == 0)
 			{
 				ui_mode = UiMode::PresetSaveStub;
@@ -7540,11 +7093,6 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			record_pos = 0;
 			playback_active = false;
 			record_anim_start_ms = NowMs();
-			// Deferred logging
-			char defer_msg[96];
-			snprintf(defer_msg, sizeof(defer_msg), "Record: entered (monitor ON), max %ld s @48k mono",
-					static_cast<long>(kRecordMaxSeconds));
-			DeferLog(defer_msg);
 		}
 		else if (encoder_r_pressed && menu_index == 2)
 		{
@@ -7755,11 +7303,6 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			if (encoder_r_pressed)
 			{
 				record_input = (record_source_index == 1) ? RecordInput::Mic : RecordInput::LineIn;
-				// Deferred logging
-				char defer_msg[96];
-				snprintf(defer_msg, sizeof(defer_msg), "Record input set: %s",
-						(record_input == RecordInput::Mic) ? "MIC (R)" : "LINE IN (L)");
-				DeferLog(defer_msg);
 				record_state = RecordState::Armed;
 				record_anim_start_ms = -1.0;
 				encoder_r_consumed = true;
@@ -7809,10 +7352,6 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					UpdateTrimFrames();
 					request_length_redraw = true;
 				}
-				// Deferred logging
-				char defer_msg[96];
-				snprintf(defer_msg, sizeof(defer_msg), "Record: stop, frames=%lu", static_cast<unsigned long>(sample_length));
-				DeferLog(defer_msg);
 				RequestAudioCmd(kCmdRecStop);
 			}
 			else if (record_state == RecordState::Review && sample_loaded)
@@ -7959,16 +7498,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			}
 			else
 			{
-				int32_t next = perform_index + encoder_l_inc;
-				while (next < 0)
-				{
-					next += kPerformBoxCount;
-				}
-				while (next >= kPerformBoxCount)
-				{
-					next -= kPerformBoxCount;
-				}
-				perform_index = next;
+				perform_index = NextPerformIndex(perform_index, encoder_l_inc);
 			}
 		}
 		if (encoder_r_pressed)
@@ -8253,7 +7783,6 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			{
 				midi_ignore_until_ms = now_ms + 200;
 			}
-			request_perform_redraw = true;
 		}
 	}
 	else if (!ui_blocked && ui_mode == UiMode::FxDetail)
@@ -8528,7 +8057,6 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			{
 				midi_ignore_until_ms = now_ms + 200;
 			}
-			request_perform_redraw = true;
 		}
 	}
 	else if (!ui_blocked && ui_mode == UiMode::Play)
@@ -8752,23 +8280,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	}
 	// Apply queued MIDI note commands in audio thread (low latency).
 	MidiCmd c;
-	const uint32_t now_ms = System::GetNow();
-	if (g_midi_note_latency_window_start_ms == 0)
-	{
-		g_midi_note_latency_window_start_ms = now_ms;
-	}
-	if ((uint32_t)(now_ms - g_midi_note_latency_window_start_ms) >= 1000U)
-	{
-		g_midi_note_latency_window_start_ms = now_ms;
-		g_midi_note_latency_max_ms = 0;
-	}
 	while (MidiCmdPopAudio(c))
 	{
-		const uint32_t lat = now_ms - c.t_ms;
-		if (lat > g_midi_note_latency_max_ms)
-		{
-			g_midi_note_latency_max_ms = lat;
-		}
 		if (record_state == RecordState::Recording)
 		{
 			continue;
@@ -9610,14 +9123,8 @@ static float last_chorus_wow = -1.0f;
 				record_waveform_pending = true;
 				if (sample_loaded)
 				{
-					ComputeWaveform();
-					waveform_ready = true;
-					waveform_dirty = true;
-					UpdateTrimFrames();
 					request_length_redraw = true;
 				}
-				LogLine("Record: auto-stop at max frames=%lu",
-						static_cast<unsigned long>(sample_length));
 			}
 		}
 		if (sample_loaded && playback_active && record_state != RecordState::Recording && window_valid)
@@ -10056,9 +9563,6 @@ int main(void)
 	hw.SetAudioBlockSize(48); // number of samples handled per callback
 	hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 	UpdateMasterFxTailSamples(hw.AudioSampleRate());
-	hw.seed.StartLog(false);
-	LogLine("Logger started");
-
 	reverb.Init(hw.AudioSampleRate());
 	reverb.SetFeedback(kReverbFeedback);
 	reverb.SetLpFreq(kReverbLpFreq);
@@ -10193,8 +9697,6 @@ int main(void)
 	bool last_playback_active = false;
 	uint8_t last_cpu_pct = 0;
 	int32_t last_playhead_step = -1;
-	uint32_t last_perform_playhead_ms = 0;
-	bool last_perform_playhead_active = false;
 	uint32_t last_edt_playhead_ms = 0;
 	bool last_edt_playhead_active = false;
 	LoadDestination last_load_target = LoadDestination::Play;
@@ -10213,62 +9715,14 @@ int main(void)
 			}
 		}
 
-		// Service deferred logs from AudioCallback
-		while (true)
 		{
-			char local_msg[kLogBufSize];
-			bool has_msg = false;
-			__disable_irq();
-			if (g_log_head != g_log_tail)
-			{
-				strncpy(local_msg, (const char*)g_log_ring[g_log_tail].buf, kLogBufSize - 1);
-				local_msg[kLogBufSize - 1] = '\0';
-				g_log_tail = (g_log_tail + 1) % kLogRingSize;
-				has_msg = true;
-			}
-			__enable_irq();
-			
-			if (!has_msg) break;
-			LogLine("%s", local_msg);
-		}
-		while (true)
-		{
-			LogEvent evt = {};
-			bool has_evt = false;
-			{
-				daisy::ScopedIrqBlocker irq;
-				if (g_logevt_head != g_logevt_tail)
-				{
-					evt = g_logevt_ring[g_logevt_tail];
-					g_logevt_tail = (g_logevt_tail + 1) % kLogEvtRingSize;
-					has_evt = true;
-				}
-			}
-			if (!has_evt)
-			{
-				break;
-			}
-			switch (evt.type)
-			{
-				case LogEventType::RecordAutoStop:
-				{
-					char msg[96];
-					snprintf(msg, sizeof(msg), "Record: auto-stop at max frames=%ld",
-						static_cast<long>(evt.a));
-					LogLine("%s", msg);
-				}
-				break;
-				default:
-					break;
-			}
-		}
-
-		{
-			uint32_t now = System::GetNow();
+			const uint32_t now = System::GetNow();
+			const bool playback_busy = playhead_running || playback_active || AnyPerformVoiceActive();
+			const uint32_t ui_tick_ms = playback_busy ? kUiTickPlaybackMs : kUiTickMs;
 			int32_t loops = 0;
-			while ((int32_t)(now - last_ui_ms) >= 1 && loops < 4)
+			while ((int32_t)(now - last_ui_ms) >= (int32_t)ui_tick_ms && loops < 4)
 			{
-				last_ui_ms += 1;
+				last_ui_ms += ui_tick_ms;
 				int32_t enc_l_inc = 0;
 				int32_t enc_r_inc = 0;
 				uint32_t ev = 0;
@@ -10320,15 +9774,9 @@ int main(void)
 			}
 		}
 
-		int32_t aux_delta = 0;
 		if (encoder_r_accum != 0)
 		{
-			aux_delta = encoder_r_accum;
 			encoder_r_accum = 0;
-		}
-		if (aux_delta != 0 && UiLogEnabled())
-		{
-			LogLine("Encoder R delta=%ld", static_cast<long>(aux_delta));
 		}
 		const bool play_ui = IsPlayUiMode(ui_mode);
 		int32_t current_step = playhead_step;
@@ -10363,10 +9811,6 @@ int main(void)
 		if (encoder_r_button_press)
 		{
 			encoder_r_button_press = false;
-			if (UiLogEnabled())
-			{
-				LogLine("Encoder R button pressed");
-			}
 		}
 		const bool ui_blocked = (sd_init_in_progress || save_in_progress);
 		if (button2_press)
@@ -10406,10 +9850,6 @@ int main(void)
 					 && ui_mode != UiMode::Load
 					 && ui_mode != UiMode::LoadTarget)
 			{
-				if (UiLogEnabled())
-				{
-					LogLine("Button1: playback request (unpitched)");
-				}
 				if (IsPerformUiMode(ui_mode))
 				{
 					StartPerformVoice(kBaseMidiNote);
@@ -10425,6 +9865,7 @@ int main(void)
 		if (request_load_scan)
 		{
 			request_load_scan = false;
+			load_scan_start_ms = System::GetNow();
 			list_build_pending = true;
 		}
 		if (list_build_pending)
@@ -10456,13 +9897,11 @@ int main(void)
 			{
 				request_load_sample = false;
 				request_load_index = -1;
-				LogLine("Load menu: sample request ignored during UI block");
 			}
 			else if (kLoadPresetsPlaceholder && load_context == LoadContext::Main && !delete_mode)
 			{
 				request_load_sample = false;
 				request_load_index = -1;
-				LogLine("Load menu: sample request ignored (presets placeholder)");
 			}
 			else
 			{
@@ -10484,16 +9923,11 @@ int main(void)
 					target_ctx = SampleContext::Perform;
 				}
 				SetSampleContext(target_ctx);
-				LogLine("Load menu: sample request index=%ld target=%s",
-						static_cast<long>(index),
-						LoadDestinationName(dest));
 				if (index >= 0 && index < wav_file_count)
 				{
-					LogLine("Load menu: sample name=%s", wav_files[index]);
 				}
 				else
 				{
-					LogLine("Load menu: sample name unavailable (count=%ld)", static_cast<long>(wav_file_count));
 				}
 				if (LoadSampleAtIndex(index))
 				{
@@ -10507,13 +9941,10 @@ int main(void)
 							track_samples[track].trim_start = trim_start;
 							track_samples[track].trim_end = trim_end;
 						}
-						LogLine("Load success, entering TRACK menu");
 						ui_mode = UiMode::PlayTrack;
-						request_perform_redraw = true;
 					}
 					else if (load_context == LoadContext::Edt)
 					{
-						LogLine("Load success, returning to EDT");
 						ui_mode = UiMode::Edt;
 						if (sample_loaded && sample_length > 0)
 						{
@@ -10524,20 +9955,17 @@ int main(void)
 					}
 					else if (dest == LoadDestination::Perform)
 					{
-						LogLine("Load success, entering PERFORM menu");
 						ui_mode = UiMode::Perform;
 						menu_index = 2;
 					}
 					else
 					{
-						LogLine("Load success, entering PLAY menu");
 						ui_mode = UiMode::Play;
 					}
 					load_context = LoadContext::Main;
 				}
 				else
 				{
-					LogLine("Load failed");
 					ui_mode = UiMode::Load;
 					if (load_context != LoadContext::Track)
 					{
@@ -10552,7 +9980,6 @@ int main(void)
 			{
 				request_track_sample_load = false;
 				request_track_sample_index = -1;
-				LogLine("Track sample load ignored during UI block");
 			}
 			else
 			{
@@ -10562,7 +9989,6 @@ int main(void)
 				if (perform_context == PerformContext::Track && track == perform_context_track)
 				{
 					ApplyTrackSampleState(track);
-					request_perform_redraw = true;
 				}
 			}
 		}
@@ -10600,32 +10026,26 @@ int main(void)
 			{
 				request_delete_file = false;
 				request_delete_index = -1;
-				LogLine("Delete menu: request ignored during UI block");
 			}
 			else
 			{
 				request_delete_file = false;
 				const int32_t index = request_delete_index;
 				request_delete_index = -1;
-				LogLine("Delete menu: request index=%ld", static_cast<long>(index));
 				if (index >= 0 && index < wav_file_count)
 				{
-					LogLine("Delete menu: file name=%s", wav_files[index]);
 				}
 				else
 				{
-					LogLine("Delete menu: file name unavailable (count=%ld)", static_cast<long>(wav_file_count));
 				}
 				if (DeleteFileAtIndex(index))
 				{
-					LogLine("Delete success");
 					request_delete_scan = true;
 					delete_confirm = false;
 					request_delete_redraw = true;
 				}
 				else
 				{
-					LogLine("Delete failed");
 					delete_confirm = false;
 					request_delete_redraw = true;
 				}
@@ -10837,7 +10257,6 @@ int main(void)
 			{
 				record_anim_start_ms = -1.0;
 			}
-			LogLine("UI mode: %s", UiModeName(mode));
 			if (mode == UiMode::Perform)
 			{
 				midi_ignore_until_ms = System::GetNow() + 200;
@@ -10863,11 +10282,6 @@ int main(void)
 				else
 				{
 					DrawLoadMenu(load_scroll, load_selected);
-					LogLine("Load menu: selected=%ld name=%s",
-							static_cast<long>(load_selected),
-							(load_selected >= 0 && load_selected < wav_file_count)
-								? wav_files[load_selected]
-								: "UNKNOWN");
 				}
 			}
 			else if (mode == UiMode::LoadModeSelect)
@@ -10882,10 +10296,6 @@ int main(void)
 			{
 				play_screen_dirty = true;
 				DrawPlayScreen();
-			}
-			else if (mode == UiMode::PlayTrack)
-			{
-				request_perform_redraw = true;
 			}
 			else if (mode == UiMode::Edt)
 			{
@@ -10912,12 +10322,31 @@ int main(void)
 								  amp_fader_index,
 								  flt_select_active,
 								  flt_fader_index);
+				const float amp_vals[kPerformFaderCount]
+					= {amp_attack, amp_decay, amp_sustain, amp_release};
+				const float flt_vals[kPerformFltFaderCount] = {flt_cutoff, flt_res};
+				for (int i = 0; i < kPerformFaderCount; ++i)
+				{
+					last_perform_amp_vals[i] = amp_vals[i];
+					last_perform_fx_order[i] = fx_chain_order[i];
+					last_perform_fx_vals[i] = FxWetValue(fx_chain_order[i]);
+				}
+				for (int i = 0; i < kPerformFltFaderCount; ++i)
+				{
+					last_perform_flt_vals[i] = flt_vals[i];
+				}
+				last_perform_fx_select_active = fx_select_active;
+				last_perform_amp_select_active = amp_select_active;
+				last_perform_flt_select_active = flt_select_active;
+				last_perform_fx_selected = fx_fader_index;
+				last_perform_amp_selected = amp_fader_index;
+				last_perform_flt_selected = flt_fader_index;
+				last_perform_index = perform_index;
+				perform_redraw_next_ms = System::GetNow() + kPerformPlayheadIntervalMs;
 			}
 			else if (mode == UiMode::LoadTarget)
 			{
 				DrawLoadTargetMenu(load_target_selected);
-				LogLine("Load target: %s",
-						LoadDestinationName(load_target_selected));
 			}
 			else if (mode == UiMode::Shift)
 			{
@@ -10977,9 +10406,6 @@ int main(void)
 			const int32_t current = menu_index;
 			if (current != last_menu)
 			{
-				LogLine("Menu highlight: %s (%ld)",
-						MenuLabelForIndex(current),
-						static_cast<long>(current));
 				DrawMenu(current);
 				last_menu = current;
 			}
@@ -10987,23 +10413,133 @@ int main(void)
 		else if (mode == UiMode::Perform || mode == UiMode::PlayTrack)
 		{
 			const int32_t current = perform_index;
-			if (request_perform_redraw || current != last_perform_index)
+			const bool fx_select_active = (current == kPerformFxIndex)
+				&& fx_window_active;
+			const bool amp_select_active = (current == kPerformAmpIndex)
+				&& amp_window_active;
+			const bool flt_select_active = (current == kPerformFltIndex)
+				&& flt_window_active;
+
+			bool amp_changed = false;
+			const float amp_vals[kPerformFaderCount]
+				= {amp_attack, amp_decay, amp_sustain, amp_release};
+			for (int i = 0; i < kPerformFaderCount; ++i)
+			{
+				if (amp_vals[i] != last_perform_amp_vals[i])
+				{
+					amp_changed = true;
+					break;
+				}
+			}
+			bool flt_changed = false;
+			const float flt_vals[kPerformFltFaderCount] = {flt_cutoff, flt_res};
+			for (int i = 0; i < kPerformFltFaderCount; ++i)
+			{
+				if (flt_vals[i] != last_perform_flt_vals[i])
+				{
+					flt_changed = true;
+					break;
+				}
+			}
+			bool fx_changed = false;
+			int32_t fx_order[kPerformFaderCount];
+			float fx_vals[kPerformFaderCount];
+			for (int i = 0; i < kPerformFaderCount; ++i)
+			{
+				fx_order[i] = fx_chain_order[i];
+				fx_vals[i] = FxWetValue(fx_order[i]);
+				if (fx_order[i] != last_perform_fx_order[i]
+					|| fx_vals[i] != last_perform_fx_vals[i])
+				{
+					fx_changed = true;
+				}
+			}
+
+			const bool selection_changed = (current != last_perform_index);
+			const bool fx_select_changed
+				= (fx_select_active != last_perform_fx_select_active)
+				|| (fx_fader_index != last_perform_fx_selected);
+			const bool amp_select_changed
+				= (amp_select_active != last_perform_amp_select_active)
+				|| (amp_fader_index != last_perform_amp_selected);
+			const bool flt_select_changed
+				= (flt_select_active != last_perform_flt_select_active)
+				|| (flt_fader_index != last_perform_flt_selected);
+
+			uint8_t redraw_mask = 0;
+			if (selection_changed)
+			{
+				redraw_mask |= (1u << current);
+				if (last_perform_index >= 0)
+				{
+					redraw_mask |= (1u << last_perform_index);
+				}
+			}
+			if (amp_changed || amp_select_changed)
+			{
+				redraw_mask |= (1u << kPerformAmpIndex);
+			}
+			if (flt_changed || flt_select_changed)
+			{
+				redraw_mask |= (1u << kPerformFltIndex);
+			}
+			if (fx_changed || fx_select_changed)
+			{
+				redraw_mask |= (1u << kPerformFxIndex);
+			}
+			if (selection_changed && current == kPerformEdtIndex)
+			{
+				redraw_mask |= (1u << kPerformEdtIndex);
+			}
+			if (!selection_changed && current == kPerformEdtIndex
+				&& last_perform_index == kPerformEdtIndex)
+			{
+				// Keep EDT highlight accurate if select state flips.
+				redraw_mask |= (1u << kPerformEdtIndex);
+			}
+
+			if (request_perform_redraw && redraw_mask == 0)
+			{
+				redraw_mask = 0x0F;
+			}
+
+			if (redraw_mask != 0)
+			{
+				const uint32_t now = System::GetNow();
+				if (now >= perform_redraw_next_ms)
+				{
+					DrawPerformScreen(current,
+									  fx_select_active,
+									  fx_fader_index,
+									  amp_select_active,
+									  amp_fader_index,
+									  flt_select_active,
+									  flt_fader_index,
+									  redraw_mask);
+					perform_redraw_next_ms = now + kPerformPlayheadIntervalMs;
+					for (int i = 0; i < kPerformFaderCount; ++i)
+					{
+						last_perform_amp_vals[i] = amp_vals[i];
+						last_perform_fx_order[i] = fx_order[i];
+						last_perform_fx_vals[i] = fx_vals[i];
+					}
+					for (int i = 0; i < kPerformFltFaderCount; ++i)
+					{
+						last_perform_flt_vals[i] = flt_vals[i];
+					}
+					last_perform_fx_select_active = fx_select_active;
+					last_perform_amp_select_active = amp_select_active;
+					last_perform_flt_select_active = flt_select_active;
+					last_perform_fx_selected = fx_fader_index;
+					last_perform_amp_selected = amp_fader_index;
+					last_perform_flt_selected = flt_fader_index;
+					last_perform_index = current;
+					request_perform_redraw = false;
+				}
+			}
+			else
 			{
 				request_perform_redraw = false;
-				const bool fx_select_active = (current == kPerformFxIndex)
-					&& fx_window_active;
-				const bool amp_select_active = (current == kPerformAmpIndex)
-					&& amp_window_active;
-				const bool flt_select_active = (current == kPerformFltIndex)
-					&& flt_window_active;
-				DrawPerformScreen(current,
-								  fx_select_active,
-								  fx_fader_index,
-								  amp_select_active,
-								  amp_fader_index,
-								  flt_select_active,
-								  flt_fader_index);
-				last_perform_index = current;
 			}
 		}
 		else if (mode == UiMode::FxDetail)
@@ -11059,11 +10595,6 @@ int main(void)
 					DrawLoadMenu(current_scroll, current_selected);
 					if (current_selected != last_selected || current_count != last_file_count)
 					{
-						LogLine("Load menu: selected=%ld name=%s",
-								static_cast<long>(current_selected),
-								(current_selected >= 0 && current_selected < current_count)
-									? wav_files[current_selected]
-									: "UNKNOWN");
 					}
 					last_scroll = current_scroll;
 					last_selected = current_selected;
@@ -11154,29 +10685,6 @@ int main(void)
 		{
 			DrawRecordBackConfirm();
 		}
-		const bool perform_playhead_active = (!ui_blocked
-			&& (mode == UiMode::Perform || mode == UiMode::PlayTrack)
-			&& perform_index == kPerformEdtIndex
-			&& (playback_active || AnyPerformVoiceActive()));
-		if (perform_playhead_active)
-		{
-			const uint32_t now = System::GetNow();
-			if (!last_perform_playhead_active)
-			{
-				last_perform_playhead_ms = now;
-				request_perform_redraw = true;
-			}
-			else if ((now - last_perform_playhead_ms) >= kPerformPlayheadIntervalMs)
-			{
-				last_perform_playhead_ms = now;
-				request_perform_redraw = true;
-			}
-		}
-		else
-		{
-			last_perform_playhead_ms = 0;
-		}
-		last_perform_playhead_active = perform_playhead_active;
 		const bool edt_playhead_active = (!ui_blocked
 			&& mode == UiMode::Edt
 			&& playback_active);
@@ -11226,13 +10734,6 @@ int main(void)
 		if (request_playback_stop_log)
 		{
 			request_playback_stop_log = false;
-			if (UiLogEnabled())
-			{
-				LogLine("Playback: stopped (win=[%lu,%lu) phase=%.3f)",
-						static_cast<unsigned long>(sample_play_start),
-						static_cast<unsigned long>(sample_play_end),
-						static_cast<double>(playback_phase));
-			}
 		}
 		if (IsPlayUiMode(ui_mode))
 		{
