@@ -9613,6 +9613,11 @@ static float last_chorus_wow = -1.0f;
 	static uint32_t drop_rng = 0x12345678;
 	static float reverb_tail_gain = 0.0f;
 
+	const bool play_mode = (flags_bits & kFlagInPlayMode) != 0;
+	const bool perform_mode = (flags_bits & kFlagInEditorMode) != 0;
+	const bool main_mode = (flags_bits & kFlagInMainMode) != 0;
+	const bool fx_allowed = (flags_bits & kFlagFxAllowed) != 0;
+
 	const int32_t sat_mode_local = cached_sat_mode;
 	const float sat_mix = cached_sat_mix;
 	const bool sat_active = (sat_mix > kFxParamEpsilon);
@@ -9672,16 +9677,17 @@ static float last_chorus_wow = -1.0f;
 		delay_spread_smoothed = cached_delay_spread;
 	}
 	delay_spread_smoothed += (cached_delay_spread - delay_spread_smoothed) * param_alpha;
-	if (fabsf(delay_time_smoothed - last_delay_time) > kFxParamEpsilon)
+	float delay_set = delay_time_smoothed;
+	if (perform_mode)
 	{
-		delay_line_l.SetDelay(delay_time_smoothed);
-		delay_line_r.SetDelay(delay_time_smoothed);
-		last_delay_time = delay_time_smoothed;
+		delay_set = roundf(delay_set);
 	}
-	const bool play_mode = (flags_bits & kFlagInPlayMode) != 0;
-	const bool perform_mode = (flags_bits & kFlagInEditorMode) != 0;
-	const bool main_mode = (flags_bits & kFlagInMainMode) != 0;
-	const bool fx_allowed = (flags_bits & kFlagFxAllowed) != 0;
+	if (fabsf(delay_set - last_delay_time) > kFxParamEpsilon)
+	{
+		delay_line_l.SetDelay(delay_set);
+		delay_line_r.SetDelay(delay_set);
+		last_delay_time = delay_set;
+	}
 	const bool playback_env_active = perform_mode;
 	const bool poly_env_active = perform_mode || play_mode;
 	const float amp_attack_ms = AmpEnvMsFromFader(params.amp_attack);
@@ -9847,7 +9853,7 @@ static float last_chorus_wow = -1.0f;
 
 	auto apply_chorus = [&](float &l, float &r)
 	{
-		if (perform_mode && chorus_mix <= kFxParamEpsilon)
+		if (chorus_mix <= kFxParamEpsilon)
 		{
 			return;
 		}
@@ -9924,9 +9930,9 @@ static float last_chorus_wow = -1.0f;
 
 	auto apply_delay = [&](float &l, float &r)
 	{
-		if (perform_mode
-			&& cached_delay_wet <= kFxParamEpsilon
-			&& cached_delay_freeze < 0.5f)
+		if (delay_mix <= kFxParamEpsilon
+			&& cached_delay_freeze < 0.5f
+			&& delay_feedback_smoothed <= 0.001f)
 		{
 			return;
 		}
@@ -9974,7 +9980,8 @@ static float last_chorus_wow = -1.0f;
 
 	auto apply_reverb = [&](float &l, float &r)
 	{
-		if (perform_mode && cached_reverb_wet <= kFxParamEpsilon)
+		if (cached_reverb_wet <= kFxParamEpsilon
+			&& reverb_tail_gain <= 1e-3f)
 		{
 			return;
 		}
@@ -10573,10 +10580,12 @@ static float last_chorus_wow = -1.0f;
 		}
 		float fx_l = sig_l;
 		float fx_r = sig_r;
-		const bool chorus_active = !perform_mode || (chorus_mix > kFxParamEpsilon);
-		const bool delay_active = !perform_mode
-			|| (cached_delay_wet > kFxParamEpsilon || cached_delay_freeze >= 0.5f);
-		const bool reverb_active = !perform_mode || (cached_reverb_wet > kFxParamEpsilon);
+		const bool chorus_active = (chorus_mix > kFxParamEpsilon);
+		const bool delay_active = (delay_mix > kFxParamEpsilon)
+			|| (cached_delay_freeze >= 0.5f)
+			|| (delay_feedback_smoothed > 0.001f);
+		const bool reverb_active = (cached_reverb_wet > kFxParamEpsilon)
+			|| (reverb_tail_gain > 1e-3f);
 		if (play_master_fx)
 		{
 			const float mod_in_mag = fabsf(mod_send_l) + fabsf(mod_send_r);
@@ -10616,10 +10625,7 @@ static float last_chorus_wow = -1.0f;
 				  && !delay_active
 				  && !reverb_active))
 			{
-				if (sat_active)
-				{
-					apply_saturation_master(fx_l, fx_r);
-				}
+				apply_saturation_master(fx_l, fx_r);
 				float mod_out_l = 0.0f;
 				float mod_out_r = 0.0f;
 				if (mod_active)
