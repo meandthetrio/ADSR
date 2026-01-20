@@ -10118,6 +10118,8 @@ static float last_chorus_wow = -1.0f;
 	{
 		float sig_l = 0.0f;
 		float sig_r = 0.0f;
+		float voice_sum_l = 0.0f;
+		float voice_sum_r = 0.0f;
 		float mod_send_l = 0.0f;
 		float mod_send_r = 0.0f;
 		float delay_send_l = 0.0f;
@@ -10126,6 +10128,12 @@ static float last_chorus_wow = -1.0f;
 		float reverb_send_r = 0.0f;
 		auto add_voice = [&](float v_l, float v_r, int32_t track)
 		{
+			if (perform_mode)
+			{
+				voice_sum_l += v_l;
+				voice_sum_r += v_r;
+				return;
+			}
 			sig_l += v_l;
 			sig_r += v_r;
 			if (play_master_fx && track >= 0 && track < kPlayTrackCount)
@@ -10566,6 +10574,12 @@ static float last_chorus_wow = -1.0f;
 				}
 			}
 		}
+		// PERFORM: voice sum (dry)
+		if (perform_mode)
+		{
+			sig_l += voice_sum_l;
+			sig_r += voice_sum_r;
+		}
 		if (preview_active)
 		{
 			size_t read_idx = preview_read_index;
@@ -10700,6 +10714,10 @@ static float last_chorus_wow = -1.0f;
 		}
 		else
 		{
+			if (perform_mode)
+			{
+				// PERFORM: master FX chain
+			}
 			for (int stage = 0; stage < kEditorFaderCount; ++stage)
 			{
 				switch (fx_order[stage])
