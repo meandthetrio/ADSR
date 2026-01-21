@@ -292,7 +292,6 @@ constexpr float kReverbDampDefault =
 	(kReverbDampMaxHz - kReverbLpFreq) / (kReverbDampMaxHz - kReverbDampMinHz);
 constexpr float kReverbDefaultWet = 0.0f;
 constexpr float kReverbWetStep = 0.02f;
-constexpr float kReverbShimmerStep = 0.02f;
 constexpr float kShimmerHpHz = 900.0f;
 constexpr size_t kShimmerBufferSize = 8192;
 constexpr size_t kShimmerDelaySamples = 2048;
@@ -938,6 +937,7 @@ volatile bool sample_loaded = false;
 volatile bool playback_active = false;
 volatile float playback_rate = 1.0f;
 volatile float playback_phase = 0.0f;
+volatile float playback_reverse = 0.0f;
 volatile float playback_amp = 0.0f;
 volatile uint32_t playback_env_samples = 0;
 volatile bool playback_release_active = false;
@@ -1320,7 +1320,7 @@ volatile float reverb_wet = kReverbDefaultWet;
 volatile float reverb_pre = 0.5f;
 volatile float reverb_damp = 0.5f;
 volatile float reverb_decay = 0.5f;
-volatile float reverb_shimmer = 0.5f;
+volatile float reverb_shimmer = 0.0f;
 volatile float delay_wet = kDelayDefaultWet;
 volatile float delay_time = 0.5f;
 volatile float delay_feedback = 0.5f;
@@ -6561,9 +6561,9 @@ static void DrawFxDetailScreen(int32_t index)
 		const int fader_w = kDisplayW - (kMargin * 2);
 		if (fader_w > 4)
 		{
-			const char* fader_labels[kReverbFaderCount] = {"Pre", "Dmp", "Dcy", "Wet", "Shm"};
+			const char* fader_labels[kReverbFaderCount] = {"Pre", "Dmp", "Dcy", "DIR", "Wet"};
 			const float fader_values[kReverbFaderCount]
-				= {reverb_pre, reverb_damp, reverb_decay, reverb_wet, reverb_shimmer};
+				= {reverb_pre, reverb_damp, reverb_decay, playback_reverse, reverb_wet};
 			int param_index = fx_detail_param_index;
 			const bool fader_select_active
 				= (param_index >= 0 && param_index < kReverbFaderCount);
@@ -6571,6 +6571,8 @@ static void DrawFxDetailScreen(int32_t index)
 			{
 				param_index = 0;
 			}
+			const bool hide_handles[kReverbFaderCount] = {false, false, false, true, false};
+			const bool hide_rails[kReverbFaderCount] = {false, false, false, true, false};
 			const int fader_offsets[kReverbFaderCount] = {0, 1, -1, 0, 0};
 			DrawVerticalFadersInRect(fader_x,
 									 block_y,
@@ -6583,8 +6585,131 @@ static void DrawFxDetailScreen(int32_t index)
 									 param_index,
 									 fader_offsets,
 									 nullptr,
-									 nullptr,
-									 nullptr);
+									 hide_rails,
+									 hide_handles);
+			// REV status box.
+			const int label_y = block_y + block_h - Font5x7::H - 1;
+			const int line_top = block_y + 2;
+			const int line_bottom = label_y - 2;
+			const int fader_left = fader_x + 2;
+			const int fader_right = fader_x + fader_w - 3;
+			const int span_x = fader_right - fader_left;
+			int line_x = fader_left;
+			if (kReverbFaderCount > 1 && span_x > 0)
+			{
+				line_x = fader_left + (span_x * 3) / (kReverbFaderCount - 1);
+			}
+			const char* label = "DIR";
+			const int label_w = TinyStringWidth(label);
+			int label_x = line_x - (label_w / 2);
+			if (label_x < fader_x + 1)
+			{
+				label_x = fader_x + 1;
+			}
+			if (label_x + label_w > fader_x + fader_w - 2)
+			{
+				label_x = fader_x + fader_w - 2 - label_w;
+			}
+			line_x = label_x + (label_w / 2);
+			const bool reverse_on = (playback_reverse >= 0.5f);
+			const char* on_label = "REV";
+			const char* off_label = "FOR";
+			const int on_w = TinyStringWidth(on_label);
+			const int off_w = TinyStringWidth(off_label);
+			const int text_y_on = line_top + 1;
+			const int text_y_off = text_y_on + Font5x7::H + 2;
+			const int text_bottom = text_y_off + Font5x7::H + 1;
+			const int text_x_on = line_x - (on_w / 2);
+			const int text_x_off = line_x - (off_w / 2);
+			if (reverse_on)
+			{
+				display.DrawRect(text_x_on - 1,
+								 text_y_on - 1,
+								 text_x_on + on_w,
+								 text_y_on + Font5x7::H,
+								 true,
+								 true);
+				DrawTinyString(on_label, text_x_on, text_y_on, false);
+				DrawTinyString(off_label, text_x_off, text_y_off, true);
+			}
+			else
+			{
+				DrawTinyString(on_label, text_x_on, text_y_on, true);
+				display.DrawRect(text_x_off - 1,
+								 text_y_off - 1,
+								 text_x_off + off_w,
+								 text_y_off + Font5x7::H,
+								 true,
+								 true);
+				DrawTinyString(off_label, text_x_off, text_y_off, false);
+			}
+			if (reverse_on)
+			{
+				const int area_left = line_x - 6;
+				const int area_right = line_x + 6;
+				const int area_top = line_top;
+				const int area_bottom = line_bottom;
+				const int area_w = area_right - area_left + 1;
+				const int area_h = area_bottom - area_top + 1;
+				if (area_w > 4 && area_h > 4)
+				{
+					const uint32_t now = System::GetNow();
+					const int icon_top = (text_bottom + 1 > area_top)
+						? (text_bottom + 1)
+						: area_top;
+					const int icon_bottom = area_bottom;
+					const int icon_h = icon_bottom - icon_top + 1;
+					if (icon_h >= 7)
+					{
+						const int cx = line_x + 3;
+						const int cy = icon_top + (icon_h / 2);
+						const int travel = 6;
+						int phase = static_cast<int>((now / 100) % (travel + 2));
+						int shift = travel - phase;
+						if (shift < 0)
+						{
+							shift = travel;
+						}
+						// Bar (left of triangles)
+						display.DrawLine(cx - 8, cy - 3, cx - 8, cy + 3, true);
+						const int tri_shift = shift;
+						// First triangle
+						display.DrawPixel(cx - 1 - tri_shift, cy, true);
+						display.DrawPixel(cx - tri_shift, cy - 1, true);
+						display.DrawPixel(cx - tri_shift, cy, true);
+						display.DrawPixel(cx - tri_shift, cy + 1, true);
+						display.DrawPixel(cx + 1 - tri_shift, cy - 2, true);
+						display.DrawPixel(cx + 1 - tri_shift, cy - 1, true);
+						display.DrawPixel(cx + 1 - tri_shift, cy, true);
+						display.DrawPixel(cx + 1 - tri_shift, cy + 1, true);
+						display.DrawPixel(cx + 1 - tri_shift, cy + 2, true);
+						display.DrawPixel(cx + 2 - tri_shift, cy - 3, true);
+						display.DrawPixel(cx + 2 - tri_shift, cy - 2, true);
+						display.DrawPixel(cx + 2 - tri_shift, cy - 1, true);
+						display.DrawPixel(cx + 2 - tri_shift, cy, true);
+						display.DrawPixel(cx + 2 - tri_shift, cy + 1, true);
+						display.DrawPixel(cx + 2 - tri_shift, cy + 2, true);
+						display.DrawPixel(cx + 2 - tri_shift, cy + 3, true);
+						// Second triangle (overlap)
+						display.DrawPixel(cx + 3 - tri_shift, cy, true);
+						display.DrawPixel(cx + 4 - tri_shift, cy - 1, true);
+						display.DrawPixel(cx + 4 - tri_shift, cy, true);
+						display.DrawPixel(cx + 4 - tri_shift, cy + 1, true);
+						display.DrawPixel(cx + 5 - tri_shift, cy - 2, true);
+						display.DrawPixel(cx + 5 - tri_shift, cy - 1, true);
+						display.DrawPixel(cx + 5 - tri_shift, cy, true);
+						display.DrawPixel(cx + 5 - tri_shift, cy + 1, true);
+						display.DrawPixel(cx + 5 - tri_shift, cy + 2, true);
+						display.DrawPixel(cx + 6 - tri_shift, cy - 3, true);
+						display.DrawPixel(cx + 6 - tri_shift, cy - 2, true);
+						display.DrawPixel(cx + 6 - tri_shift, cy - 1, true);
+						display.DrawPixel(cx + 6 - tri_shift, cy, true);
+						display.DrawPixel(cx + 6 - tri_shift, cy + 1, true);
+						display.DrawPixel(cx + 6 - tri_shift, cy + 2, true);
+						display.DrawPixel(cx + 6 - tri_shift, cy + 3, true);
+					}
+				}
+			}
 		}
 	}
 	RequestDisplayUpdate();
@@ -6667,6 +6792,63 @@ static void DrawRecordTargetScreen(int32_t selected)
 	RequestDisplayUpdate();
 }
 
+static void ApplyPlaybackReverse(bool reverse)
+{
+	const bool current = (playback_reverse >= 0.5f);
+	if (reverse == current)
+	{
+		return;
+	}
+	playback_reverse = reverse ? 1.0f : 0.0f;
+	if (!sample_loaded || sample_length == 0)
+	{
+		return;
+	}
+	size_t window_start = sample_play_start;
+	size_t window_end = sample_play_end;
+	if (window_end > sample_length || window_end == 0)
+	{
+		window_end = sample_length;
+	}
+	if (window_end <= window_start)
+	{
+		window_start = 0;
+		window_end = sample_length;
+	}
+	if (window_end <= window_start + 1)
+	{
+		return;
+	}
+	const float window_len = static_cast<float>(window_end - window_start - 1);
+	const float rel = playback_phase - static_cast<float>(window_start);
+	playback_phase = static_cast<float>(window_start) + (window_len - rel);
+	if (playback_phase < static_cast<float>(window_start))
+	{
+		playback_phase = static_cast<float>(window_start);
+	}
+	if (playback_phase > static_cast<float>(window_end - 1))
+	{
+		playback_phase = static_cast<float>(window_end - 1);
+	}
+	for (auto &voice : perform_voices)
+	{
+		if (!voice.active || voice.length <= 1)
+		{
+			continue;
+		}
+		const float vlen = static_cast<float>(voice.length - 1);
+		voice.phase = vlen - voice.phase;
+		if (voice.phase < 0.0f)
+		{
+			voice.phase = 0.0f;
+		}
+		if (voice.phase > vlen)
+		{
+			voice.phase = vlen;
+		}
+	}
+}
+
 static void StartPlayback(uint8_t note)
 {
 	if (!sample_loaded || sample_length < 1)
@@ -6697,7 +6879,8 @@ static void StartPlayback(uint8_t note)
 	const float semis = static_cast<float>(note - kBaseMidiNote);
 	const float pitch = powf(2.0f, semis / 12.0f);
 	playback_rate = pitch * (static_cast<float>(sample_rate) / hw.AudioSampleRate());
-	playback_phase = static_cast<float>(window_start);
+	const bool reverse = (playback_reverse >= 0.5f);
+	playback_phase = static_cast<float>(reverse ? (window_end - 1) : window_start);
 	playback_active = true;
 }
 
@@ -6731,7 +6914,8 @@ static void StartPlayback(uint8_t note, bool apply_pitch)
 	const float semis = apply_pitch ? static_cast<float>(note - kBaseMidiNote) : 0.0f;
 	const float pitch = powf(2.0f, semis / 12.0f);
 	playback_rate = pitch * (static_cast<float>(sample_rate) / hw.AudioSampleRate());
-	playback_phase = static_cast<float>(window_start);
+	const bool reverse = (playback_reverse >= 0.5f);
+	playback_phase = static_cast<float>(reverse ? (window_end - 1) : window_start);
 	playback_active = true;
 }
 
@@ -7587,7 +7771,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 							reverb_pre = 0.5f;
 							reverb_damp = 0.5f;
 							reverb_decay = 0.5f;
-							reverb_shimmer = 0.5f;
+							reverb_shimmer = 0.0f;
 							reverb_params_initialized = true;
 							fx_params_dirty = true;
 						}
@@ -8081,30 +8265,42 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					= {kReverbParamStep,
 					   kReverbParamStep,
 					   kReverbParamStep,
-					   kReverbWetStep,
-					   kReverbShimmerStep};
+					   0.0f,
+					   kReverbWetStep};
 				volatile float* targets[kReverbFaderCount]
-					= {&reverb_pre, &reverb_damp, &reverb_decay, &reverb_wet, &reverb_shimmer};
+					= {&reverb_pre, &reverb_damp, &reverb_decay, &playback_reverse, &reverb_wet};
 				const int idx = fx_detail_param_index;
 				if (idx >= 0 && idx < kReverbFaderCount)
 				{
-					const float step = steps[idx];
-					volatile float* target = targets[idx];
-					const float current = *target;
-					float next = current + (static_cast<float>(fx_r_inc) * step);
-					if (next < 0.0f)
+					if (idx == 3)
 					{
-						next = 0.0f;
+						const bool reverse_on = (playback_reverse >= 0.5f);
+						if (fx_r_inc != 0)
+						{
+							ApplyPlaybackReverse(!reverse_on);
+							request_fx_detail_redraw = true;
+						}
 					}
-					if (next > 1.0f)
+					else
 					{
-						next = 1.0f;
-					}
-					if (next != current)
-					{
-						*target = next;
-						request_fx_detail_redraw = true;
-						fx_params_dirty = true;
+						const float step = steps[idx];
+						volatile float* target = targets[idx];
+						const float current = *target;
+						float next = current + (static_cast<float>(fx_r_inc) * step);
+						if (next < 0.0f)
+						{
+							next = 0.0f;
+						}
+						if (next > 1.0f)
+						{
+							next = 1.0f;
+						}
+						if (next != current)
+						{
+							*target = next;
+							request_fx_detail_redraw = true;
+							fx_params_dirty = true;
+						}
 					}
 				}
 			}
@@ -9212,6 +9408,7 @@ static float last_chorus_wow = -1.0f;
 				}
 			}
 		}
+		const bool reverse_playback = (playback_reverse >= 0.5f);
 		if (sample_loaded && playback_active && record_state != RecordState::Recording && window_valid)
 		{
 			float amp_env = 1.0f;
@@ -9229,7 +9426,15 @@ static float last_chorus_wow = -1.0f;
 				float release_env = 1.0f;
 				if (amp_release_samples > 1.0f && playback_rate > 0.0f)
 				{
-					float remaining = (static_cast<float>(window_end) - playback_phase) / playback_rate;
+					float remaining = 0.0f;
+					if (reverse_playback)
+					{
+						remaining = (playback_phase - static_cast<float>(window_start)) / playback_rate;
+					}
+					else
+					{
+						remaining = (static_cast<float>(window_end) - playback_phase) / playback_rate;
+					}
 					if (remaining < 0.0f)
 					{
 						remaining = 0.0f;
@@ -9280,7 +9485,7 @@ static float last_chorus_wow = -1.0f;
 			else
 			{
 				const size_t idx = static_cast<size_t>(playback_phase);
-				if (idx + 1 < window_end)
+				if (!reverse_playback && idx + 1 < window_end)
 				{
 					const float frac = playback_phase - static_cast<float>(idx);
 					const float l0 = static_cast<float>(sample_buffer_l[idx]);
@@ -9300,6 +9505,41 @@ static float last_chorus_wow = -1.0f;
 						playback_active = false;
 						request_playback_stop_log = true;
 					}
+				}
+				else if (reverse_playback && idx > window_start)
+				{
+					const float frac = playback_phase - static_cast<float>(idx);
+					const float l0 = static_cast<float>(sample_buffer_l[idx]);
+					const float l1 = static_cast<float>(sample_buffer_l[idx - 1]);
+					const float r0 = static_cast<float>(sample_buffer_r[idx]);
+					const float r1 = static_cast<float>(sample_buffer_r[idx - 1]);
+					sig_l = (l0 + (l1 - l0) * frac) * kSampleScale * playback_amp;
+					sig_r = (r0 + (r1 - r0) * frac) * kSampleScale * playback_amp;
+					if (amp_env_active)
+					{
+						sig_l *= amp_env;
+						sig_r *= amp_env;
+					}
+					playback_phase -= playback_rate;
+					if (playback_phase <= static_cast<float>(window_start))
+					{
+						playback_active = false;
+						request_playback_stop_log = true;
+					}
+				}
+				else if (reverse_playback && idx == window_start)
+				{
+					const float l0 = static_cast<float>(sample_buffer_l[idx]);
+					const float r0 = static_cast<float>(sample_buffer_r[idx]);
+					sig_l = l0 * kSampleScale * playback_amp;
+					sig_r = r0 * kSampleScale * playback_amp;
+					if (amp_env_active)
+					{
+						sig_l *= amp_env;
+						sig_r *= amp_env;
+					}
+					playback_active = false;
+					request_playback_stop_log = true;
 				}
 				else
 				{
@@ -9403,22 +9643,50 @@ static float last_chorus_wow = -1.0f;
 					continue;
 				}
 				const float frac = voice.phase - static_cast<float>(idx_rel);
-				const size_t idx = voice.offset + idx_rel;
+				size_t idx = voice.offset + idx_rel;
 				float l0 = 0.0f;
 				float l1 = 0.0f;
 				float r0 = 0.0f;
 				float r1 = 0.0f;
-				l0 = static_cast<float>(sample_buffer_l[idx]);
-				l1 = static_cast<float>(sample_buffer_l[idx + 1]);
-				if (sample_stereo)
+				if (reverse_playback)
 				{
-					r0 = static_cast<float>(sample_buffer_r[idx]);
-					r1 = static_cast<float>(sample_buffer_r[idx + 1]);
+					idx = voice.offset + (voice.length - 1 - idx_rel);
+					l0 = static_cast<float>(sample_buffer_l[idx]);
+					if (idx > voice.offset)
+					{
+						l1 = static_cast<float>(sample_buffer_l[idx - 1]);
+					}
+					else
+					{
+						l1 = l0;
+					}
+					if (sample_stereo)
+					{
+						r0 = static_cast<float>(sample_buffer_r[idx]);
+						r1 = (idx > voice.offset)
+							? static_cast<float>(sample_buffer_r[idx - 1])
+							: r0;
+					}
+					else
+					{
+						r0 = l0;
+						r1 = l1;
+					}
 				}
 				else
 				{
-					r0 = l0;
-					r1 = l1;
+					l0 = static_cast<float>(sample_buffer_l[idx]);
+					l1 = static_cast<float>(sample_buffer_l[idx + 1]);
+					if (sample_stereo)
+					{
+						r0 = static_cast<float>(sample_buffer_r[idx]);
+						r1 = static_cast<float>(sample_buffer_r[idx + 1]);
+					}
+					else
+					{
+						r0 = l0;
+						r1 = l1;
+					}
 				}
 				const float amp = voice.amp * env;
 				float samp_l = (l0 + (l1 - l0) * frac) * kSampleScale * amp;
@@ -9788,6 +10056,7 @@ int main(void)
 	int32_t last_perform_index = -1;
 	int32_t last_fx_detail_index = -1;
 	int32_t last_fx_detail_param_index = -1;
+	uint32_t rev_anim_next_ms = 0;
 	int32_t last_scroll = -1;
 	int32_t last_selected = -1;
 	int32_t last_file_count = -1;
@@ -10643,6 +10912,19 @@ int main(void)
 		}
 		else if (mode == UiMode::FxDetail)
 		{
+			if (fx_detail_index == kFxReverbIndex && playback_reverse >= 0.5f)
+			{
+				const uint32_t now = System::GetNow();
+				if (now >= rev_anim_next_ms)
+				{
+					request_fx_detail_redraw = true;
+					rev_anim_next_ms = now + 120;
+				}
+			}
+			else
+			{
+				rev_anim_next_ms = 0;
+			}
 			if (request_fx_detail_redraw
 				|| fx_detail_index != last_fx_detail_index
 				|| fx_detail_param_index != last_fx_detail_param_index)
