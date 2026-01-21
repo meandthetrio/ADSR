@@ -32,7 +32,7 @@ constexpr int32_t kFxSatIndex = 0;
 constexpr int32_t kFxChorusIndex = 1;
 constexpr int32_t kFxDelayIndex = 2;
 constexpr int32_t kFxReverbIndex = 3;
-constexpr int32_t kReverbFaderCount = 5;
+constexpr int32_t kReverbFaderCount = 4;
 constexpr int32_t kDelayFaderCount = 5;
 constexpr int32_t kPerformFltFaderCount = 2;
 constexpr int32_t kPerformAmpIndex = 1;
@@ -317,12 +317,6 @@ constexpr float kReverbDampDefault =
 	(kReverbDampMaxHz - kReverbLpFreq) / (kReverbDampMaxHz - kReverbDampMinHz);
 constexpr float kReverbDefaultWet = 0.0f;
 constexpr float kReverbWetStep = 0.02f;
-constexpr float kReverbShimmerStep = 0.02f;
-constexpr float kShimmerHpHz = 900.0f;
-constexpr size_t kShimmerBufferSize = 8192;
-constexpr size_t kShimmerDelaySamples = 2048;
-constexpr float kShimmerRateUp = 2.0f;
-constexpr float kShimmerFeedback = 0.6f;
 constexpr float kChorusRateHz = 0.25f;
 constexpr float kChorusRateMinHz = 0.05f;
 constexpr float kChorusRateMaxHz = 0.9f;
@@ -840,13 +834,6 @@ FatFSInterface fsi;
 Encoder      encoder_r;
 Switch       shift_button;
 DSY_SDRAM_BSS ReverbSc reverb;
-OnePoleHp shimmer_hp_l;
-OnePoleHp shimmer_hp_r;
-DSY_SDRAM_BSS float shimmer_buf_l[kShimmerBufferSize];
-DSY_SDRAM_BSS float shimmer_buf_r[kShimmerBufferSize];
-static size_t shimmer_write_idx = 0;
-static float shimmer_read_idx = 0.0f;
-static int shimmer_mode = 0;
 DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_l;
 DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_r;
 DelayLine<float, kReverbPreDelayMaxSamples> DSY_SDRAM_BSS reverb_predelay_l;
@@ -1032,7 +1019,6 @@ struct PerformState
 	float reverb_pre = 0.0f;
 	float reverb_damp = 0.0f;
 	float reverb_decay = 0.0f;
-	float reverb_shimmer = 0.0f;
 	bool sat_params_initialized = false;
 	bool reverb_params_initialized = false;
 	bool delay_params_initialized = false;
@@ -1307,7 +1293,6 @@ struct AudioParams
 	float reverb_pre;
 	float reverb_damp;
 	float reverb_decay;
-	float reverb_shimmer;
 };
 
 static AudioParams g_audio_params = {};
@@ -1337,7 +1322,6 @@ static SmoothParam sm_reverb_wet;
 static SmoothParam sm_reverb_pre;
 static SmoothParam sm_reverb_damp;
 static SmoothParam sm_reverb_decay;
-static SmoothParam sm_reverb_shimmer;
 
 enum AudioFlagBits : uint32_t
 {
@@ -1368,6 +1352,7 @@ static int32_t play_bpm = kPlayBpm;
 static volatile float cpu_load_pct = 0.0f;
 static volatile float cpu_load_peak_pct = 0.0f;
 static float cpu_load_ema = 0.0f;
+static volatile uint32_t g_idle_blockers = 0;
 static PlaySelectMode play_select_mode = PlaySelectMode::Bpm;
 static int32_t play_select_row = 0;
 static int32_t play_select_col = 0;
@@ -1389,7 +1374,6 @@ volatile float reverb_wet = kReverbDefaultWet;
 volatile float reverb_pre = 0.5f;
 volatile float reverb_damp = 0.5f;
 volatile float reverb_decay = 0.5f;
-volatile float reverb_shimmer = 0.5f;
 volatile float delay_wet = kDelayDefaultWet;
 volatile float delay_time = 0.5f;
 volatile float delay_feedback = 0.5f;
@@ -2844,7 +2828,6 @@ static void InitSmoothers()
 	sm_reverb_pre.Init(reverb_pre, 60.0f, kUiTickHz);
 	sm_reverb_damp.Init(reverb_damp, 60.0f, kUiTickHz);
 	sm_reverb_decay.Init(reverb_decay, 80.0f, kUiTickHz);
-	sm_reverb_shimmer.Init(reverb_shimmer, 80.0f, kUiTickHz);
 }
 
 static void UpdateSmoothedParamsPerTick()
@@ -2874,7 +2857,6 @@ static void UpdateSmoothedParamsPerTick()
 	sm_reverb_pre.SetTarget(reverb_pre);
 	sm_reverb_damp.SetTarget(reverb_damp);
 	sm_reverb_decay.SetTarget(reverb_decay);
-	sm_reverb_shimmer.SetTarget(reverb_shimmer);
 
 	AudioParams p = {};
 	p.amp_attack = sm_amp_attack.Process();
@@ -2902,7 +2884,6 @@ static void UpdateSmoothedParamsPerTick()
 	p.reverb_pre = sm_reverb_pre.Process();
 	p.reverb_damp = sm_reverb_damp.Process();
 	p.reverb_decay = sm_reverb_decay.Process();
-	p.reverb_shimmer = sm_reverb_shimmer.Process();
 
 	{
 		daisy::ScopedIrqBlocker irq;
@@ -2928,7 +2909,7 @@ static void UpdateSmoothedParamsPerTick()
 		|| !sm_reverb_pre.IsNearTarget()
 		|| !sm_reverb_damp.IsNearTarget()
 		|| !sm_reverb_decay.IsNearTarget()
-		|| !sm_reverb_shimmer.IsNearTarget())
+		)
 	{
 		fx_params_dirty = true;
 	}
@@ -3456,7 +3437,6 @@ static void CapturePerformState(PerformState& state)
 	state.reverb_pre = reverb_pre;
 	state.reverb_damp = reverb_damp;
 	state.reverb_decay = reverb_decay;
-	state.reverb_shimmer = reverb_shimmer;
 	state.sat_params_initialized = sat_params_initialized;
 	state.reverb_params_initialized = reverb_params_initialized;
 	state.delay_params_initialized = delay_params_initialized;
@@ -3503,7 +3483,6 @@ static void ApplyPerformState(const PerformState& state)
 	reverb_pre = state.reverb_pre;
 	reverb_damp = state.reverb_damp;
 	reverb_decay = state.reverb_decay;
-	reverb_shimmer = state.reverb_shimmer;
 	sat_params_initialized = state.sat_params_initialized;
 	reverb_params_initialized = state.reverb_params_initialized;
 	delay_params_initialized = state.delay_params_initialized;
@@ -4418,6 +4397,8 @@ static volatile float* FxWetTarget(int32_t fx_index)
 	}
 }
 
+static inline int ClampI(int v, int lo, int hi);
+
 static void DrawPerformScreen(int32_t selected,
 							  bool fx_select_active,
 							  int32_t fx_selected,
@@ -4758,17 +4739,38 @@ static void DrawPerformScreen(int32_t selected,
 	}
 	{
 		const FontDef font = Font_6x8;
-		char midi_label[12];
-		snprintf(midi_label, sizeof(midi_label), "M %lums",
-			static_cast<unsigned long>(g_midi_note_latency_max_ms));
-		const int text_w = static_cast<int>(StrLen(midi_label)) * font.FontWidth;
+		char cpu_label[12];
+		int cpu_pct = static_cast<int>(cpu_load_pct + 0.5f);
+		cpu_pct = ClampI(cpu_pct, 0, 100);
+		snprintf(cpu_label, sizeof(cpu_label), "CPU %d%%", cpu_pct);
+		const int text_w = static_cast<int>(StrLen(cpu_label)) * font.FontWidth;
 		int x = kDisplayW - text_w - 1;
 		if (x < 0)
 		{
 			x = 0;
 		}
 		display.SetCursor(x, 0);
-		display.WriteString(midi_label, font, true);
+		display.WriteString(cpu_label, font, true);
+	}
+	{
+		const uint32_t blockers = g_idle_blockers;
+		if (blockers != 0)
+		{
+			char idle_label[16];
+			int pos = 0;
+			idle_label[pos++] = 'I';
+			idle_label[pos++] = ':';
+			if (blockers & (1u << 0)) idle_label[pos++] = 'B'; // playback
+			if (blockers & (1u << 1)) idle_label[pos++] = 'W'; // preview
+			if (blockers & (1u << 2)) idle_label[pos++] = 'P'; // playhead
+			if (blockers & (1u << 3)) idle_label[pos++] = 'R'; // recording
+			if (blockers & (1u << 4)) idle_label[pos++] = 'M'; // monitor
+			if (blockers & (1u << 5)) idle_label[pos++] = 'V'; // voice active
+			if (blockers & (1u << 6)) idle_label[pos++] = 'F'; // FX not off
+			idle_label[pos] = '\0';
+			display.SetCursor(0, 0);
+			display.WriteString(idle_label, Font_6x8, true);
+		}
 	}
 	RequestDisplayUpdate();
 }
@@ -6958,9 +6960,9 @@ static void DrawFxDetailScreen(int32_t index)
 		const int fader_w = kDisplayW - (kMargin * 2);
 		if (fader_w > 4)
 		{
-			const char* fader_labels[kReverbFaderCount] = {"Pre", "Dmp", "Dcy", "Wet", "Shm"};
+			const char* fader_labels[kReverbFaderCount] = {"Pre", "Dmp", "Dcy", "Wet"};
 			const float fader_values[kReverbFaderCount]
-				= {reverb_pre, reverb_damp, reverb_decay, reverb_wet, reverb_shimmer};
+				= {reverb_pre, reverb_damp, reverb_decay, reverb_wet};
 			int param_index = fx_detail_param_index;
 			const bool fader_select_active
 				= (param_index >= 0 && param_index < kReverbFaderCount);
@@ -6968,7 +6970,7 @@ static void DrawFxDetailScreen(int32_t index)
 			{
 				param_index = 0;
 			}
-			const int fader_offsets[kReverbFaderCount] = {0, 1, -1, 0, 0};
+			const int fader_offsets[kReverbFaderCount] = {0, 1, -1, 0};
 			DrawVerticalFadersInRect(fader_x,
 									 block_y,
 									 fader_w,
@@ -8089,7 +8091,6 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 							reverb_pre = 0.5f;
 							reverb_damp = 0.5f;
 							reverb_decay = 0.5f;
-							reverb_shimmer = 0.5f;
 							reverb_params_initialized = true;
 							fx_params_dirty = true;
 						}
@@ -8576,10 +8577,9 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					= {kReverbParamStep,
 					   kReverbParamStep,
 					   kReverbParamStep,
-					   kReverbWetStep,
-					   kReverbShimmerStep};
+					   kReverbWetStep};
 				volatile float* targets[kReverbFaderCount]
-					= {&reverb_pre, &reverb_damp, &reverb_decay, &reverb_wet, &reverb_shimmer};
+					= {&reverb_pre, &reverb_damp, &reverb_decay, &reverb_wet};
 				const int idx = fx_detail_param_index;
 				if (idx >= 0 && idx < kReverbFaderCount)
 				{
@@ -8922,6 +8922,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			g_play_step_dirty_for_ui = true;
 		}
 	}
+	const bool monitor_active = (flags_bits & kFlagMonitorEnabled) != 0;
 static float cached_sat_drive = 0.0f;
 static float cached_sat_mix = 0.0f;
 static float cached_sat_bump = 0.0f;
@@ -8951,7 +8952,6 @@ static float cached_tape_rate = 0.0f;
 	static float cached_reverb_pre = 0.0f;
 	static float cached_reverb_damp = 0.0f;
 	static float cached_reverb_decay = 0.0f;
-	static float cached_reverb_shimmer = 0.0f;
 	static float cached_reverb_gain = 1.0f;
 	static float cached_reverb_release = 1.0f;
 	static float cached_reverb_predelay_samples = 0.0f;
@@ -8995,7 +8995,6 @@ static float last_chorus_wow = -1.0f;
 		cached_reverb_pre = params.reverb_pre;
 		cached_reverb_damp = params.reverb_damp;
 		cached_reverb_decay = params.reverb_decay;
-		cached_reverb_shimmer = params.reverb_shimmer;
 
 		if (cached_sat_drive < 0.0f) cached_sat_drive = 0.0f;
 		if (cached_sat_drive > 1.0f) cached_sat_drive = 1.0f;
@@ -9035,8 +9034,6 @@ static float last_chorus_wow = -1.0f;
 		if (cached_reverb_damp > 1.0f) cached_reverb_damp = 1.0f;
 		if (cached_reverb_decay < 0.0f) cached_reverb_decay = 0.0f;
 		if (cached_reverb_decay > 1.0f) cached_reverb_decay = 1.0f;
-		if (cached_reverb_shimmer < 0.0f) cached_reverb_shimmer = 0.0f;
-		if (cached_reverb_shimmer > 1.0f) cached_reverb_shimmer = 1.0f;
 
 		cached_reverb_gain = 1.0f;
 		const float decay_ms = kReverbDecayMinMs
@@ -9203,7 +9200,6 @@ static float last_chorus_wow = -1.0f;
 	const int32_t chorus_mode_local = cached_chorus_mode;
 	const float chorus_mix = cached_chorus_mix;
 	const float delay_mix = cached_delay_wet;
-	const float rev_shimmer = cached_reverb_shimmer;
 	const float dt = static_cast<float>(size) / out_sr;
 	const float time_tau = kDelayTimeSlewMs * 0.001f;
 	const float time_alpha = (time_tau > 0.0f) ? (1.0f - expf(-dt / time_tau)) : 1.0f;
@@ -9356,6 +9352,10 @@ static float last_chorus_wow = -1.0f;
 
 	auto apply_chorus = [&](float &l, float &r)
 	{
+		if (chorus_mix <= kFxParamEpsilon)
+		{
+			return;
+		}
 		const float dry_l = l;
 		const float dry_r = r;
 		float chorus_proc_l = chorus_l.Process(l);
@@ -9436,6 +9436,10 @@ static float last_chorus_wow = -1.0f;
 
 	auto apply_delay = [&](float &l, float &r)
 	{
+		if (delay_mix <= kFxParamEpsilon)
+		{
+			return;
+		}
 		const float freeze = (cached_delay_freeze >= 0.5f) ? 1.0f : 0.0f;
 		float feedback = delay_feedback_smoothed;
 		if (feedback > kDelayFeedbackMax)
@@ -9480,6 +9484,10 @@ static float last_chorus_wow = -1.0f;
 
 	auto apply_reverb = [&](float &l, float &r)
 	{
+		if (cached_reverb_wet <= kFxParamEpsilon)
+		{
+			return;
+		}
 		float rev_in_l = 0.0f;
 		float rev_in_r = 0.0f;
 		const bool predelay_active = (cached_reverb_predelay_samples >= 1.0f);
@@ -9506,87 +9514,11 @@ static float last_chorus_wow = -1.0f;
 		{
 			reverb_tail_gain *= cached_reverb_release;
 		}
-		// Shimmer: pitch-shifted octave layer around midpoint (0.5 = no shimmer).
-		float shimmer_amount = 0.0f;
-		float shimmer_rate = 1.0f;
-		int next_mode = 0;
-		if (rev_shimmer > 0.0f)
-		{
-			shimmer_amount = rev_shimmer;
-			if (shimmer_amount > 1.0f)
-			{
-				shimmer_amount = 1.0f;
-			}
-			if (shimmer_amount < 0.25f)
-			{
-				shimmer_amount *= 2.0f;
-			}
-			else
-			{
-				shimmer_amount = 0.5f + (shimmer_amount - 0.25f) * (0.5f / 0.75f);
-			}
-			if (shimmer_amount > 1.0f)
-			{
-				shimmer_amount = 1.0f;
-			}
-			shimmer_rate = kShimmerRateUp;
-			next_mode = 1;
-		}
-		else
-		{
-			shimmer_amount = 0.0f;
-			shimmer_rate = kShimmerRateUp;
-			next_mode = 0;
-		}
-
-		if (next_mode != shimmer_mode)
-		{
-			shimmer_mode = next_mode;
-			shimmer_read_idx = static_cast<float>(
-				(shimmer_write_idx + kShimmerBufferSize - kShimmerDelaySamples)
-				% kShimmerBufferSize);
-		}
-
-		float shimmer_fb_l = 0.0f;
-		float shimmer_fb_r = 0.0f;
-		if (shimmer_amount > 0.0f)
-		{
-			const size_t read_i0 = static_cast<size_t>(shimmer_read_idx) % kShimmerBufferSize;
-			const size_t read_i1 = (read_i0 + 1) % kShimmerBufferSize;
-			const float frac = shimmer_read_idx - static_cast<float>(read_i0);
-			const float sh_l = shimmer_buf_l[read_i0]
-				+ (shimmer_buf_l[read_i1] - shimmer_buf_l[read_i0]) * frac;
-			const float sh_r = shimmer_buf_r[read_i0]
-				+ (shimmer_buf_r[read_i1] - shimmer_buf_r[read_i0]) * frac;
-			shimmer_fb_l = shimmer_amount * kShimmerFeedback * shimmer_hp_l.Process(sh_l);
-			shimmer_fb_r = shimmer_amount * kShimmerFeedback * shimmer_hp_r.Process(sh_r);
-
-			shimmer_read_idx += shimmer_rate;
-			while (shimmer_read_idx >= static_cast<float>(kShimmerBufferSize))
-			{
-				shimmer_read_idx -= static_cast<float>(kShimmerBufferSize);
-			}
-			const size_t read_int = static_cast<size_t>(shimmer_read_idx);
-			size_t dist = (shimmer_write_idx >= read_int)
-				? (shimmer_write_idx - read_int)
-				: (shimmer_write_idx + kShimmerBufferSize - read_int);
-			if (dist < 4)
-			{
-				shimmer_read_idx = static_cast<float>(
-					(shimmer_write_idx + kShimmerBufferSize - kShimmerDelaySamples)
-					% kShimmerBufferSize);
-			}
-		}
-
 		float rev_l = 0.0f;
 		float rev_r = 0.0f;
-		reverb.Process(rev_in_l + shimmer_fb_l, rev_in_r + shimmer_fb_r, &rev_l, &rev_r);
+		reverb.Process(rev_in_l, rev_in_r, &rev_l, &rev_r);
 		rev_l *= cached_reverb_gain * reverb_tail_gain;
 		rev_r *= cached_reverb_gain * reverb_tail_gain;
-
-		shimmer_buf_l[shimmer_write_idx] = rev_l;
-		shimmer_buf_r[shimmer_write_idx] = rev_r;
-		shimmer_write_idx = (shimmer_write_idx + 1) % kShimmerBufferSize;
 		const float wet = cached_reverb_wet;
 		float wet_mix = wet;
 		float dry_mix = 1.0f - wet;
@@ -9620,6 +9552,67 @@ static float last_chorus_wow = -1.0f;
 		? (fx_chain_fade_target - fx_gain) / static_cast<float>(fade_samples_left)
 		: 0.0f;
 
+	const bool any_voice_active = use_poly && AnyPerformVoiceActive();
+	const bool fx_all_off = (cached_sat_mix <= kFxParamEpsilon)
+		&& (cached_chorus_mix <= kFxParamEpsilon)
+		&& (cached_delay_wet <= kFxParamEpsilon)
+		&& (cached_reverb_wet <= kFxParamEpsilon);
+	uint32_t idle_blockers = 0;
+	const bool no_signal = !playback_active
+		&& !preview_active
+		&& !playhead_running
+		&& record_state != RecordState::Recording
+		&& !monitor_active
+		&& !any_voice_active;
+	if (playback_active) idle_blockers |= (1u << 0);
+	if (preview_active) idle_blockers |= (1u << 1);
+	if (playhead_running) idle_blockers |= (1u << 2);
+	if (record_state == RecordState::Recording) idle_blockers |= (1u << 3);
+	if (monitor_active) idle_blockers |= (1u << 4);
+	if (any_voice_active) idle_blockers |= (1u << 5);
+	const bool idle_audio = no_signal
+		&& (!sample_loaded || fx_all_off);
+	if (sample_loaded && !fx_all_off) idle_blockers |= (1u << 6);
+	g_idle_blockers = idle_blockers;
+	if (idle_audio)
+	{
+		for (size_t i = 0; i < size; ++i)
+		{
+			out[0][i] = 0.0f;
+			out[1][i] = 0.0f;
+		}
+		const uint32_t cyc_end = DWT->CYCCNT;
+		const uint32_t cyc_used = cyc_end - cyc_start;
+		static uint32_t sys_clk_hz = 0;
+		if (sys_clk_hz == 0)
+		{
+			sys_clk_hz = System::GetSysClkFreq();
+		}
+		const float cycles_per_block = (static_cast<float>(sys_clk_hz) / out_sr)
+			* static_cast<float>(size);
+		float load_pct = 0.0f;
+		if (cycles_per_block > 0.0f)
+		{
+			load_pct = 100.0f * (static_cast<float>(cyc_used) / cycles_per_block);
+		}
+		cpu_load_ema = (cpu_load_ema * 0.95f) + (load_pct * 0.05f);
+		cpu_load_pct = cpu_load_ema;
+		if (load_pct > cpu_load_peak_pct)
+		{
+			cpu_load_peak_pct = load_pct;
+		}
+		else
+		{
+			cpu_load_peak_pct *= 0.995f;
+			if (cpu_load_peak_pct < 0.0f)
+			{
+				cpu_load_peak_pct = 0.0f;
+			}
+		}
+		request_playhead_redraw = true;
+		return;
+	}
+
 	const float kSendEps = 1e-7f;
 	for (size_t i = 0; i < size; i++)
 	{
@@ -9648,7 +9641,6 @@ static float last_chorus_wow = -1.0f;
 				reverb_send_r += v_r * reverb_send;
 			}
 		};
-		const bool monitor_active = (flags_bits & kFlagMonitorEnabled) != 0;
 		float monitor_l = 0.0f;
 		float monitor_r = 0.0f;
 		if (monitor_active)
@@ -10060,9 +10052,10 @@ static float last_chorus_wow = -1.0f;
 			{
 				--master_reverb_hold;
 			}
-			const bool mod_active = (master_mod_hold > 0);
-			const bool delay_active = (master_delay_hold > 0);
-			const bool reverb_active = (master_reverb_hold > 0);
+			const bool mod_active = (master_mod_hold > 0) && (chorus_mix > kFxParamEpsilon);
+			const bool delay_active = (master_delay_hold > 0) && (delay_mix > kFxParamEpsilon);
+			const bool reverb_active = (master_reverb_hold > 0)
+				&& (cached_reverb_wet > kFxParamEpsilon);
 			const float dry_mag = fabsf(fx_l) + fabsf(fx_r);
 			if (!(dry_mag < kSendEps
 				  && !sat_active
@@ -10104,14 +10097,23 @@ static float last_chorus_wow = -1.0f;
 		}
 		else
 		{
+			const bool chorus_active = (chorus_mix > kFxParamEpsilon);
+			const bool delay_active = (delay_mix > kFxParamEpsilon);
+			const bool reverb_active = (cached_reverb_wet > kFxParamEpsilon);
 			for (int stage = 0; stage < kPerformFaderCount; ++stage)
 			{
 				switch (fx_order[stage])
 				{
 					case kFxSatIndex: apply_saturation_master(fx_l, fx_r); break;
-					case kFxChorusIndex: apply_chorus(fx_l, fx_r); break;
-					case kFxDelayIndex: apply_delay(fx_l, fx_r); break;
-					case kFxReverbIndex: apply_reverb(fx_l, fx_r); break;
+					case kFxChorusIndex:
+						if (chorus_active) apply_chorus(fx_l, fx_r);
+						break;
+					case kFxDelayIndex:
+						if (delay_active) apply_delay(fx_l, fx_r);
+						break;
+					case kFxReverbIndex:
+						if (reverb_active) apply_reverb(fx_l, fx_r);
+						break;
 					default: break;
 				}
 			}
@@ -10131,7 +10133,12 @@ static float last_chorus_wow = -1.0f;
 	}
 	const uint32_t cyc_end = DWT->CYCCNT;
 	const uint32_t cyc_used = cyc_end - cyc_start;
-	const float cycles_per_block = (static_cast<float>(SystemCoreClock) / out_sr)
+	static uint32_t sys_clk_hz = 0;
+	if (sys_clk_hz == 0)
+	{
+		sys_clk_hz = System::GetSysClkFreq();
+	}
+	const float cycles_per_block = (static_cast<float>(sys_clk_hz) / out_sr)
 		* static_cast<float>(size);
 	float load_pct = 0.0f;
 	if (cycles_per_block > 0.0f)
@@ -10170,17 +10177,6 @@ int main(void)
 	reverb.Init(hw.AudioSampleRate());
 	reverb.SetFeedback(kReverbFeedback);
 	reverb.SetLpFreq(kReverbLpFreq);
-	shimmer_hp_l.Init(hw.AudioSampleRate(), kShimmerHpHz);
-	shimmer_hp_r.Init(hw.AudioSampleRate(), kShimmerHpHz);
-	for (size_t i = 0; i < kShimmerBufferSize; ++i)
-	{
-		shimmer_buf_l[i] = 0.0f;
-		shimmer_buf_r[i] = 0.0f;
-	}
-	shimmer_write_idx = 0;
-	shimmer_read_idx = static_cast<float>(kShimmerBufferSize - kShimmerDelaySamples);
-	shimmer_mode = 0;
-
 	sat_l.Init(hw.AudioSampleRate());
 	sat_r.Init(hw.AudioSampleRate());
 	sat_l.SetTone(0.5f);
@@ -10511,6 +10507,7 @@ int main(void)
 			}
 		}
 			else if (!IsPlayUiMode(ui_mode)
+					 && !IsPerformUiMode(ui_mode)
 					 && sample_loaded
 					 && ui_mode != UiMode::Load
 					 && ui_mode != UiMode::LoadTarget)
@@ -10519,14 +10516,7 @@ int main(void)
 				{
 					LogLine("Button1: playback request (unpitched)");
 				}
-				if (IsPerformUiMode(ui_mode))
-				{
-					StartPerformVoice(kBaseMidiNote);
-				}
-				else
-				{
-					StartPlayback(kBaseMidiNote, false);
-				}
+				StartPlayback(kBaseMidiNote, false);
 				request_playhead_redraw = true;
 			}
 		}
@@ -11369,7 +11359,6 @@ int main(void)
 		else
 		{
 				if ((ui_mode == UiMode::Record && record_state == RecordState::Review)
-					|| (IsPerformUiMode(ui_mode) && sample_loaded)
 					|| (ui_mode == UiMode::FxDetail && sample_loaded)
 					|| (ui_mode == UiMode::Edt && sample_loaded)
 					|| (ui_mode == UiMode::Load && load_context == LoadContext::Edt)
