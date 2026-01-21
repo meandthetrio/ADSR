@@ -811,6 +811,10 @@ static inline bool MidiCmdPopAudio(MidiCmd &out)
 }
 static daisy::TimerHandle g_ctrl_timer;
 static volatile bool g_ctrl_timer_running = false;
+// UI refresh timer (PERFORM redraw tick)
+static daisy::TimerHandle g_ui_timer;
+static volatile bool g_perform_refresh_due = false;
+static volatile bool g_ui_timer_running = false;
 
 static inline void RequestDisplayUpdate()
 {
@@ -7419,6 +7423,16 @@ static void CtrlTimerCb(void* /*data*/)
 	}
 }
 
+static void UiTimerCb(void* /*data*/)
+{
+	// ISR must stay tiny: just set a flag.
+	if (!g_ui_timer_running)
+	{
+		return;
+	}
+	g_perform_refresh_due = true;
+}
+
 static void InitControlTimer()
 {
 	daisy::TimerHandle::Config cfg;
@@ -7446,6 +7460,37 @@ static void InitControlTimer()
 
 	g_ctrl_timer_running = true;
 	g_ctrl_timer.Start();
+}
+
+static void InitUiTimer()
+{
+	daisy::TimerHandle::Config cfg;
+	cfg.periph = daisy::TimerHandle::Config::Peripheral::TIM_4;
+	cfg.dir = daisy::TimerHandle::Config::CounterDir::UP;
+	cfg.enable_irq = true;
+
+	g_ui_timer.Init(cfg);
+
+	constexpr uint32_t kBaseHz = 10000;
+	const uint32_t tim_clk = daisy::System::GetPClk1Freq() * 2U;
+	uint32_t psc = tim_clk / kBaseHz;
+	if (psc == 0)
+	{
+		psc = 1;
+	}
+	psc -= 1;
+	if (psc > 0xFFFFU)
+	{
+		psc = 0xFFFFU;
+	}
+	g_ui_timer.SetPrescaler(psc);
+
+	const uint32_t period = (kBaseHz / 30);
+	g_ui_timer.SetPeriod(period);
+	g_ui_timer.SetCallback(UiTimerCb, nullptr);
+
+	g_ui_timer_running = true;
+	g_ui_timer.Start();
 }
 
 static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_events, bool shift_held)
@@ -10193,6 +10238,7 @@ int main(void)
 	encoder_r.Init(seed::D7, seed::D8, seed::D22, hw.AudioSampleRate());
 	shift_button.Init(seed::D9, 1000);
 	InitControlTimer();
+	InitUiTimer();
 
 	PodDisplay::Config disp_cfg;
 	disp_cfg.driver_config.transport_config.i2c_config.pin_config.scl = seed::D11;
@@ -11049,6 +11095,16 @@ int main(void)
 			}
 			else if (mode == UiMode::Perform || mode == UiMode::PlayTrack)
 			{
+				bool refresh_due = false;
+				{
+					daisy::ScopedIrqBlocker irq;
+					refresh_due = g_perform_refresh_due;
+					g_perform_refresh_due = false;
+				}
+				if (refresh_due)
+				{
+					request_perform_redraw = true;
+				}
 				const int32_t current = perform_index;
 				if (request_perform_redraw || current != last_perform_index)
 				{
