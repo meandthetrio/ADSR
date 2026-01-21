@@ -1,3 +1,55 @@
+### 1/21/26
+Chat moving FX and UI into different STM storage options
+- Added a PERFORM idle fast‑path in the audio callback that skips the entire per‑sample loop when everything is truly idle (no playback, no voices, no preview/monitor, no FX active, no fade/pause pending). It still updates the fade/pause state and CPU meter.
+
+you can place different parts of the FX system in different RAM tiers to optimize performance while keeping the sound unchanged.
+
+STM32H7 memory tiers (roughly fastest → largest):
+
+DTCM (128 KB): fastest, no cache, CPU‑only. Best for tiny hot state.
+AXI SRAM / D1 (up to 512 KB on H7): fast, cacheable. Good for medium buffers.
+SRAM D2/D3 (lower bandwidth): shared with DMA/IO. Good for DMA buffers and UI scratch.
+External SDRAM (large, slower): huge buffers (reverb/delay/sample data).
+What’s possible without changing FX sound:
+
+Keep large FX delay/reverb buffers in SDRAM (as they are) to preserve max times.
+Move small, hot DSP state (filters, envelopes, per‑voice state) into DTCM/D1 (already partly done on CPUsavings).
+Put DMA/IO buffers (SD card read/write) in D2 for DMA friendliness.
+Keep UI masks in D3 to avoid polluting caches.
+Other performance levers that don’t change sound:
+
+Ensure cache is enabled for SDRAM (big win).
+Ensure buffers are aligned and accessed linearly (improves cache efficiency).
+Avoid unnecessary reads of SDRAM in the audio callback when FX are bypassed (already partly done). 
+
+Here’s what I did for 1/2/3, plus what’s true about cache and memory on STM32H7.
+
+Changes applied on STM32 cache and memory:
+
+- Moved small, hot DSP objects to DTCM to reduce cache/memory latency:
+- ChorusEngine chorus_l/chorus_r
+- TapeSaturator sat_l/sat_r
+(These are small state structs; no sound changes, only placement.)
+No changes to large FX buffers (delay/reverb) so the sound stays identical.
+Memory map (step 1, current state in WaveContV3.cpp):
+
+DTCM (.dtcmram_bss): hot, small state
+perform_voices, track_perform_state, g_audio_params
+perform_lpf_*, play_steps, BitCrushState
+chorus_l/r, sat_l/r (just added)
+D2 non‑cacheable (.sram1_bss): DMA‑safe buffers
+wav_read, wav_riff_hdr, wav_chunk_hdr, wav_fmt_buf, wav_write, preview_read_buf
+D3 (.ramd3): UI masks
+record_text_mask, record_invert_mask, record_fb_buf, record_bold_mask
+SDRAM (.sdram_bss): large buffers
+ReverbSc reverb, delay lines, predelay lines
+sample buffers, shimmer buffers (if present)
+Cache verification (step 3):
+
+DCache + ICache are enabled by default in libDaisy (System::Config::Defaults()).
+MPU marks SDRAM (0xC0000000) as cacheable/bufferable, so SDRAM accesses are cached (good for FX buffers).
+D2 SRAM is explicitly configured as non‑cacheable for DMA safety.
+
 ### 1/11/26
 Edge moved a ton of major components out of the AudioCallback
 
