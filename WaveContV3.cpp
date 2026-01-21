@@ -19,6 +19,9 @@ using namespace daisysp;
 using PodDisplay = OledDisplay<SSD130xI2c128x64Driver>;
 
 constexpr bool kLogEnabled = true;
+#ifndef FX_PROFILE
+#define FX_PROFILE 0
+#endif
 constexpr int32_t kMenuCount = 4;
 constexpr int32_t kShiftMenuCount = 2;
 constexpr int32_t kLoadTargetCount = 2;
@@ -52,7 +55,7 @@ constexpr int32_t kLoadFontScale = 1;
 constexpr size_t kMaxSampleSamples = 240000;
 constexpr int32_t kRecordMaxSeconds = 5;
 constexpr size_t kSampleChunkFrames = 256;
-constexpr size_t kSaveChunkFrames = 8192;
+constexpr size_t kSaveChunkFrames = 3000;
 constexpr int32_t kBaseMidiNote = 60;
 constexpr float kSampleScale = 1.0f / 32768.0f;
 constexpr int32_t kLoadProgressStep = 5;
@@ -842,12 +845,12 @@ ChorusEngine chorus_l;
 ChorusEngine chorus_r;
 TapeSaturator sat_l;
 TapeSaturator sat_r;
-static BitCrushState g_sat_bit_state;
-static BitCrushState g_sat_bit_state_tracks[kPlayTrackCount];
-BiquadLp perform_lpf_l1[kPerformVoiceCount];
-BiquadLp perform_lpf_l2[kPerformVoiceCount];
-BiquadLp perform_lpf_r1[kPerformVoiceCount];
-BiquadLp perform_lpf_r2[kPerformVoiceCount];
+DTCM_MEM_SECTION static BitCrushState g_sat_bit_state;
+DTCM_MEM_SECTION static BitCrushState g_sat_bit_state_tracks[kPlayTrackCount];
+DTCM_MEM_SECTION BiquadLp perform_lpf_l1[kPerformVoiceCount];
+DTCM_MEM_SECTION BiquadLp perform_lpf_l2[kPerformVoiceCount];
+DTCM_MEM_SECTION BiquadLp perform_lpf_r1[kPerformVoiceCount];
+DTCM_MEM_SECTION BiquadLp perform_lpf_r2[kPerformVoiceCount];
 
 volatile UiMode ui_mode = UiMode::Main;
 volatile int32_t menu_index = 0;
@@ -980,7 +983,7 @@ struct PerformVoice
 	uint32_t env_samples = 0;
 };
 
-static PerformVoice perform_voices[kPerformVoiceCount];
+DTCM_MEM_SECTION static PerformVoice perform_voices[kPerformVoiceCount];
 
 struct PerformState
 {
@@ -1048,7 +1051,7 @@ enum class LoadContext : int32_t
 
 static PerformState main_perform_state;
 static PerformState play_perform_state;
-static PerformState track_perform_state[kPlayTrackCount];
+DTCM_MEM_SECTION static PerformState track_perform_state[kPlayTrackCount];
 static PerformContext perform_context = PerformContext::Main;
 static int32_t perform_context_track = 0;
 static TrackSampleState track_samples[kPlayTrackCount];
@@ -1295,7 +1298,7 @@ struct AudioParams
 	float reverb_decay;
 };
 
-static AudioParams g_audio_params = {};
+DTCM_MEM_SECTION static AudioParams g_audio_params = {};
 
 static SmoothParam sm_amp_attack;
 static SmoothParam sm_amp_decay;
@@ -1352,6 +1355,12 @@ static int32_t play_bpm = kPlayBpm;
 static volatile float cpu_load_pct = 0.0f;
 static volatile float cpu_load_peak_pct = 0.0f;
 static float cpu_load_ema = 0.0f;
+#if FX_PROFILE
+static volatile uint32_t g_prof_voice_cycles = 0;
+static volatile uint32_t g_prof_delay_cycles = 0;
+static volatile uint32_t g_prof_reverb_cycles = 0;
+static volatile uint32_t g_prof_audio_cycles = 0;
+#endif
 static volatile uint32_t g_idle_blockers = 0;
 static PlaySelectMode play_select_mode = PlaySelectMode::Bpm;
 static int32_t play_select_row = 0;
@@ -1359,7 +1368,7 @@ static int32_t play_select_col = 0;
 static bool play_screen_dirty = true;
 static bool playhead_running = false;
 static int32_t playhead_step = 0;
-static bool play_steps[kPlayTrackCount][kPlayStepCount] = {};
+DTCM_MEM_SECTION static bool play_steps[kPlayTrackCount][kPlayStepCount] = {};
 volatile bool request_playhead_redraw = false;
 volatile bool button1_press = false;
 volatile bool button2_press = false;
@@ -1423,15 +1432,15 @@ volatile uint32_t preview_data_offset = 0;
 static FIL preview_file;
 static bool preview_file_open = false;
 alignas(32) static int16_t preview_buffer[kPreviewBufferFrames];
-alignas(32) static int16_t preview_read_buf[kPreviewReadFrames * 2];
+DMA_BUFFER_MEM_SECTION alignas(32) static int16_t preview_read_buf[kPreviewReadFrames * 2];
 float led1_level = 0.0f;
 float led1_phase_ms = 0.0f;
 constexpr bool kUiLogsEnabled = false;
 static double record_anim_start_ms = -1.0;
-static uint8_t record_text_mask[kDisplayH][kDisplayW];
-static uint8_t record_invert_mask[kDisplayH][kDisplayW];
-static uint8_t record_fb_buf[kDisplayH][kDisplayW];
-static uint8_t record_bold_mask[kDisplayH][kDisplayW];
+__attribute__((section(".ramd3"))) static uint8_t record_text_mask[kDisplayH][kDisplayW];
+__attribute__((section(".ramd3"))) static uint8_t record_invert_mask[kDisplayH][kDisplayW];
+__attribute__((section(".ramd3"))) static uint8_t record_fb_buf[kDisplayH][kDisplayW];
+__attribute__((section(".ramd3"))) static uint8_t record_bold_mask[kDisplayH][kDisplayW];
 static bool request_shift_redraw = false;
 static bool request_perform_redraw = false;
 static bool request_fx_detail_redraw = false;
@@ -1584,7 +1593,7 @@ static void ForCirclePixels(int cx, int cy, int r, F&& fn)
 }
 
 static FIL wav_file;
-alignas(32) static int16_t wav_read[kSampleChunkFrames * 2];
+DMA_BUFFER_MEM_SECTION alignas(32) static int16_t wav_read[kSampleChunkFrames * 2];
 
 const char* kMenuLabels[kMenuCount] = {"LOAD", "RECORD", "PERFORM", "PLAY"};
 
@@ -1756,10 +1765,10 @@ struct WavInfo
 	uint32_t data_size = 0;
 };
 
-alignas(32) static uint8_t wav_riff_hdr[12];
-alignas(32) static uint8_t wav_chunk_hdr[8];
-alignas(32) static uint8_t wav_fmt_buf[32];
-alignas(32) static int16_t wav_write[kSaveChunkFrames * 2];
+DMA_BUFFER_MEM_SECTION alignas(32) static uint8_t wav_riff_hdr[12];
+DMA_BUFFER_MEM_SECTION alignas(32) static uint8_t wav_chunk_hdr[8];
+DMA_BUFFER_MEM_SECTION alignas(32) static uint8_t wav_fmt_buf[32];
+DMA_BUFFER_MEM_SECTION alignas(32) static int16_t wav_write[kSaveChunkFrames * 2];
 
 static bool ParseWavHeader(FIL* file, WavInfo& info)
 {
@@ -8779,6 +8788,11 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size)
 {
 	const uint32_t cyc_start = DWT->CYCCNT;
+#if FX_PROFILE
+	uint32_t prof_voice_cycles = 0;
+	uint32_t prof_delay_cycles = 0;
+	uint32_t prof_reverb_cycles = 0;
+#endif
 
 	uint32_t cmd = 0;
 	SampleContext pending_ctx = SampleContext::Perform;
@@ -9200,6 +9214,11 @@ static float last_chorus_wow = -1.0f;
 	const int32_t chorus_mode_local = cached_chorus_mode;
 	const float chorus_mix = cached_chorus_mix;
 	const float delay_mix = cached_delay_wet;
+	const bool chorus_active = (chorus_mix > kFxParamEpsilon);
+	const bool delay_active = (delay_mix > kFxParamEpsilon)
+		|| (delay_feedback_smoothed > kFxParamEpsilon)
+		|| (cached_delay_freeze >= 0.5f);
+	const bool reverb_active = (cached_reverb_wet > kFxParamEpsilon);
 	const float dt = static_cast<float>(size) / out_sr;
 	const float time_tau = kDelayTimeSlewMs * 0.001f;
 	const float time_alpha = (time_tau > 0.0f) ? (1.0f - expf(-dt / time_tau)) : 1.0f;
@@ -9436,10 +9455,15 @@ static float last_chorus_wow = -1.0f;
 
 	auto apply_delay = [&](float &l, float &r)
 	{
-		if (delay_mix <= kFxParamEpsilon)
+		if (delay_mix <= kFxParamEpsilon
+			&& delay_feedback_smoothed <= kFxParamEpsilon
+			&& cached_delay_freeze < 0.5f)
 		{
 			return;
 		}
+#if FX_PROFILE
+		const uint32_t prof_start = DWT->CYCCNT;
+#endif
 		const float freeze = (cached_delay_freeze >= 0.5f) ? 1.0f : 0.0f;
 		float feedback = delay_feedback_smoothed;
 		if (feedback > kDelayFeedbackMax)
@@ -9480,6 +9504,9 @@ static float last_chorus_wow = -1.0f;
 		const float delay_mix_r = (r * (1.0f - mix)) + (delay_r * mix);
 		l = delay_mix_l;
 		r = delay_mix_r;
+#if FX_PROFILE
+		prof_delay_cycles += (DWT->CYCCNT - prof_start);
+#endif
 	};
 
 	auto apply_reverb = [&](float &l, float &r)
@@ -9488,6 +9515,9 @@ static float last_chorus_wow = -1.0f;
 		{
 			return;
 		}
+#if FX_PROFILE
+		const uint32_t prof_start = DWT->CYCCNT;
+#endif
 		float rev_in_l = 0.0f;
 		float rev_in_r = 0.0f;
 		const bool predelay_active = (cached_reverb_predelay_samples >= 1.0f);
@@ -9544,6 +9574,9 @@ static float last_chorus_wow = -1.0f;
 		}
 		l = (l * dry_mix) + (rev_l * wet_mix);
 		r = (r * dry_mix) + (rev_r * wet_mix);
+#if FX_PROFILE
+		prof_reverb_cycles += (DWT->CYCCNT - prof_start);
+#endif
 	};
 
 	float fx_gain = fx_chain_fade_gain;
@@ -9554,9 +9587,9 @@ static float last_chorus_wow = -1.0f;
 
 	const bool any_voice_active = use_poly && AnyPerformVoiceActive();
 	const bool fx_all_off = (cached_sat_mix <= kFxParamEpsilon)
-		&& (cached_chorus_mix <= kFxParamEpsilon)
-		&& (cached_delay_wet <= kFxParamEpsilon)
-		&& (cached_reverb_wet <= kFxParamEpsilon);
+		&& !chorus_active
+		&& !delay_active
+		&& !reverb_active;
 	uint32_t idle_blockers = 0;
 	const bool no_signal = !playback_active
 		&& !preview_active
@@ -9836,6 +9869,13 @@ static float last_chorus_wow = -1.0f;
 				}
 			}
 		}
+#if FX_PROFILE
+		uint32_t voice_start = 0;
+		if (use_poly)
+		{
+			voice_start = DWT->CYCCNT;
+		}
+#endif
 		if (use_poly)
 		{
 			for (int v = 0; v < kPerformVoiceCount; ++v)
@@ -9962,6 +10002,12 @@ static float last_chorus_wow = -1.0f;
 				}
 			}
 		}
+#if FX_PROFILE
+		if (use_poly)
+		{
+			prof_voice_cycles += (DWT->CYCCNT - voice_start);
+		}
+#endif
 		if (preview_active)
 		{
 			size_t read_idx = preview_read_index;
@@ -10052,16 +10098,15 @@ static float last_chorus_wow = -1.0f;
 			{
 				--master_reverb_hold;
 			}
-			const bool mod_active = (master_mod_hold > 0) && (chorus_mix > kFxParamEpsilon);
-			const bool delay_active = (master_delay_hold > 0) && (delay_mix > kFxParamEpsilon);
-			const bool reverb_active = (master_reverb_hold > 0)
-				&& (cached_reverb_wet > kFxParamEpsilon);
+			const bool mod_active_send = (master_mod_hold > 0) && chorus_active;
+			const bool delay_active_send = (master_delay_hold > 0) && delay_active;
+			const bool reverb_active_send = (master_reverb_hold > 0) && reverb_active;
 			const float dry_mag = fabsf(fx_l) + fabsf(fx_r);
 			if (!(dry_mag < kSendEps
 				  && !sat_active
-				  && !mod_active
-				  && !delay_active
-				  && !reverb_active))
+				  && !mod_active_send
+				  && !delay_active_send
+				  && !reverb_active_send))
 			{
 				if (sat_active)
 				{
@@ -10069,7 +10114,7 @@ static float last_chorus_wow = -1.0f;
 				}
 				float mod_out_l = 0.0f;
 				float mod_out_r = 0.0f;
-				if (mod_active)
+				if (mod_active_send)
 				{
 					mod_out_l = mod_send_l;
 					mod_out_r = mod_send_r;
@@ -10077,7 +10122,7 @@ static float last_chorus_wow = -1.0f;
 				}
 				float delay_out_l = 0.0f;
 				float delay_out_r = 0.0f;
-				if (delay_active)
+				if (delay_active_send)
 				{
 					delay_out_l = delay_send_l;
 					delay_out_r = delay_send_r;
@@ -10085,7 +10130,7 @@ static float last_chorus_wow = -1.0f;
 				}
 				float reverb_out_l = 0.0f;
 				float reverb_out_r = 0.0f;
-				if (reverb_active)
+				if (reverb_active_send)
 				{
 					reverb_out_l = reverb_send_l;
 					reverb_out_r = reverb_send_r;
@@ -10097,9 +10142,6 @@ static float last_chorus_wow = -1.0f;
 		}
 		else
 		{
-			const bool chorus_active = (chorus_mix > kFxParamEpsilon);
-			const bool delay_active = (delay_mix > kFxParamEpsilon);
-			const bool reverb_active = (cached_reverb_wet > kFxParamEpsilon);
 			for (int stage = 0; stage < kPerformFaderCount; ++stage)
 			{
 				switch (fx_order[stage])
@@ -10159,6 +10201,12 @@ static float last_chorus_wow = -1.0f;
 			cpu_load_peak_pct = 0.0f;
 		}
 	}
+#if FX_PROFILE
+	g_prof_voice_cycles = prof_voice_cycles;
+	g_prof_delay_cycles = prof_delay_cycles;
+	g_prof_reverb_cycles = prof_reverb_cycles;
+	g_prof_audio_cycles = cyc_used;
+#endif
 	request_playhead_redraw = true;
 }
 
