@@ -8069,7 +8069,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 					if (sat_mode == 1 && idx == 0)
 					{
 						const int cur_idx = BitResoIndexFromValue(current);
-						const int next_idx = ClampI(cur_idx + fx_r_inc, 0, kBitResoStepCount - 1);
+						const int next_idx = ClampI(cur_idx + fx_r_dir, 0, kBitResoStepCount - 1);
 						next = BitResoValueFromIndex(next_idx);
 					}
 					else
