@@ -1,5 +1,6 @@
 // Updated
 #include "daisy_pod.h"
+#include "daisy_core.h"
 #include "daisysp.h"
 #include "dev/oled_ssd130x.h"
 #include "fatfs.h"
@@ -19,6 +20,15 @@ using namespace daisysp;
 using PodDisplay = OledDisplay<SSD130xI2c128x64Driver>;
 
 constexpr bool kLogEnabled = true;
+#ifndef USE_SRAM_FDN_REVERB
+#define USE_SRAM_FDN_REVERB 1
+#endif
+#ifndef WAIT_FOR_SERIAL_LOG
+#define WAIT_FOR_SERIAL_LOG 0
+#endif
+#ifndef MEM_REGION_DEBUG
+#define MEM_REGION_DEBUG 0
+#endif
 #ifndef FX_PROFILE
 #define FX_PROFILE 0
 #endif
@@ -55,7 +65,7 @@ constexpr int32_t kLoadFontScale = 1;
 constexpr size_t kMaxSampleSamples = 240000;
 constexpr int32_t kRecordMaxSeconds = 5;
 constexpr size_t kSampleChunkFrames = 256;
-constexpr size_t kSaveChunkFrames = 3000;
+constexpr size_t kSaveChunkFrames = 2048;
 constexpr int32_t kBaseMidiNote = 60;
 constexpr float kSampleScale = 1.0f / 32768.0f;
 constexpr int32_t kLoadProgressStep = 5;
@@ -310,8 +320,8 @@ constexpr float kReverbFeedbackMax = 0.98f;
 constexpr float kReverbDampMinHz = 800.0f;
 constexpr float kReverbDampMaxHz = 20000.0f;
 constexpr float kReverbPreDelayMaxMs = 1000.0f;
-constexpr float kReverbDecayMinMs = 10.0f;
-constexpr float kReverbDecayMaxMs = 4000.0f;
+constexpr float kReverbDecayMinMs = 100.0f;
+constexpr float kReverbDecayMaxMs = 3000.0f;
 constexpr float kReverbParamStep = 0.02f;
 constexpr size_t kReverbPreDelayMaxSamples = 48000;
 constexpr float kReverbDecayDefault =
@@ -748,6 +758,235 @@ private:
 	float x1_ = 0.0f;
 };
 
+class SramFdnReverb
+{
+public:
+	void Init(float sample_rate)
+	{
+		sample_rate_ = (sample_rate > 1.0f) ? sample_rate : 48000.0f;
+		std::memset(line0_, 0, sizeof(line0_));
+		std::memset(line1_, 0, sizeof(line1_));
+		std::memset(line2_, 0, sizeof(line2_));
+		std::memset(line3_, 0, sizeof(line3_));
+		std::memset(line4_, 0, sizeof(line4_));
+		std::memset(line5_, 0, sizeof(line5_));
+		std::memset(line6_, 0, sizeof(line6_));
+		std::memset(line7_, 0, sizeof(line7_));
+		for (int i = 0; i < kLineCount; ++i)
+		{
+			indices_[i] = 0;
+			lpf_state_[i] = 0.0f;
+			feedback_gain_[i] = 0.0f;
+		}
+		AssignLines();
+		SetDamping(0.5f);
+		SetDecaySeconds(3.0f);
+	}
+
+	void SetDecaySeconds(float rt60_sec)
+	{
+		if (rt60_sec < kMinRt60Sec)
+		{
+			rt60_sec = kMinRt60Sec;
+		}
+		if (rt60_sec > kMaxRt60Sec)
+		{
+			rt60_sec = kMaxRt60Sec;
+		}
+		rt60_sec_ = rt60_sec;
+		for (int i = 0; i < kLineCount; ++i)
+		{
+			const float delay_samples = static_cast<float>(lengths_[i]);
+			float gain = powf(10.0f, (-3.0f * delay_samples)
+				/ (rt60_sec_ * sample_rate_));
+			if (gain > 0.9999f)
+			{
+				gain = 0.9999f;
+			}
+			feedback_gain_[i] = gain;
+		}
+	}
+
+	void SetDamping(float damp_0to1)
+	{
+		if (damp_0to1 < 0.0f)
+		{
+			damp_0to1 = 0.0f;
+		}
+		if (damp_0to1 > 1.0f)
+		{
+			damp_0to1 = 1.0f;
+		}
+		const float damp_curve = damp_0to1 * 1.6f;
+		float fc = kReverbDampMaxHz
+			* powf(kReverbDampMinHz / kReverbDampMaxHz, damp_curve);
+		const float fc_max = sample_rate_ * 0.49f;
+		if (fc > fc_max)
+		{
+			fc = fc_max;
+		}
+		if (fc < kReverbDampMinHz)
+		{
+			fc = kReverbDampMinHz;
+		}
+		const float a = expf(-2.0f * kPi * fc / sample_rate_);
+		damp_coeff_ = 1.0f - a;
+	}
+
+	void Process(float in_l, float in_r, float* out_l, float* out_r)
+	{
+		float delay_out[kLineCount] = {};
+		float fb[kLineCount] = {};
+		for (int i = 0; i < kLineCount; ++i)
+		{
+			delay_out[i] = lines_[i][indices_[i]];
+			const float lp = lpf_state_[i]
+				+ damp_coeff_ * (delay_out[i] - lpf_state_[i]);
+			lpf_state_[i] = lp;
+			fb[i] = lp * feedback_gain_[i];
+		}
+
+		float mix[kLineCount] = {};
+		Hadamard8(fb, mix);
+		for (int i = 0; i < kLineCount; ++i)
+		{
+			mix[i] += kInputScale * ((kInL[i] * in_l) + (kInR[i] * in_r));
+			lines_[i][indices_[i]] = mix[i];
+			indices_[i]++;
+			if (indices_[i] >= lengths_[i])
+			{
+				indices_[i] = 0;
+			}
+		}
+
+		float out_sum_l = 0.0f;
+		float out_sum_r = 0.0f;
+		for (int i = 0; i < kLineCount; ++i)
+		{
+			out_sum_l += delay_out[i] * kOutL[i];
+			out_sum_r += delay_out[i] * kOutR[i];
+		}
+		*out_l = out_sum_l * kOutputScale;
+		*out_r = out_sum_r * kOutputScale;
+	}
+
+	const float* LineBuffer(size_t index) const
+	{
+		switch (index)
+		{
+			case 0: return line0_;
+			case 1: return line1_;
+			case 2: return line2_;
+			case 3: return line3_;
+			case 4: return line4_;
+			case 5: return line5_;
+			case 6: return line6_;
+			case 7: return line7_;
+			default: break;
+		}
+		return nullptr;
+	}
+
+private:
+	static constexpr int kLineCount = 8;
+	static constexpr float kMinRt60Sec = 0.1f;
+	static constexpr float kMaxRt60Sec = 3.0f;
+	static constexpr float kHadamardScale = 0.353553390593f;
+	static constexpr float kInputScale = 0.25f;
+	static constexpr float kOutputScale = 0.25f;
+	static constexpr size_t kLine0 = 2251;
+	static constexpr size_t kLine1 = 2399;
+	static constexpr size_t kLine2 = 2579;
+	static constexpr size_t kLine3 = 2767;
+	static constexpr size_t kLine4 = 2953;
+	static constexpr size_t kLine5 = 3163;
+	static constexpr size_t kLine6 = 3371;
+	static constexpr size_t kLine7 = 3571;
+
+	void AssignLines()
+	{
+		lines_[0] = line0_;
+		lines_[1] = line1_;
+		lines_[2] = line2_;
+		lines_[3] = line3_;
+		lines_[4] = line4_;
+		lines_[5] = line5_;
+		lines_[6] = line6_;
+		lines_[7] = line7_;
+
+		lengths_[0] = kLine0;
+		lengths_[1] = kLine1;
+		lengths_[2] = kLine2;
+		lengths_[3] = kLine3;
+		lengths_[4] = kLine4;
+		lengths_[5] = kLine5;
+		lengths_[6] = kLine6;
+		lengths_[7] = kLine7;
+	}
+
+	static void Hadamard8(const float in[kLineCount], float out[kLineCount])
+	{
+		const float a0 = in[0] + in[1];
+		const float a1 = in[0] - in[1];
+		const float a2 = in[2] + in[3];
+		const float a3 = in[2] - in[3];
+		const float a4 = in[4] + in[5];
+		const float a5 = in[4] - in[5];
+		const float a6 = in[6] + in[7];
+		const float a7 = in[6] - in[7];
+
+		const float b0 = a0 + a2;
+		const float b1 = a1 + a3;
+		const float b2 = a0 - a2;
+		const float b3 = a1 - a3;
+		const float b4 = a4 + a6;
+		const float b5 = a5 + a7;
+		const float b6 = a4 - a6;
+		const float b7 = a5 - a7;
+
+		out[0] = (b0 + b4) * kHadamardScale;
+		out[1] = (b1 + b5) * kHadamardScale;
+		out[2] = (b2 + b6) * kHadamardScale;
+		out[3] = (b3 + b7) * kHadamardScale;
+		out[4] = (b0 - b4) * kHadamardScale;
+		out[5] = (b1 - b5) * kHadamardScale;
+		out[6] = (b2 - b6) * kHadamardScale;
+		out[7] = (b3 - b7) * kHadamardScale;
+	}
+
+	static constexpr float kInL[kLineCount] = {1.0f, 1.0f, 1.0f, 1.0f,
+		-1.0f, -1.0f, -1.0f, -1.0f};
+	static constexpr float kInR[kLineCount] = {1.0f, -1.0f, 1.0f, -1.0f,
+		1.0f, -1.0f, 1.0f, -1.0f};
+	static constexpr float kOutL[kLineCount] = {1.0f, 1.0f, -1.0f, -1.0f,
+		1.0f, 1.0f, -1.0f, -1.0f};
+	static constexpr float kOutR[kLineCount] = {1.0f, -1.0f, -1.0f, 1.0f,
+		1.0f, -1.0f, -1.0f, 1.0f};
+
+	float line0_[kLine0];
+	float line1_[kLine1];
+	float line2_[kLine2];
+	float line3_[kLine3];
+	float line4_[kLine4];
+	float line5_[kLine5];
+	float line6_[kLine6];
+	float line7_[kLine7];
+
+	float* lines_[kLineCount] = {};
+	size_t lengths_[kLineCount] = {};
+	size_t indices_[kLineCount] = {};
+	float lpf_state_[kLineCount] = {};
+	float feedback_gain_[kLineCount] = {};
+	float sample_rate_ = 48000.0f;
+	float damp_coeff_ = 0.5f;
+	float rt60_sec_ = 3.0f;
+};
+
+constexpr float SramFdnReverb::kInL[SramFdnReverb::kLineCount];
+constexpr float SramFdnReverb::kInR[SramFdnReverb::kLineCount];
+constexpr float SramFdnReverb::kOutL[SramFdnReverb::kLineCount];
+constexpr float SramFdnReverb::kOutR[SramFdnReverb::kLineCount];
+
 struct BitCrushState
 {
 	int hold = 0;
@@ -836,7 +1075,11 @@ SdmmcHandler   sdcard;
 FatFSInterface fsi;
 Encoder      encoder_r;
 Switch       shift_button;
+#if USE_SRAM_FDN_REVERB
+static SramFdnReverb reverb;
+#else
 DSY_SDRAM_BSS ReverbSc reverb;
+#endif
 DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_l;
 DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_r;
 DelayLine<float, kReverbPreDelayMaxSamples> DSY_SDRAM_BSS reverb_predelay_l;
@@ -1382,7 +1625,7 @@ static uint32_t master_reverb_tail_samples = 0;
 volatile float reverb_wet = kReverbDefaultWet;
 volatile float reverb_pre = 0.5f;
 volatile float reverb_damp = 0.5f;
-volatile float reverb_decay = 0.5f;
+volatile float reverb_decay = 1.0f;
 volatile float delay_wet = kDelayDefaultWet;
 volatile float delay_time = 0.5f;
 volatile float delay_feedback = 0.5f;
@@ -1728,7 +1971,11 @@ static const char* RegionForAddress(uintptr_t addr)
 	{
 		return "SRAM";
 	}
-	if (addr >= 0x30000000 && addr < 0x30048000)
+	if (addr >= 0x30000000 && addr < 0x30008000)
+	{
+		return "RAM_D2_DMA";
+	}
+	if (addr >= 0x30008000 && addr < 0x30048000)
 	{
 		return "RAM_D2";
 	}
@@ -1742,6 +1989,56 @@ static const char* RegionForAddress(uintptr_t addr)
 	}
 	return "OTHER";
 }
+
+#if MEM_REGION_DEBUG
+static void PrintMemRegions()
+{
+	auto P = [](const char* name, const void* p)
+	{
+		daisy::Logger<daisy::LOGGER_INTERNAL>::Print(
+			"%s @ 0x%08lX -> %s\r\n",
+			name,
+			(unsigned long)(uintptr_t)p,
+			RegionForAddress((uintptr_t)p));
+	};
+
+	// Comment out any line that doesn't exist in this build
+	P("perform_voices",          &perform_voices[0]);
+	P("perform_lpf_l1",          &perform_lpf_l1[0]);
+	P("perform_lpf_l2",          &perform_lpf_l2[0]);
+	P("perform_lpf_r1",          &perform_lpf_r1[0]);
+	P("perform_lpf_r2",          &perform_lpf_r2[0]);
+
+#if USE_SRAM_FDN_REVERB
+	P("reverb_fdn_0",            reverb.LineBuffer(0));
+	P("reverb_fdn_1",            reverb.LineBuffer(1));
+	P("reverb_fdn_2",            reverb.LineBuffer(2));
+	P("reverb_fdn_3",            reverb.LineBuffer(3));
+	P("reverb_fdn_4",            reverb.LineBuffer(4));
+	P("reverb_fdn_5",            reverb.LineBuffer(5));
+	P("reverb_fdn_6",            reverb.LineBuffer(6));
+	P("reverb_fdn_7",            reverb.LineBuffer(7));
+#else
+	P("reverb",                  &reverb);
+#endif
+	P("delay_line_l",            &delay_line_l);
+	P("delay_line_r",            &delay_line_r);
+
+	P("perform_sample_buffer_l", &perform_sample_buffer_l[0]);
+	P("perform_sample_buffer_r", &perform_sample_buffer_r[0]);
+	P("play_sample_buffer_l",    &play_sample_buffer_l[0]);
+	P("play_sample_buffer_r",    &play_sample_buffer_r[0]);
+
+	P("record_text_mask",        &record_text_mask[0][0]);
+	P("record_invert_mask",      &record_invert_mask[0][0]);
+	P("record_fb_buf",           &record_fb_buf[0][0]);
+	P("record_bold_mask",        &record_bold_mask[0][0]);
+
+	P("wav_read",                &wav_read[0]);
+	// P("wav_write",               &wav_write[0]);
+	P("preview_read_buf",        &preview_read_buf[0]);
+}
+#endif
 
 static void LogSdCardStatus()
 {
@@ -8099,7 +8396,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 						{
 							reverb_pre = 0.5f;
 							reverb_damp = 0.5f;
-							reverb_decay = 0.5f;
+							reverb_decay = 1.0f;
 							reverb_params_initialized = true;
 							fx_params_dirty = true;
 						}
@@ -8980,8 +9277,13 @@ static float last_chorus_wow = -1.0f;
 	static float last_delay_feedback = -1.0f;
 	static float last_delay_spread = -1.0f;
 	static float last_delay_freeze = -1.0f;
+#if USE_SRAM_FDN_REVERB
+	static float last_rev_rt60 = -1.0f;
+	static float last_rev_damp = -1.0f;
+#else
 	static float last_rev_feedback = -1.0f;
 	static float last_rev_lp = -1.0f;
+#endif
 	static float last_rev_predelay = -1.0f;
 
 	if (fx_params_dirty)
@@ -9053,11 +9355,7 @@ static float last_chorus_wow = -1.0f;
 		const float decay_ms = kReverbDecayMinMs
 			+ cached_reverb_decay * cached_reverb_decay * (kReverbDecayMaxMs - kReverbDecayMinMs);
 		const float decay_samples = decay_ms * 0.001f * out_sr;
-		if (cached_reverb_decay >= 0.999f)
-		{
-			cached_reverb_release = 1.0f;
-		}
-		else if (decay_samples > 1.0f)
+		if (decay_samples > 1.0f)
 		{
 			cached_reverb_release = expf(-1.0f / decay_samples);
 		}
@@ -9156,6 +9454,19 @@ static float last_chorus_wow = -1.0f;
 			last_delay_freeze = cached_delay_freeze;
 		}
 
+#if USE_SRAM_FDN_REVERB
+		const float decay_sec = decay_ms * 0.001f;
+		if (fabsf(decay_sec - last_rev_rt60) > 1e-4f)
+		{
+			reverb.SetDecaySeconds(decay_sec);
+			last_rev_rt60 = decay_sec;
+		}
+		if (fabsf(cached_reverb_damp - last_rev_damp) > kFxParamEpsilon)
+		{
+			reverb.SetDamping(cached_reverb_damp);
+			last_rev_damp = cached_reverb_damp;
+		}
+#else
 		float rev_feedback = kReverbFeedback;
 		if (cached_reverb_decay >= 0.999f)
 		{
@@ -9173,6 +9484,7 @@ static float last_chorus_wow = -1.0f;
 		{
 			rev_lp = kReverbDampMinHz;
 		}
+#endif
 		const float pre_curve = powf(cached_reverb_pre, 3.0f);
 		float rev_predelay_samples
 			= pre_curve * (kReverbPreDelayMaxMs * 0.001f * out_sr);
@@ -9182,6 +9494,7 @@ static float last_chorus_wow = -1.0f;
 			rev_predelay_samples = rev_predelay_max;
 		}
 		cached_reverb_predelay_samples = rev_predelay_samples;
+#if !USE_SRAM_FDN_REVERB
 		if (fabsf(rev_feedback - last_rev_feedback) > kFxParamEpsilon)
 		{
 			reverb.SetFeedback(rev_feedback);
@@ -9192,6 +9505,7 @@ static float last_chorus_wow = -1.0f;
 			reverb.SetLpFreq(rev_lp);
 			last_rev_lp = rev_lp;
 		}
+#endif
 		if (fabsf(rev_predelay_samples - last_rev_predelay) >= 0.5f)
 		{
 			reverb_predelay_l.SetDelay(rev_predelay_samples);
@@ -10219,12 +10533,25 @@ int main(void)
 	hw.SetAudioBlockSize(48); // number of samples handled per callback
 	hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 	UpdateMasterFxTailSamples(hw.AudioSampleRate());
+#if WAIT_FOR_SERIAL_LOG
+	hw.seed.StartLog(true);
+#else
 	hw.seed.StartLog(false);
+#endif
 	LogLine("Logger started");
+#if MEM_REGION_DEBUG
+	daisy::System::Delay(200);
+	PrintMemRegions();
+#endif
 
 	reverb.Init(hw.AudioSampleRate());
+#if USE_SRAM_FDN_REVERB
+	reverb.SetDecaySeconds(3.0f);
+	reverb.SetDamping(reverb_damp);
+#else
 	reverb.SetFeedback(kReverbFeedback);
 	reverb.SetLpFreq(kReverbLpFreq);
+#endif
 	sat_l.Init(hw.AudioSampleRate());
 	sat_r.Init(hw.AudioSampleRate());
 	sat_l.SetTone(0.5f);
@@ -10291,6 +10618,10 @@ int main(void)
 		= I2CHandle::Config::Speed::I2C_400KHZ;
 	disp_cfg.driver_config.transport_config.i2c_address = 0x3C;
 	display.Init(disp_cfg);
+	LogLine("Display init OK");
+	display.Fill(false);
+	display.Update();
+	LogLine("Initial display flush OK");
 	InitLoadLayout();
 
 	SdmmcHandler::Config sd_cfg;
@@ -10300,7 +10631,9 @@ int main(void)
 	MountSd();
 
 	DrawMenu(menu_index);
+	display.Update();
 	g_last_draw_ms = System::GetNow();
+	g_display_update_pending = false;
 	{
 		uint32_t bits = 0;
 		const bool in_play_mode = IsPlayUiMode(ui_mode);
@@ -11427,21 +11760,7 @@ int main(void)
 			}
 			hw.led1.Set(0.0f, led1_level, 0.0f);
 		}
-		const uint32_t draw_now = System::GetNow();
-		const bool needs_draw = g_display_update_pending
-			|| request_shift_redraw
-			|| request_delete_redraw
-			|| request_playhead_redraw
-			|| play_screen_dirty
-			|| waveform_dirty
-			|| live_wave_dirty
-			|| request_perform_redraw
-			|| request_fx_detail_redraw
-			|| request_length_redraw;
-		if (needs_draw)
-		{
-			FlushDisplayIfDue(draw_now);
-		}
+		FlushDisplayIfDue(System::GetNow());
 		hw.UpdateLeds();
 		hw.DelayMs(1);
 	}
