@@ -317,6 +317,7 @@ constexpr float kDelayWetStep = 0.02f;
 constexpr float kDelayParamStep = 0.02f;
 constexpr int kBitResoStepCount = 3;
 constexpr int kBitResoSteps[kBitResoStepCount] = {2, 3, 4};
+constexpr float kBitResoStepSizes[kBitResoStepCount] = {0.5f, 0.25f, 0.125f};
 constexpr const char* kBitResoLabels[kBitResoStepCount] = {"CRUSH", "STATIC", "HISS"};
 constexpr int kBitcrushMaxHold = 32;
 constexpr float kFxParamEpsilon = 1e-5f;
@@ -1126,6 +1127,12 @@ enum AudioCmdBits : uint32_t
 static volatile uint32_t g_audio_cmd = 0;
 static volatile SampleContext g_pending_context = SampleContext::Perform;
 static volatile int32_t g_audio_live_track = -1;
+enum AudioEventBits : uint32_t
+{
+	kAudioEventNone = 0,
+	kAudioEventRecordDone = 1u << 0,
+};
+static volatile uint32_t g_audio_events = 0;
 
 static void RequestAudioCmd(uint32_t bits)
 {
@@ -1238,12 +1245,16 @@ struct FxParamsAudio
 	float chorus_rate_hz = 0.0f;
 	int32_t chorus_mode = 0;
 	float chorus_wow = 0.0f;
+	float chorus_wow_mapped = 0.0f;
+	float chorus_wow_curve = 0.0f;
 	float tape_rate = 0.0f;
 	float delay_wet = 0.0f;
 	float delay_feedback = 0.0f;
 	float delay_spread = 0.0f;
 	float delay_freeze = 0.0f;
 	float delay_target_samples = 1.0f;
+	float delay_time_alpha = 1.0f;
+	float delay_param_alpha = 1.0f;
 	float reverb_wet = 0.0f;
 	float reverb_shimmer = 0.0f;
 	float reverb_feedback = kReverbFeedback;
@@ -1256,6 +1267,7 @@ struct FxParamsAudio
 static FxParamsAudio g_fx_params[2] = {};
 static volatile uint8_t g_fx_params_idx = 0;
 static float g_audio_sr = 48000.0f;
+static size_t g_audio_block_size = 48;
 static float g_flt_target_cutoff_hz = -1.0f;
 static float g_flt_target_q = -1.0f;
 static volatile uint8_t g_flt_target_gen = 0;
@@ -2833,6 +2845,8 @@ static void UpdateFxParamsAudio()
 		* (kChorusRateMaxHz - kChorusRateMinHz);
 	p.chorus_mode = chorus_mode;
 	p.chorus_wow = Clamp01(chorus_wow);
+	p.chorus_wow_mapped = powf(p.chorus_wow, 0.6f);
+	p.chorus_wow_curve = p.chorus_wow_mapped * p.chorus_wow_mapped;
 	p.tape_rate = Clamp01(tape_rate);
 	if (p.chorus_mode == 0)
 	{
@@ -2863,6 +2877,13 @@ static void UpdateFxParamsAudio()
 		delay_samples = 1.0f;
 	}
 	p.delay_target_samples = delay_samples;
+	{
+		const float dt = static_cast<float>(g_audio_block_size) / g_audio_sr;
+		const float time_tau = kDelayTimeSlewMs * 0.001f;
+		p.delay_time_alpha = (time_tau > 0.0f) ? (1.0f - expf(-dt / time_tau)) : 1.0f;
+		const float param_tau = kDelayParamSlewMs * 0.001f;
+		p.delay_param_alpha = (param_tau > 0.0f) ? (1.0f - expf(-dt / param_tau)) : 1.0f;
+	}
 
 	p.reverb_wet = Clamp01(reverb_wet);
 	p.reverb_shimmer = Clamp01(reverb_shimmer);
@@ -9107,11 +9128,8 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	const bool perform_fx_active = (fx_active_mask != 0)
 		|| sat_process || chorus_process || delay_process || reverb_process;
 	const float rev_shimmer = fxp.reverb_shimmer;
-	const float dt = static_cast<float>(size) / out_sr;
-	const float time_tau = kDelayTimeSlewMs * 0.001f;
-	const float time_alpha = (time_tau > 0.0f) ? (1.0f - expf(-dt / time_tau)) : 1.0f;
-	const float param_tau = kDelayParamSlewMs * 0.001f;
-	const float param_alpha = (param_tau > 0.0f) ? (1.0f - expf(-dt / param_tau)) : 1.0f;
+	const float time_alpha = fxp.delay_time_alpha;
+	const float param_alpha = fxp.delay_param_alpha;
 	float delay_target = fxp.delay_target_samples;
 	if (delay_time_smoothed < 0.0f)
 	{
@@ -9242,8 +9260,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				--bit_hold;
 			}
 			const int bits_idx = BitResoIndexFromValue(bit_reso);
-			const int bits = kBitResoSteps[bits_idx];
-			const float step = 1.0f / powf(2.0f, static_cast<float>(bits - 1));
+			const float step = kBitResoStepSizes[bits_idx];
 			wet_l = roundf(bit_hold_l / step) * step;
 			wet_r = roundf(bit_hold_r / step) * step;
 			if (wet_l > 1.0f) wet_l = 1.0f;
@@ -9267,8 +9284,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			const float drop_amt = fxp.chorus_wow;
 			if (drop_amt > 0.0f)
 			{
-				const float drop_amt_mapped = powf(drop_amt, 0.6f);
-				const float drop_curve = drop_amt_mapped * drop_amt_mapped;
+				const float drop_curve = fxp.chorus_wow_curve;
 				const float rate_curve = fxp.tape_rate * fxp.tape_rate;
 				const float rate_scale = 0.2f + (rate_curve * 6.0f);
 				const float drop_rate = (0.2f + (drop_curve * 12.0f)) * rate_scale;
@@ -9641,7 +9657,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 				record_waveform_pending = true;
 				if (sample_loaded)
 				{
-					request_length_redraw = true;
+					g_audio_events |= kAudioEventRecordDone;
 				}
 			}
 		}
@@ -10158,11 +10174,20 @@ audio_done:
 			cpu_load_peak_pct = 0.0f;
 		}
 	}
-	request_playhead_redraw = true;
 }
 
 static void UiRenderTick(bool ui_blocked)
 {
+	uint32_t audio_events = 0;
+	{
+		daisy::ScopedIrqBlocker irq;
+		audio_events = g_audio_events;
+		g_audio_events = 0;
+	}
+	if (audio_events & kAudioEventRecordDone)
+	{
+		request_length_redraw = true;
+	}
 	const bool play_ui = IsPlayUiMode(ui_mode);
 	int32_t current_step = playhead_step;
 	{
@@ -10960,6 +10985,7 @@ int main(void)
 	DWT->CYCCNT = 0;
 	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
 	hw.SetAudioBlockSize(48); // number of samples handled per callback
+	g_audio_block_size = 48;
 	hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 	g_audio_sr = hw.AudioSampleRate();
 	UpdateMasterFxTailSamples(g_audio_sr);
