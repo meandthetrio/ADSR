@@ -4732,38 +4732,64 @@ static float BitResoValueFromIndex(int idx)
 	return static_cast<float>(ClampI(idx, 0, max_idx)) / static_cast<float>(max_idx);
 }
 
-static void StartRecordingAudioSafe()
+// UI thread ONLY: bookkeeping + UI state + publish snapshot
+static void PrepareRecordingUiState()
 {
-	record_pos = 0;
-	sample_length = 0;
-	sample_loaded = false;
-	perform_attack_norm = 0.0f;
-	perform_release_norm = 0.0f;
-	ResetPerformVoices();
-	playback_active = false;
-	sample_channels = 1;
-	sample_rate = 48000;
-	trim_start = 0.0f;
-	trim_end = 1.0f;
-	CopyString(loaded_sample_name, "UNSAVED AUDIO", kMaxWavNameLen);
-	for (int i = 0; i < 128; ++i)
-	{
-		live_wave_min[i] = 0;
-		live_wave_max[i] = 0;
-	}
-	live_wave_last_col = -1;
-	live_wave_peak = 1;
-	live_wave_dirty = true;
-	g_audio_recording_active = true;
+    // UI/bookkeeping (safe outside audio callback)
+    sample_length = 0;
+    sample_loaded = false;
+
+    perform_attack_norm  = 0.0f;
+    perform_release_norm = 0.0f;
+
+    ResetPerformVoices();        // OK here (not in audio thread)
+    playback_active = false;
+
+    sample_channels = 1;
+    sample_rate     = 48000;
+
+    trim_start = 0.0f;
+    trim_end   = 1.0f;
+
+    CopyString(loaded_sample_name, "UNSAVED AUDIO", kMaxWavNameLen);
+
+    for (int i = 0; i < 128; ++i)
+    {
+        live_wave_min[i] = 0;
+        live_wave_max[i] = 0;
+    }
+    live_wave_last_col = -1;
+    live_wave_peak     = 1;
+    live_wave_dirty    = true;
+
+    // Publish "empty" runtime so audio never sees half-cleared state
+    PublishRuntimeFromUi();
 }
+
+// Audio thread ONLY: deterministic / bounded (called from AudioCallback)
+static void StartRecordingAudioRT()
+{
+    record_pos = 0;
+
+    // Stop playback immediately & deterministically
+    playback_active = false;
+
+    // Begin recording
+    g_audio_recording_active = true;
+}
+
 
 static void StartRecording()
 {
-	waveform_record_input = record_input;
-	StartRecordingAudioSafe();
-	PublishRuntimeFromUi();
-	record_state = RecordState::Recording;
+    waveform_record_input = record_input;
+
+    // UI prep only
+    PrepareRecordingUiState();
+
+    // UI state machine
+    record_state = RecordState::Recording;
 }
+
 
 static void DrawRecordCountdown()
 {
@@ -7599,12 +7625,13 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		g_rt_active_idx = g_rt_pub_idx;
 	}
 	if (cmd & kCmdRecStart)
-	{
-		if (!g_audio_recording_active)
-		{
-			StartRecordingAudioSafe();
-		}
-	}
+{
+    if (!g_audio_recording_active)
+    {
+        StartRecordingAudioRT();
+    }
+}
+
 	if (cmd & kCmdRecStop)
 	{
 		if (g_audio_recording_active)
