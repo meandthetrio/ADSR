@@ -1441,6 +1441,7 @@ volatile int32_t record_source_index = 0;
 volatile int32_t record_target_index = kRecordTargetSave;
 volatile uint32_t record_countdown_start_ms = 0;
 volatile size_t record_pos = 0;
+static volatile size_t g_recorded_length_audio = 0;
 volatile bool record_waveform_pending = false;
 volatile int32_t encoder_r_accum = 0;
 volatile bool encoder_r_button_press = false;
@@ -3042,36 +3043,6 @@ static bool AnyPerformVoiceActive()
 	return false;
 }
 
-static SampleState& SampleStateForContext(SampleContext ctx)
-{
-	(void)ctx;
-	return perform_sample_state;
-}
-
-static WaveformCache& WaveformCacheForContext(SampleContext ctx)
-{
-	(void)ctx;
-	return perform_waveform_cache;
-}
-
-static void SaveWaveformCache(SampleContext ctx)
-{
-	WaveformCache& cache = WaveformCacheForContext(ctx);
-	std::memcpy(cache.min, waveform_min, sizeof(waveform_min));
-	std::memcpy(cache.max, waveform_max, sizeof(waveform_max));
-	cache.ready = waveform_ready;
-	cache.dirty = waveform_dirty;
-}
-
-static void LoadWaveformCache(SampleContext ctx)
-{
-	WaveformCache& cache = WaveformCacheForContext(ctx);
-	std::memcpy(waveform_min, cache.min, sizeof(waveform_min));
-	std::memcpy(waveform_max, cache.max, sizeof(waveform_max));
-	waveform_ready = cache.ready;
-	waveform_dirty = cache.dirty;
-}
-
 static void PublishRuntimeFromUi()
 {
 	const uint8_t next = static_cast<uint8_t>(g_rt_pub_idx ^ 1u);
@@ -3090,86 +3061,6 @@ static void PublishRuntimeFromUi()
 		g_rt_pub_idx = next;
 		g_audio_cmd |= kCmdCommitRuntime;
 	}
-}
-
-static void SaveSampleState(SampleState& state)
-{
-	CopyString(state.name, loaded_sample_name, kMaxWavNameLen);
-	state.length = sample_length;
-	state.play_start = sample_play_start;
-	state.play_end = sample_play_end;
-	state.rate = sample_rate;
-	state.channels = sample_channels;
-	state.loaded = sample_loaded;
-	state.trim_start = trim_start;
-	state.trim_end = trim_end;
-	state.from_recording = waveform_from_recording;
-}
-
-static void LoadSampleState(const SampleState& state)
-{
-	CopyString(loaded_sample_name, state.name, kMaxWavNameLen);
-	sample_length = state.length;
-	sample_play_start = state.play_start;
-	sample_play_end = state.play_end;
-	sample_rate = state.rate;
-	sample_channels = state.channels;
-	sample_loaded = state.loaded;
-	trim_start = state.trim_start;
-	trim_end = state.trim_end;
-	waveform_from_recording = state.from_recording;
-}
-
-static bool ComputeTrimWindowFrames(float trim_start_in,
-									float trim_end_in,
-									size_t length,
-									size_t& out_start,
-									size_t& out_end)
-{
-	if (length < 1)
-	{
-		out_start = 0;
-		out_end = length;
-		return false;
-	}
-	if (length < 2)
-	{
-		out_start = 0;
-		out_end = length;
-		return (out_end > out_start);
-	}
-
-	float start = trim_start_in;
-	float end = trim_end_in;
-	if (start < 0.0f) start = 0.0f;
-	if (end > 1.0f) end = 1.0f;
-	if (end < 0.0f) end = 0.0f;
-	if (start > 1.0f) start = 1.0f;
-
-	const float min_norm = 2.0f / static_cast<float>(length);
-	if (end - start < min_norm)
-	{
-		end = start + min_norm;
-		if (end > 1.0f)
-		{
-			end = 1.0f;
-			start = end - min_norm;
-		}
-	}
-
-	uint32_t snap_start = static_cast<uint32_t>(start * static_cast<float>(length));
-	uint32_t snap_end = static_cast<uint32_t>(end * static_cast<float>(length));
-	if (snap_end <= snap_start)
-	{
-		snap_end = snap_start + 2;
-	}
-	if (snap_end > length)
-	{
-		snap_end = static_cast<uint32_t>(length);
-	}
-	out_start = snap_start;
-	out_end = snap_end;
-	return (out_end > out_start);
 }
 
 static void CapturePerformState(PerformState& state)
@@ -7718,6 +7609,7 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	{
 		if (g_audio_recording_active)
 		{
+			g_recorded_length_audio = record_pos;
 			g_audio_recording_active = false;
 			PushAudioEvent(kAudioEventRecFinished);
 		}
@@ -8420,14 +8312,7 @@ static float last_chorus_wow = -1.0f;
 			}
 			if (record_pos >= kRecordMaxFrames)
 			{
-				sample_length = record_pos;
-				sample_channels = 1;
-				sample_rate = 48000;
-				sample_loaded = (sample_length > 0);
-				playback_active = false;
-				trim_start = 0.0f;
-				trim_end = 1.0f;
-				waveform_from_recording = true;
+				g_recorded_length_audio = record_pos;
 				g_audio_recording_active = false;
 				record_active = false;
 				PushAudioEvent(kAudioEventPlaybackStopped | kAudioEventRecFinished);
@@ -9053,9 +8938,18 @@ int main(void)
 			{
 				if (record_state == RecordState::Recording)
 				{
+					sample_length = g_recorded_length_audio;
+					sample_channels = 1;
+					sample_rate = 48000;
+					sample_loaded = (sample_length > 0);
+					playback_active = false;
+					trim_start = 0.0f;
+					trim_end = 1.0f;
+					waveform_from_recording = true;
+					UpdateTrimFrames();
+					PublishRuntimeFromUi();
 					record_state = RecordState::Review;
 				}
-				PublishRuntimeFromUi();
 				record_waveform_pending = true;
 				if (sample_loaded)
 				{
