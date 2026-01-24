@@ -939,6 +939,22 @@ volatile float playback_release_pos = 0.0f;
 volatile float playback_release_start = 0.0f;
 volatile int32_t current_note = -1;
 
+struct SampleRuntime
+{
+	const int16_t* l = nullptr;
+	const int16_t* r = nullptr;
+	size_t length = 0;
+	size_t play_start = 0;
+	size_t play_end = 0;
+	uint32_t rate = 48000;
+	uint16_t channels = 1;
+	bool loaded = false;
+};
+
+static SampleRuntime g_rt_buf[2];
+static volatile uint8_t g_rt_pub_idx = 0;
+static volatile uint8_t g_rt_active_idx = 0;
+
 struct PerformVoice
 {
 	bool active = false;
@@ -1082,11 +1098,10 @@ enum AudioCmdBits : uint32_t
 	kCmdRecStart     = 1U << 0,
 	kCmdRecStop      = 1U << 1,
 	kCmdAllNotesOff  = 1U << 2,
-	kCmdSetContext   = 1U << 3,
+	kCmdCommitRuntime = 1U << 3,
 };
 
 static volatile uint32_t g_audio_cmd = 0;
-static volatile SampleContext g_pending_context = SampleContext::Perform;
 static volatile uint32_t g_audio_event_bits = 0;
 
 static void RequestAudioCmd(uint32_t bits)
@@ -1102,15 +1117,6 @@ static void PushAudioEvent(uint32_t bits)
 	{
 		daisy::ScopedIrqBlocker irq;
 		g_audio_event_bits |= bits;
-	}
-}
-
-static void RequestContextSwitch(SampleContext ctx)
-{
-	{
-		daisy::ScopedIrqBlocker irq;
-		g_pending_context = ctx;
-		g_audio_cmd |= kCmdSetContext;
 	}
 }
 
@@ -2955,12 +2961,15 @@ static void JobTick()
 	}
 }
 
+static void PublishRuntimeFromUi();
+
 static void UpdateTrimFrames()
 {
 	if(sample_length < 2)
 	{
 		sample_play_start = 0;
 		sample_play_end   = sample_length;
+		PublishRuntimeFromUi();
 		return;
 	}
 
@@ -2986,6 +2995,7 @@ static void UpdateTrimFrames()
 
 	sample_play_start = snap_start_frame;
 	sample_play_end   = snap_end_frame;
+	PublishRuntimeFromUi();
 }
 
 static void AdjustTrimNormalized(int32_t start_delta, int32_t end_delta, bool fine = false)
@@ -3017,7 +3027,7 @@ static void AdjustTrimNormalized(int32_t start_delta, int32_t end_delta, bool fi
 
 static bool IsPerformUiMode(UiMode mode)
 {
-	return (mode == UiMode::Perform || mode == UiMode::Edt);
+	return (mode == UiMode::Perform);
 }
 
 static bool AnyPerformVoiceActive()
@@ -3062,6 +3072,26 @@ static void LoadWaveformCache(SampleContext ctx)
 	waveform_dirty = cache.dirty;
 }
 
+static void PublishRuntimeFromUi()
+{
+	const uint8_t next = static_cast<uint8_t>(g_rt_pub_idx ^ 1u);
+	SampleRuntime rt;
+	rt.l = sample_buffer_l;
+	rt.r = sample_buffer_r;
+	rt.length = sample_length;
+	rt.play_start = sample_play_start;
+	rt.play_end = sample_play_end;
+	rt.rate = sample_rate;
+	rt.channels = sample_channels;
+	rt.loaded = sample_loaded;
+	g_rt_buf[next] = rt;
+	{
+		daisy::ScopedIrqBlocker irq;
+		g_rt_pub_idx = next;
+		g_audio_cmd |= kCmdCommitRuntime;
+	}
+}
+
 static void SaveSampleState(SampleState& state)
 {
 	CopyString(state.name, loaded_sample_name, kMaxWavNameLen);
@@ -3088,21 +3118,6 @@ static void LoadSampleState(const SampleState& state)
 	trim_start = state.trim_start;
 	trim_end = state.trim_end;
 	waveform_from_recording = state.from_recording;
-}
-
-static void SetSampleContext(SampleContext ctx)
-{
-	(void)ctx;
-	if (current_sample_context == SampleContext::Perform)
-	{
-		return;
-	}
-	current_sample_context = SampleContext::Perform;
-}
-
-static void ApplyContextSwitchAudioSafe(SampleContext ctx)
-{
-	SetSampleContext(ctx);
 }
 
 static bool ComputeTrimWindowFrames(float trim_start_in,
@@ -3353,6 +3368,7 @@ static bool LoadSampleFromPath(const char* path)
 	sample_channels = 1;
 	trim_start = 0.0f;
 	trim_end = 1.0f;
+	PublishRuntimeFromUi();
 
 	FILINFO finfo;
 	FRESULT res = f_stat(path, &finfo);
@@ -3484,6 +3500,7 @@ static bool LoadSampleFromPath(const char* path)
 	waveform_from_recording = false;
 	JobStartWaveform(current_sample_context, true);
 	UpdateTrimFrames();
+	PublishRuntimeFromUi();
 	return true;
 }
 
@@ -4853,6 +4870,7 @@ static void StartRecording()
 {
 	waveform_record_input = record_input;
 	StartRecordingAudioSafe();
+	PublishRuntimeFromUi();
 	record_state = RecordState::Recording;
 }
 
@@ -5264,10 +5282,14 @@ static void DrawWaveform()
 	DrawBracket(start_x, true);
 	DrawBracket(end_x,   false);
 
-	if (ui_mode == UiMode::Edt && playback_active && sample_length > 1)
+	if (ui_mode == UiMode::Edt && playback_active)
 	{
-		const float denom = static_cast<float>(sample_length - 1);
-		float norm = playback_phase / denom;
+		const SampleRuntime rt = g_rt_buf[g_rt_active_idx];
+		const size_t length = rt.length;
+		if (length > 1)
+		{
+			const float denom = static_cast<float>(length - 1);
+			float norm = playback_phase / denom;
 		if (norm < 0.0f)
 		{
 			norm = 0.0f;
@@ -5276,8 +5298,9 @@ static void DrawWaveform()
 		{
 			norm = 1.0f;
 		}
-		const int play_x = ClampI(static_cast<int>(norm * static_cast<float>(W - 1) + 0.5f), 0, W - 1);
-		display.DrawLine(play_x, text_h, play_x, H - 1, true);
+			const int play_x = ClampI(static_cast<int>(norm * static_cast<float>(W - 1) + 0.5f), 0, W - 1);
+			display.DrawLine(play_x, text_h, play_x, H - 1, true);
+		}
 	}
 
 	display.SetCursor(0, 0);
@@ -6232,20 +6255,21 @@ static void ApplyPlaybackReverse(bool reverse)
 
 static void StartPlayback(uint8_t note)
 {
-	if (!sample_loaded || sample_length < 1)
+	const SampleRuntime rt = g_rt_buf[g_rt_active_idx];
+	if (!rt.loaded || rt.length < 1 || rt.l == nullptr)
 	{
 		return;
 	}
-	size_t window_start = sample_play_start;
-	size_t window_end = sample_play_end;
-	if (window_end > sample_length || window_end == 0)
+	size_t window_start = rt.play_start;
+	size_t window_end = rt.play_end;
+	if (window_end > rt.length || window_end == 0)
 	{
-		window_end = sample_length;
+		window_end = rt.length;
 	}
 	if (window_end <= window_start)
 	{
 		window_start = 0;
-		window_end = sample_length;
+		window_end = rt.length;
 	}
 	if (window_end == 0)
 	{
@@ -6259,7 +6283,8 @@ static void StartPlayback(uint8_t note)
 	playback_release_start = 0.0f;
 	const float semis = static_cast<float>(note - kBaseMidiNote);
 	const float pitch = powf(2.0f, semis / 12.0f);
-	playback_rate = pitch * (static_cast<float>(sample_rate) / hw.AudioSampleRate());
+	const float sr = (rt.rate == 0) ? 48000.0f : static_cast<float>(rt.rate);
+	playback_rate = pitch * (sr / hw.AudioSampleRate());
 	const bool reverse = (playback_reverse >= 0.5f);
 	playback_phase = static_cast<float>(reverse ? (window_end - 1) : window_start);
 	playback_active = true;
@@ -6267,20 +6292,21 @@ static void StartPlayback(uint8_t note)
 
 static void StartPlayback(uint8_t note, bool apply_pitch)
 {
-	if (!sample_loaded || sample_length < 1)
+	const SampleRuntime rt = g_rt_buf[g_rt_active_idx];
+	if (!rt.loaded || rt.length < 1 || rt.l == nullptr)
 	{
 		return;
 	}
-	size_t window_start = sample_play_start;
-	size_t window_end = sample_play_end;
-	if (window_end > sample_length || window_end == 0)
+	size_t window_start = rt.play_start;
+	size_t window_end = rt.play_end;
+	if (window_end > rt.length || window_end == 0)
 	{
-		window_end = sample_length;
+		window_end = rt.length;
 	}
 	if (window_end <= window_start)
 	{
 		window_start = 0;
-		window_end = sample_length;
+		window_end = rt.length;
 	}
 	if (window_end == 0)
 	{
@@ -6294,7 +6320,8 @@ static void StartPlayback(uint8_t note, bool apply_pitch)
 	playback_release_start = 0.0f;
 	const float semis = apply_pitch ? static_cast<float>(note - kBaseMidiNote) : 0.0f;
 	const float pitch = powf(2.0f, semis / 12.0f);
-	playback_rate = pitch * (static_cast<float>(sample_rate) / hw.AudioSampleRate());
+	const float sr = (rt.rate == 0) ? 48000.0f : static_cast<float>(rt.rate);
+	playback_rate = pitch * (sr / hw.AudioSampleRate());
 	const bool reverse = (playback_reverse >= 0.5f);
 	playback_phase = static_cast<float>(reverse ? (window_end - 1) : window_start);
 	playback_active = true;
@@ -6324,22 +6351,23 @@ static void StopPlayback(uint8_t note)
 
 static void StartPerformVoice(int32_t note)
 {
+	const SampleRuntime rt = g_rt_buf[g_rt_active_idx];
 	size_t window_start = 0;
 	size_t window_end = 0;
-	if (!sample_loaded || sample_length == 0)
+	if (!rt.loaded || rt.length == 0 || rt.l == nullptr)
 	{
 		return;
 	}
-	window_start = sample_play_start;
-	window_end = sample_play_end;
-	if (window_end > sample_length || window_end == 0)
+	window_start = rt.play_start;
+	window_end = rt.play_end;
+	if (window_end > rt.length || window_end == 0)
 	{
-		window_end = sample_length;
+		window_end = rt.length;
 	}
 	if (window_end <= window_start)
 	{
 		window_start = 0;
-		window_end = sample_length;
+		window_end = rt.length;
 	}
 	if (window_end <= window_start)
 	{
@@ -6386,7 +6414,7 @@ static void StartPerformVoice(int32_t note)
 	perform_lpf_l2[voice_index].Reset();
 	perform_lpf_r1[voice_index].Reset();
 	perform_lpf_r2[voice_index].Reset();
-	const float sr = (sample_rate == 0) ? 48000.0f : static_cast<float>(sample_rate);
+	const float sr = (rt.rate == 0) ? 48000.0f : static_cast<float>(rt.rate);
 	const float semis = static_cast<float>(note - kBaseMidiNote);
 	const float pitch = powf(2.0f, semis / 12.0f);
 	voice.rate = pitch * (sr / hw.AudioSampleRate());
@@ -6701,7 +6729,6 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 		}
 		else if (encoder_r_pressed && menu_index == 1)
 		{
-			RequestContextSwitch(SampleContext::Perform);
 			ui_mode = UiMode::Record;
 			record_source_index = (record_input == RecordInput::Mic) ? 1 : 0;
 			record_state = RecordState::SourceSelect;
@@ -6912,6 +6939,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				trim_start = 0.0f;
 				trim_end = 1.0f;
 				waveform_from_recording = true;
+				PublishRuntimeFromUi();
 				record_state = RecordState::Review;
 				record_waveform_pending = true;
 				if (sample_loaded)
@@ -6952,6 +6980,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				waveform_dirty = true;
 				waveform_from_recording = false;
 				playback_active = false;
+				PublishRuntimeFromUi();
 				record_state = RecordState::SourceSelect;
 				request_length_redraw = true;
 			}
@@ -7668,17 +7697,15 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	const uint32_t cyc_start = DWT->CYCCNT;
 
 	uint32_t cmd = 0;
-	SampleContext pending_ctx = SampleContext::Perform;
 	{
 		daisy::ScopedIrqBlocker irq;
 		cmd = g_audio_cmd;
 		g_audio_cmd = 0;
-		pending_ctx = g_pending_context;
 	}
 
-	if (cmd & kCmdSetContext)
+	if (cmd & kCmdCommitRuntime)
 	{
-		ApplyContextSwitchAudioSafe(pending_ctx);
+		g_rt_active_idx = g_rt_pub_idx;
 	}
 	if (cmd & kCmdRecStart)
 	{
@@ -7746,19 +7773,23 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		std::memcpy(&params, &g_audio_params, sizeof(AudioParams));
 	}
 	const float out_sr = hw.AudioSampleRate();
-	size_t window_start = sample_play_start;
-	size_t window_end = sample_play_end;
-	if (window_end > sample_length || window_end == 0)
+	const SampleRuntime& rt = g_rt_buf[g_rt_active_idx];
+	const int16_t* rt_l = rt.l;
+	const int16_t* rt_r = rt.r ? rt.r : rt.l;
+	size_t window_start = rt.play_start;
+	size_t window_end = rt.play_end;
+	const size_t length = rt.length;
+	if (window_end > length || window_end == 0)
 	{
-		window_end = sample_length;
+		window_end = length;
 	}
 	if (window_end <= window_start)
 	{
 		window_start = 0;
-		window_end = sample_length;
+		window_end = length;
 	}
 	const bool window_valid = (window_end > 0 && window_end > window_start);
-	if (playback_active && !window_valid)
+	if (playback_active && (!rt.loaded || !window_valid || rt.l == nullptr))
 	{
 		playback_active = false;
 		playback_env_samples = 0;
@@ -7965,8 +7996,8 @@ static float last_chorus_wow = -1.0f;
 	const float amp_release_ms = AmpEnvMsFromFader(amp_release);
 	const float amp_attack_samples = amp_attack_ms * 0.001f * out_sr;
 	const float amp_release_samples = amp_release_ms * 0.001f * out_sr;
-	const bool use_poly = (!record_active) && (perform_mode && sample_loaded);
-	const bool sample_stereo = (sample_channels == 2);
+	const bool use_poly = (!record_active) && (perform_mode && rt.loaded);
+	const bool sample_stereo = (rt.channels == 2);
 	const float flt_cutoff_hz = FltCutoffFromFader(flt_cutoff, out_sr);
 	const float flt_q = FltQFromFader(flt_res);
 	static float last_flt_cutoff = -1.0f;
@@ -8307,8 +8338,8 @@ static float last_chorus_wow = -1.0f;
 		&& !AnyPerformVoiceActive()
 		&& !sat_active
 		&& !chorus_active
-		&& (!delay_active || !sample_loaded)
-		&& (!reverb_active || !sample_loaded)
+		&& (!delay_active || !rt.loaded)
+		&& (!reverb_active || !rt.loaded)
 		&& (fx_chain_fade_samples_left == 0)
 		&& !fx_chain_pause_pending;
 	if (idle_audio)
@@ -8403,7 +8434,7 @@ static float last_chorus_wow = -1.0f;
 			}
 		}
 		const bool reverse_playback = (playback_reverse >= 0.5f);
-		if (sample_loaded && playback_active && !record_active && window_valid)
+		if (rt.loaded && playback_active && !record_active && window_valid)
 		{
 			float amp_env = 1.0f;
 			if (amp_env_active)
@@ -8465,10 +8496,10 @@ static float last_chorus_wow = -1.0f;
 					amp_env = noteoff_env;
 				}
 			}
-			if (sample_length == 1)
+			if (length == 1)
 			{
-				sig_l = static_cast<float>(sample_buffer_l[0]) * kSampleScale * playback_amp;
-				sig_r = static_cast<float>(sample_buffer_r[0]) * kSampleScale * playback_amp;
+				sig_l = static_cast<float>(rt_l[0]) * kSampleScale * playback_amp;
+				sig_r = static_cast<float>(rt_r[0]) * kSampleScale * playback_amp;
 				if (amp_env_active)
 				{
 					sig_l *= amp_env;
@@ -8482,10 +8513,10 @@ static float last_chorus_wow = -1.0f;
 				if (!reverse_playback && idx + 1 < window_end)
 				{
 					const float frac = playback_phase - static_cast<float>(idx);
-					const float l0 = static_cast<float>(sample_buffer_l[idx]);
-					const float l1 = static_cast<float>(sample_buffer_l[idx + 1]);
-					const float r0 = static_cast<float>(sample_buffer_r[idx]);
-					const float r1 = static_cast<float>(sample_buffer_r[idx + 1]);
+					const float l0 = static_cast<float>(rt_l[idx]);
+					const float l1 = static_cast<float>(rt_l[idx + 1]);
+					const float r0 = static_cast<float>(rt_r[idx]);
+					const float r1 = static_cast<float>(rt_r[idx + 1]);
 					sig_l = (l0 + (l1 - l0) * frac) * kSampleScale * playback_amp;
 					sig_r = (r0 + (r1 - r0) * frac) * kSampleScale * playback_amp;
 					if (amp_env_active)
@@ -8503,10 +8534,10 @@ static float last_chorus_wow = -1.0f;
 				else if (reverse_playback && idx > window_start)
 				{
 					const float frac = playback_phase - static_cast<float>(idx);
-					const float l0 = static_cast<float>(sample_buffer_l[idx]);
-					const float l1 = static_cast<float>(sample_buffer_l[idx - 1]);
-					const float r0 = static_cast<float>(sample_buffer_r[idx]);
-					const float r1 = static_cast<float>(sample_buffer_r[idx - 1]);
+					const float l0 = static_cast<float>(rt_l[idx]);
+					const float l1 = static_cast<float>(rt_l[idx - 1]);
+					const float r0 = static_cast<float>(rt_r[idx]);
+					const float r1 = static_cast<float>(rt_r[idx - 1]);
 					sig_l = (l0 + (l1 - l0) * frac) * kSampleScale * playback_amp;
 					sig_r = (r0 + (r1 - r0) * frac) * kSampleScale * playback_amp;
 					if (amp_env_active)
@@ -8523,8 +8554,8 @@ static float last_chorus_wow = -1.0f;
 				}
 				else if (reverse_playback && idx == window_start)
 				{
-					const float l0 = static_cast<float>(sample_buffer_l[idx]);
-					const float r0 = static_cast<float>(sample_buffer_r[idx]);
+					const float l0 = static_cast<float>(rt_l[idx]);
+					const float r0 = static_cast<float>(rt_r[idx]);
 					sig_l = l0 * kSampleScale * playback_amp;
 					sig_r = r0 * kSampleScale * playback_amp;
 					if (amp_env_active)
@@ -8610,10 +8641,10 @@ static float last_chorus_wow = -1.0f;
 					const float amp = voice.amp * env;
 					float samp_l = 0.0f;
 					float samp_r = 0.0f;
-					samp_l = static_cast<float>(sample_buffer_l[idx]) * kSampleScale * amp;
+					samp_l = static_cast<float>(rt_l[idx]) * kSampleScale * amp;
 					const float r = sample_stereo
-						? static_cast<float>(sample_buffer_r[idx])
-						: static_cast<float>(sample_buffer_l[idx]);
+						? static_cast<float>(rt_r[idx])
+						: static_cast<float>(rt_l[idx]);
 					samp_r = r * kSampleScale * amp;
 					if (perform_mode)
 					{
@@ -8645,10 +8676,10 @@ static float last_chorus_wow = -1.0f;
 				if (reverse_playback)
 				{
 					idx = voice.offset + (voice.length - 1 - idx_rel);
-					l0 = static_cast<float>(sample_buffer_l[idx]);
+					l0 = static_cast<float>(rt_l[idx]);
 					if (idx > voice.offset)
 					{
-						l1 = static_cast<float>(sample_buffer_l[idx - 1]);
+						l1 = static_cast<float>(rt_l[idx - 1]);
 					}
 					else
 					{
@@ -8656,9 +8687,9 @@ static float last_chorus_wow = -1.0f;
 					}
 					if (sample_stereo)
 					{
-						r0 = static_cast<float>(sample_buffer_r[idx]);
+						r0 = static_cast<float>(rt_r[idx]);
 						r1 = (idx > voice.offset)
-							? static_cast<float>(sample_buffer_r[idx - 1])
+							? static_cast<float>(rt_r[idx - 1])
 							: r0;
 					}
 					else
@@ -8669,12 +8700,12 @@ static float last_chorus_wow = -1.0f;
 				}
 				else
 				{
-					l0 = static_cast<float>(sample_buffer_l[idx]);
-					l1 = static_cast<float>(sample_buffer_l[idx + 1]);
+					l0 = static_cast<float>(rt_l[idx]);
+					l1 = static_cast<float>(rt_l[idx + 1]);
 					if (sample_stereo)
 					{
-						r0 = static_cast<float>(sample_buffer_r[idx]);
-						r1 = static_cast<float>(sample_buffer_r[idx + 1]);
+						r0 = static_cast<float>(rt_r[idx]);
+						r1 = static_cast<float>(rt_r[idx + 1]);
 					}
 					else
 					{
@@ -8931,6 +8962,18 @@ int main(void)
 	display.Init(disp_cfg);
 	InitLoadLayout();
 
+	g_rt_buf[0].l = sample_buffer_l;
+	g_rt_buf[0].r = sample_buffer_r;
+	g_rt_buf[0].length = 0;
+	g_rt_buf[0].play_start = 0;
+	g_rt_buf[0].play_end = 0;
+	g_rt_buf[0].rate = sample_rate;
+	g_rt_buf[0].channels = sample_channels;
+	g_rt_buf[0].loaded = false;
+	g_rt_buf[1] = g_rt_buf[0];
+	g_rt_pub_idx = 0;
+	g_rt_active_idx = 0;
+
 	SdmmcHandler::Config sd_cfg;
 	sd_cfg.Defaults();
 	sdcard.Init(sd_cfg);
@@ -9012,6 +9055,7 @@ int main(void)
 				{
 					record_state = RecordState::Review;
 				}
+				PublishRuntimeFromUi();
 				record_waveform_pending = true;
 				if (sample_loaded)
 				{
@@ -9169,12 +9213,10 @@ int main(void)
 				request_load_sample = false;
 				const int32_t index = request_load_index;
 				request_load_index = -1;
-				SampleContext target_ctx = SampleContext::Perform;
 				if (load_context == LoadContext::Edt)
 				{
-					target_ctx = edt_sample_context;
+					edt_sample_context = SampleContext::Perform;
 				}
-				SetSampleContext(target_ctx);
 				if (index >= 0 && index < wav_file_count)
 				{
 				}
@@ -9406,17 +9448,14 @@ int main(void)
 			}
 			if (mode == UiMode::FxDetail)
 			{
-				SetSampleContext(SampleContext::Perform);
 				SetFxContext(FxContext::Perform);
 			}
 			else if (mode == UiMode::Edt)
 			{
-				SetSampleContext(edt_sample_context);
 				SetFxContext(FxContext::Perform);
 			}
 			else if (mode == UiMode::Perform)
 			{
-				SetSampleContext(SampleContext::Perform);
 				SetFxContext(FxContext::Perform);
 			}
 			if (IsPerformUiMode(last_mode) && !IsPerformUiMode(mode))
