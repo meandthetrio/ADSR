@@ -67,6 +67,7 @@ constexpr uint32_t kPerformPlayheadIntervalActiveMs = 66;
 constexpr int32_t kPerformEncoderScale = 4;
 constexpr float kPi = 3.14159265f;
 constexpr float kTwoPi = 6.2831853f;
+constexpr size_t kSineTableSize = 1024;
 constexpr int kDisplayW = 128;
 constexpr int kDisplayH = 64;
 constexpr int kPlayBpm = 120;
@@ -733,6 +734,27 @@ struct BitCrushState
 	float hold_l = 0.0f;
 	float hold_r = 0.0f;
 };
+
+static float g_sine_table[kSineTableSize + 1];
+
+static inline float SineTableLookup(float phase01)
+{
+	const float idx = phase01 * static_cast<float>(kSineTableSize);
+	const int i = static_cast<int>(idx);
+	const float frac = idx - static_cast<float>(i);
+	const float a = g_sine_table[i];
+	const float b = g_sine_table[i + 1];
+	return a + (b - a) * frac;
+}
+
+static void InitSineTable()
+{
+	for (size_t i = 0; i <= kSineTableSize; ++i)
+	{
+		const float phase = static_cast<float>(i) / static_cast<float>(kSineTableSize);
+		g_sine_table[i] = sinf(kTwoPi * phase);
+	}
+}
 
 DaisyPod    hw;
 PodDisplay  display;
@@ -9172,7 +9194,7 @@ static float last_chorus_wow = -1.0f;
 				{
 					trem_phase -= 1.0f;
 				}
-				const float trem = 0.5f * (1.0f + sinf(trem_phase * kTwoPi));
+				const float trem = 0.5f * (1.0f + SineTableLookup(trem_phase));
 				const float trem_depth = drop_curve * 0.85f;
 				tape_drop = drop_gain * (1.0f - trem_depth + (trem_depth * trem));
 			}
@@ -10025,6 +10047,7 @@ audio_done:
 int main(void)
 {
 	hw.Init();
+	InitSineTable();
 	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
 	DWT->CYCCNT = 0;
 	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
