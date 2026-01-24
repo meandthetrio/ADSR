@@ -42,6 +42,8 @@ constexpr int32_t kPerformFltIndex = 2;
 constexpr int32_t kPerformFxIndex = 3;
 constexpr uint32_t kFxChainIdleMs = 300;
 constexpr float kFxChainFadeMs = 20.0f;
+constexpr size_t kAudioBlockSize = 48;
+constexpr uint32_t kFxMapIntervalMs = 10;
 constexpr uint32_t kSdInitMinMs = 800;
 constexpr uint32_t kSdInitRetryMs = 300;
 constexpr uint32_t kSdInitResultMs = 1500;
@@ -1120,12 +1122,21 @@ enum AudioCmdBits : uint32_t
 
 static volatile uint32_t g_audio_cmd = 0;
 static volatile SampleContext g_pending_context = SampleContext::Perform;
+static volatile uint32_t g_audio_event_bits = 0;
 
 static void RequestAudioCmd(uint32_t bits)
 {
 	{
 		daisy::ScopedIrqBlocker irq;
 		g_audio_cmd |= bits;
+	}
+}
+
+static void PushAudioEvent(uint32_t bits)
+{
+	{
+		daisy::ScopedIrqBlocker irq;
+		g_audio_event_bits |= bits;
 	}
 }
 
@@ -1241,6 +1252,164 @@ struct AudioParams
 	float reverb_shimmer;
 };
 
+// Audio-ready FX parameters (pre-mapped; no powf/expf needed in AudioCallback).
+struct FxParamsAudio
+{
+	// Saturation / bitcrush
+	int32_t sat_mode = 0;
+	float   sat_mix = 0.0f;
+	float   sat_drive_amt = 0.0f;
+	float   sat_bump = 0.0f;
+	float   bit_step = 1.0f;
+
+	// Chorus / tape
+	int32_t chorus_mode = 0;
+	float   chorus_mix = 0.0f;
+	float   chorus_depth_mapped = 0.0f;
+	float   chorus_rate_hz = 0.0f;
+	float   chorus_wow = 0.0f;
+	float   tape_rate = 0.0f;
+	float   tape_drop_amt_mapped = 0.0f;
+
+	// Delay
+	float delay_wet = 0.0f;
+	float delay_time_samples = 0.0f;
+	float delay_feedback = 0.0f;
+	float delay_spread = 0.0f;
+	float delay_freeze = 0.0f;
+
+	// Reverb
+	float reverb_wet = 0.0f;
+	float reverb_predelay_samples = 0.0f;
+	float reverb_lp_hz = 0.0f;
+	float reverb_feedback = 0.0f;
+	float reverb_release = 1.0f;
+	float reverb_gain = 1.0f;
+	float reverb_shimmer = 0.0f;
+};
+
+static FxParamsAudio g_fx_params_buf[2];
+static volatile uint8_t g_fx_params_idx = 0;
+
+static int BitResoIndexFromValue(float value);
+extern volatile int32_t sat_mode;
+extern volatile int32_t chorus_mode;
+
+static inline float Clamp01(float v)
+{
+	if (v < 0.0f) return 0.0f;
+	if (v > 1.0f) return 1.0f;
+	return v;
+}
+
+// Build and publish g_fx_params_buf (heavy mapping; call at <=50-100Hz).
+static void BuildAndPublishFxParamsAudio(const AudioParams &p, float out_sr)
+{
+	FxParamsAudio fx = {};
+	const float sat_drive = Clamp01(p.sat_drive);
+	const float sat_mix = Clamp01(p.fx_s_wet);
+	const float sat_bump = Clamp01(p.sat_tape_bump);
+	const float bit_reso = Clamp01(p.sat_bit_reso);
+	const float chorus_depth = Clamp01(p.mod_depth);
+	const float chorus_mix = Clamp01(p.fx_c_wet);
+	const float chorus_rate = Clamp01(p.chorus_rate);
+	const float chorus_wow = Clamp01(p.chorus_wow);
+	const float tape_rate = Clamp01(p.tape_rate);
+	const float delay_wet = Clamp01(p.delay_wet);
+	const float delay_time = Clamp01(p.delay_time);
+	const float delay_feedback = Clamp01(p.delay_feedback);
+	const float delay_spread = Clamp01(p.delay_spread);
+	const float delay_freeze = Clamp01(p.delay_freeze);
+	const float reverb_wet = Clamp01(p.reverb_wet);
+	const float reverb_pre = Clamp01(p.reverb_pre);
+	const float reverb_damp = Clamp01(p.reverb_damp);
+	const float reverb_decay = Clamp01(p.reverb_decay);
+	const float reverb_shimmer = Clamp01(p.reverb_shimmer);
+
+	// Saturation / bitcrush
+	fx.sat_mode = sat_mode;
+	fx.sat_mix = sat_mix;
+	fx.sat_bump = sat_bump;
+	fx.sat_drive_amt = powf(sat_drive, 0.7f);
+	{
+		const int bits_idx = BitResoIndexFromValue(bit_reso);
+		const int bits = kBitResoSteps[bits_idx];
+		fx.bit_step = 1.0f / powf(2.0f, static_cast<float>(bits - 1));
+	}
+
+	// Chorus / tape
+	fx.chorus_mode = chorus_mode;
+	fx.chorus_mix = chorus_mix;
+	{
+		const float depth_curve = chorus_depth * chorus_depth;
+		const float depth_scale = kChorusMaxDepth * 1.2f;
+		fx.chorus_depth_mapped = depth_curve * depth_scale;
+	}
+	{
+		const float rate_curve = chorus_rate * chorus_rate;
+		fx.chorus_rate_hz = kChorusRateMinHz + rate_curve * (kChorusRateMaxHz - kChorusRateMinHz);
+	}
+	fx.chorus_wow = chorus_wow;
+	fx.tape_rate = tape_rate;
+	fx.tape_drop_amt_mapped = (chorus_wow > 0.0f) ? powf(chorus_wow, 0.6f) : 0.0f;
+
+	// Delay mapping
+	fx.delay_wet = delay_wet;
+	{
+		const float curve = delay_time * delay_time;
+		float time_ms = kDelayTimeMinMs + curve * (kDelayTimeMaxMs - kDelayTimeMinMs);
+		float samples = time_ms * 0.001f * out_sr;
+		const float max_samp = static_cast<float>(kDelayMaxSamples - 1);
+		if (samples > max_samp) samples = max_samp;
+		if (samples < 1.0f) samples = 1.0f;
+		fx.delay_time_samples = samples;
+	}
+	fx.delay_feedback = delay_feedback;
+	if (fx.delay_feedback > kDelayFeedbackMax)
+	{
+		fx.delay_feedback = kDelayFeedbackMax;
+	}
+	fx.delay_spread = delay_spread;
+	fx.delay_freeze = delay_freeze;
+
+	// Reverb mapping
+	fx.reverb_wet = reverb_wet;
+	fx.reverb_shimmer = reverb_shimmer;
+	fx.reverb_gain = 1.0f;
+	{
+		const float decay_ms = kReverbDecayMinMs
+			+ reverb_decay * reverb_decay * (kReverbDecayMaxMs - kReverbDecayMinMs);
+		const float decay_samples = decay_ms * 0.001f * out_sr;
+		if (reverb_decay >= 0.999f) fx.reverb_release = 1.0f;
+		else if (decay_samples > 1.0f) fx.reverb_release = expf(-1.0f / decay_samples);
+		else fx.reverb_release = 0.0f;
+	}
+	fx.reverb_feedback = (reverb_decay >= 0.999f) ? 0.99f : kReverbFeedback;
+	{
+		const float damp_curve = reverb_damp * 1.6f;
+		float rev_lp = kReverbDampMaxHz * powf(kReverbDampMinHz / kReverbDampMaxHz, damp_curve);
+		const float rev_lp_max = out_sr * 0.49f;
+		if (rev_lp > rev_lp_max) rev_lp = rev_lp_max;
+		if (rev_lp < kReverbDampMinHz) rev_lp = kReverbDampMinHz;
+		fx.reverb_lp_hz = rev_lp;
+	}
+	{
+		const float pre_curve = powf(reverb_pre, 3.0f);
+		float samples = pre_curve * (kReverbPreDelayMaxMs * 0.001f * out_sr);
+		const float max_samp = static_cast<float>(kReverbPreDelayMaxSamples - 1);
+		if (samples > max_samp) samples = max_samp;
+		if (samples < 0.0f) samples = 0.0f;
+		fx.reverb_predelay_samples = samples;
+	}
+
+	const uint8_t next = g_fx_params_idx ^ 1;
+	g_fx_params_buf[next] = fx;
+	{
+		daisy::ScopedIrqBlocker irq;
+		g_fx_params_idx = next;
+	}
+}
+
 DTCM_MEM_SECTION static AudioParams g_audio_params = {};
 
 static SmoothParam sm_amp_attack;
@@ -1281,7 +1450,28 @@ enum AudioFlagBits : uint32_t
 	kFlagPlayMasterFx   = 1u << 6,
 };
 
+enum AudioEventBits : uint32_t
+{
+	kAudioEventRecFinished     = 1u << 0,
+	kAudioEventPlaybackStopped = 1u << 1,
+};
+
+struct AudioUiState
+{
+	int32_t live_track = -1;
+	float track_mod_send[kPlayTrackCount] = {};
+	float track_delay_send[kPlayTrackCount] = {};
+	float track_reverb_send[kPlayTrackCount] = {};
+	RecordInput record_input = RecordInput::LineIn;
+};
+
 static volatile uint32_t g_audio_flags_bits = 0;
+static volatile uint32_t g_audio_event_bits = 0;
+static AudioUiState g_audio_ui_state_buf[2];
+static volatile uint8_t g_audio_ui_state_idx = 0;
+static volatile bool g_audio_recording_active = false;
+static volatile float g_delay_time_alpha = 1.0f;
+static volatile float g_delay_param_alpha = 1.0f;
 static volatile uint32_t g_play_bpm = kPlayBpm;
 static volatile uint8_t g_play_step_for_ui = 0;
 static volatile bool g_play_step_dirty_for_ui = false;
@@ -2662,6 +2852,16 @@ static void UpdateSmoothedParamsPerTick()
 		daisy::ScopedIrqBlocker irq;
 		std::memcpy(&g_audio_params, &p, sizeof(AudioParams));
 	}
+	{
+		static uint32_t next_fx_map_ms = 0;
+		const uint32_t now = System::GetNow();
+		if (fx_params_dirty && (int32_t)(now - next_fx_map_ms) >= 0)
+		{
+			BuildAndPublishFxParamsAudio(p, hw.AudioSampleRate());
+			fx_params_dirty = false;
+			next_fx_map_ms = now + kFxMapIntervalMs;
+		}
+	}
 
 	if (!sm_fx_s_wet.IsNearTarget()
 		|| !sm_sat_drive.IsNearTarget()
@@ -2686,6 +2886,22 @@ static void UpdateSmoothedParamsPerTick()
 	{
 		fx_params_dirty = true;
 	}
+}
+
+static void UpdateDelaySlewCoeffs()
+{
+	const float out_sr = hw.AudioSampleRate();
+	const float dt = static_cast<float>(kAudioBlockSize) / out_sr;
+	const float time_tau = kDelayTimeSlewMs * 0.001f;
+	const float param_tau = kDelayParamSlewMs * 0.001f;
+	const float time_alpha = (time_tau > 0.0f)
+		? (1.0f - expf(-dt / time_tau))
+		: 1.0f;
+	const float param_alpha = (param_tau > 0.0f)
+		? (1.0f - expf(-dt / param_tau))
+		: 1.0f;
+	g_delay_time_alpha = time_alpha;
+	g_delay_param_alpha = param_alpha;
 }
 
 static void JobCancel()
@@ -3377,7 +3593,6 @@ static void ExitPlayTrack()
 	SetFxContext(FxContext::Play);
 	ui_mode = UiMode::Play;
 	play_screen_dirty = true;
-	request_playhead_redraw = true;
 }
 
 static void ResetPerformVoices()
@@ -5026,7 +5241,6 @@ static void StartRecordingAudioSafe()
 	record_pos = 0;
 	sample_length = 0;
 	sample_loaded = false;
-	waveform_record_input = record_input;
 	perform_attack_norm = 0.0f;
 	perform_release_norm = 0.0f;
 	ResetPerformVoices();
@@ -5044,12 +5258,14 @@ static void StartRecordingAudioSafe()
 	live_wave_last_col = -1;
 	live_wave_peak = 1;
 	live_wave_dirty = true;
-	record_state = RecordState::Recording;
+	g_audio_recording_active = true;
 }
 
 static void StartRecording()
 {
+	waveform_record_input = record_input;
 	StartRecordingAudioSafe();
+	record_state = RecordState::Recording;
 }
 
 static void DrawRecordCountdown()
@@ -6936,7 +7152,7 @@ static void StopPlayback(uint8_t note)
 			playback_release_active = false;
 			playback_release_pos = 0.0f;
 			playback_release_start = 0.0f;
-			request_playback_stop_log = true;
+				PushAudioEvent(kAudioEventPlaybackStopped);
 		}
 	}
 }
@@ -8511,16 +8727,17 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	}
 	if (cmd & kCmdRecStart)
 	{
-		if (record_state != RecordState::Recording)
+		if (!g_audio_recording_active)
 		{
 			StartRecordingAudioSafe();
 		}
 	}
 	if (cmd & kCmdRecStop)
 	{
-		if (record_state == RecordState::Recording)
+		if (g_audio_recording_active)
 		{
-			record_state = RecordState::Review;
+			g_audio_recording_active = false;
+			PushAudioEvent(kAudioEventRecFinished);
 		}
 	}
 	if (cmd & kCmdAllNotesOff)
@@ -8529,15 +8746,18 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	}
 
 	uint32_t flags_bits = 0;
+	AudioUiState ui_state;
 	{
 		daisy::ScopedIrqBlocker irq;
 		flags_bits = g_audio_flags_bits;
+		ui_state = g_audio_ui_state_buf[g_audio_ui_state_idx];
 	}
 	// Apply queued MIDI note commands in audio thread (low latency).
+	bool record_active = g_audio_recording_active;
 	MidiCmd c;
 	while (MidiCmdPopAudio(c))
 	{
-		if (record_state == RecordState::Recording)
+		if (record_active)
 		{
 			continue;
 		}
@@ -8607,20 +8827,16 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 			g_play_step_dirty_for_ui = true;
 		}
 	}
-static float cached_sat_drive = 0.0f;
 static float cached_sat_mix = 0.0f;
 static float cached_sat_bump = 0.0f;
 static float cached_sat_smpl = 0.0f;
-static float cached_sat_reso = 0.0f;
 static int32_t cached_sat_mode = 0;
 static float cached_chorus_depth = 0.0f;
 static float cached_chorus_mix = 0.0f;
-static float cached_chorus_rate = 0.0f;
 static int32_t cached_chorus_mode = 0;
 static float cached_chorus_wow = 0.0f;
 static float cached_tape_rate = 0.0f;
 	static float cached_delay_wet = 0.0f;
-	static float cached_delay_time = 0.0f;
 	static float cached_delay_feedback = 0.0f;
 	static float cached_delay_spread = 0.0f;
 	static float cached_delay_freeze = 0.0f;
@@ -8628,9 +8844,6 @@ static float cached_tape_rate = 0.0f;
 	static float delay_feedback_smoothed = -1.0f;
 	static float delay_spread_smoothed = -1.0f;
 	static float cached_reverb_wet = 0.0f;
-	static float cached_reverb_pre = 0.0f;
-	static float cached_reverb_damp = 0.0f;
-	static float cached_reverb_decay = 0.0f;
 	static float cached_reverb_shimmer = 0.0f;
 	static float cached_reverb_gain = 1.0f;
 	static float cached_reverb_release = 1.0f;
@@ -8650,195 +8863,100 @@ static float last_chorus_wow = -1.0f;
 	static float last_rev_lp = -1.0f;
 	static float last_rev_predelay = -1.0f;
 
-	if (fx_params_dirty)
+	FxParamsAudio fxp;
 	{
-		fx_params_dirty = false;
+		daisy::ScopedIrqBlocker irq;
+		fxp = g_fx_params_buf[g_fx_params_idx];
+	}
+	cached_sat_mix = fxp.sat_mix;
+	cached_sat_bump = fxp.sat_bump;
+	cached_sat_smpl = params.sat_bit_smpl;
+	cached_sat_mode = fxp.sat_mode;
+	cached_chorus_depth = params.mod_depth;
+	cached_chorus_mix = fxp.chorus_mix;
+	cached_chorus_mode = fxp.chorus_mode;
+	cached_chorus_wow = fxp.chorus_wow;
+	cached_tape_rate = fxp.tape_rate;
+	cached_delay_wet = fxp.delay_wet;
+	cached_delay_feedback = fxp.delay_feedback;
+	cached_delay_spread = fxp.delay_spread;
+	cached_delay_freeze = fxp.delay_freeze;
+	cached_reverb_wet = fxp.reverb_wet;
+	cached_reverb_shimmer = fxp.reverb_shimmer;
+	cached_reverb_gain = fxp.reverb_gain;
+	cached_reverb_release = fxp.reverb_release;
+	cached_reverb_predelay_samples = fxp.reverb_predelay_samples;
 
-		cached_sat_drive = sat_drive;
-		cached_sat_mix = fx_s_wet;
-		cached_sat_bump = sat_tape_bump;
-		cached_sat_smpl = sat_bit_smpl;
-		cached_sat_reso = sat_bit_reso;
-		cached_sat_mode = sat_mode;
-		cached_chorus_depth = mod_depth;
-		cached_chorus_mix = fx_c_wet;
-		cached_chorus_rate = chorus_rate;
-		cached_chorus_mode = chorus_mode;
-		cached_chorus_wow = chorus_wow;
-		cached_tape_rate = tape_rate;
-		cached_delay_wet = delay_wet;
-		cached_delay_time = delay_time;
-		cached_delay_feedback = delay_feedback;
-		cached_delay_spread = delay_spread;
-		cached_delay_freeze = delay_freeze;
-		cached_reverb_wet = reverb_wet;
-		cached_reverb_pre = reverb_pre;
-		cached_reverb_damp = reverb_damp;
-		cached_reverb_decay = reverb_decay;
-		cached_reverb_shimmer = reverb_shimmer;
-
-		if (cached_sat_drive < 0.0f) cached_sat_drive = 0.0f;
-		if (cached_sat_drive > 1.0f) cached_sat_drive = 1.0f;
-		if (cached_sat_mix < 0.0f) cached_sat_mix = 0.0f;
-		if (cached_sat_mix > 1.0f) cached_sat_mix = 1.0f;
-		if (cached_sat_bump < 0.0f) cached_sat_bump = 0.0f;
-		if (cached_sat_bump > 1.0f) cached_sat_bump = 1.0f;
-		if (cached_sat_smpl < 0.0f) cached_sat_smpl = 0.0f;
-		if (cached_sat_smpl > 1.0f) cached_sat_smpl = 1.0f;
-		if (cached_sat_reso < 0.0f) cached_sat_reso = 0.0f;
-		if (cached_sat_reso > 1.0f) cached_sat_reso = 1.0f;
-		if (cached_chorus_depth < 0.0f) cached_chorus_depth = 0.0f;
-		if (cached_chorus_depth > 1.0f) cached_chorus_depth = 1.0f;
-		if (cached_chorus_mix < 0.0f) cached_chorus_mix = 0.0f;
-		if (cached_chorus_mix > 1.0f) cached_chorus_mix = 1.0f;
-		if (cached_chorus_rate < 0.0f) cached_chorus_rate = 0.0f;
-		if (cached_chorus_rate > 1.0f) cached_chorus_rate = 1.0f;
-		if (cached_chorus_wow < 0.0f) cached_chorus_wow = 0.0f;
-		if (cached_chorus_wow > 1.0f) cached_chorus_wow = 1.0f;
-		if (cached_tape_rate < 0.0f) cached_tape_rate = 0.0f;
-		if (cached_tape_rate > 1.0f) cached_tape_rate = 1.0f;
-		if (cached_delay_wet < 0.0f) cached_delay_wet = 0.0f;
-		if (cached_delay_wet > 1.0f) cached_delay_wet = 1.0f;
-		if (cached_delay_time < 0.0f) cached_delay_time = 0.0f;
-		if (cached_delay_time > 1.0f) cached_delay_time = 1.0f;
-		if (cached_delay_feedback < 0.0f) cached_delay_feedback = 0.0f;
-		if (cached_delay_feedback > 1.0f) cached_delay_feedback = 1.0f;
-		if (cached_delay_spread < 0.0f) cached_delay_spread = 0.0f;
-		if (cached_delay_spread > 1.0f) cached_delay_spread = 1.0f;
-		if (cached_delay_freeze < 0.0f) cached_delay_freeze = 0.0f;
-		if (cached_delay_freeze > 1.0f) cached_delay_freeze = 1.0f;
-		if (cached_reverb_wet < 0.0f) cached_reverb_wet = 0.0f;
-		if (cached_reverb_wet > 1.0f) cached_reverb_wet = 1.0f;
-		if (cached_reverb_pre < 0.0f) cached_reverb_pre = 0.0f;
-		if (cached_reverb_pre > 1.0f) cached_reverb_pre = 1.0f;
-		if (cached_reverb_damp < 0.0f) cached_reverb_damp = 0.0f;
-		if (cached_reverb_damp > 1.0f) cached_reverb_damp = 1.0f;
-		if (cached_reverb_decay < 0.0f) cached_reverb_decay = 0.0f;
-		if (cached_reverb_decay > 1.0f) cached_reverb_decay = 1.0f;
-		if (cached_reverb_shimmer < 0.0f) cached_reverb_shimmer = 0.0f;
-		if (cached_reverb_shimmer > 1.0f) cached_reverb_shimmer = 1.0f;
-
-		cached_reverb_gain = 1.0f;
-		const float decay_ms = kReverbDecayMinMs
-			+ cached_reverb_decay * cached_reverb_decay * (kReverbDecayMaxMs - kReverbDecayMinMs);
-		const float decay_samples = decay_ms * 0.001f * out_sr;
-		if (cached_reverb_decay >= 0.999f)
+	if (cached_sat_mode != last_sat_mode)
+	{
+		last_sat_mode = cached_sat_mode;
+	}
+	if (cached_sat_mode == 0)
+	{
+		const float sat_drive_amt = fxp.sat_drive_amt;
+		if (fabsf(sat_drive_amt - last_sat_drive) > kFxParamEpsilon)
 		{
-			cached_reverb_release = 1.0f;
+			sat_l.SetDrive(sat_drive_amt);
+			sat_r.SetDrive(sat_drive_amt);
+			last_sat_drive = sat_drive_amt;
 		}
-		else if (decay_samples > 1.0f)
+		if (fabsf(cached_sat_bump - last_sat_bump) > kFxParamEpsilon)
 		{
-			cached_reverb_release = expf(-1.0f / decay_samples);
+			sat_l.SetBump(cached_sat_bump);
+			sat_r.SetBump(cached_sat_bump);
+			last_sat_bump = cached_sat_bump;
 		}
-		else
+	}
+	if (fabsf(fxp.chorus_depth_mapped - last_chorus_depth) > kFxParamEpsilon)
+	{
+		if (cached_chorus_mode == 0)
 		{
-			cached_reverb_release = 0.0f;
+			chorus_l.SetLfoDepth(fxp.chorus_depth_mapped);
+			chorus_r.SetLfoDepth(fxp.chorus_depth_mapped);
 		}
-
-		if (cached_sat_mode != last_sat_mode)
-		{
-			last_sat_mode = cached_sat_mode;
-		}
-		if (cached_sat_mode == 0)
-		{
-			const float sat_drive_amt = powf(cached_sat_drive, 0.7f);
-			if (fabsf(sat_drive_amt - last_sat_drive) > kFxParamEpsilon)
-			{
-				sat_l.SetDrive(sat_drive_amt);
-				sat_r.SetDrive(sat_drive_amt);
-				last_sat_drive = sat_drive_amt;
-			}
-			if (fabsf(cached_sat_bump - last_sat_bump) > kFxParamEpsilon)
-			{
-				sat_l.SetBump(cached_sat_bump);
-				sat_r.SetBump(cached_sat_bump);
-				last_sat_bump = cached_sat_bump;
-			}
-		}
-		if (fabsf(cached_chorus_depth - last_chorus_depth) > kFxParamEpsilon)
-		{
-			if (cached_chorus_mode == 0)
-			{
-				const float depth_curve = cached_chorus_depth * cached_chorus_depth;
-				const float depth_scale = kChorusMaxDepth * 1.2f;
-				const float depth = depth_curve * depth_scale;
-				chorus_l.SetLfoDepth(depth);
-				chorus_r.SetLfoDepth(depth);
-			}
-			last_chorus_depth = cached_chorus_depth;
-		}
-		if (fabsf(cached_chorus_rate - last_chorus_rate) > kFxParamEpsilon)
-		{
-			const float rate_curve = cached_chorus_rate * cached_chorus_rate;
-			const float rate_hz = kChorusRateMinHz
-				+ rate_curve * (kChorusRateMaxHz - kChorusRateMinHz);
-			chorus_l.SetLfoFreq(rate_hz);
-			chorus_r.SetLfoFreq(-rate_hz);
-			last_chorus_rate = cached_chorus_rate;
-		}
-		if (fabsf(cached_chorus_wow - last_chorus_wow) > kFxParamEpsilon)
-		{
-			last_chorus_wow = cached_chorus_wow;
-		}
-		if (fabsf(cached_delay_wet - last_delay_wet) > kFxParamEpsilon)
-		{
-			last_delay_wet = cached_delay_wet;
-		}
-		if (fabsf(cached_delay_feedback - last_delay_feedback) > kFxParamEpsilon)
-		{
-			last_delay_feedback = cached_delay_feedback;
-		}
-		if (fabsf(cached_delay_spread - last_delay_spread) > kFxParamEpsilon)
-		{
-			last_delay_spread = cached_delay_spread;
-		}
-		if (fabsf(cached_delay_freeze - last_delay_freeze) > kFxParamEpsilon)
-		{
-			last_delay_freeze = cached_delay_freeze;
-		}
-
-		float rev_feedback = kReverbFeedback;
-		if (cached_reverb_decay >= 0.999f)
-		{
-			rev_feedback = 0.99f;
-		}
-		const float damp_curve = cached_reverb_damp * 1.6f;
-		float rev_lp = kReverbDampMaxHz
-			* powf(kReverbDampMinHz / kReverbDampMaxHz, damp_curve);
-		const float rev_lp_max = out_sr * 0.49f;
-		if (rev_lp > rev_lp_max)
-		{
-			rev_lp = rev_lp_max;
-		}
-		if (rev_lp < kReverbDampMinHz)
-		{
-			rev_lp = kReverbDampMinHz;
-		}
-		const float pre_curve = powf(cached_reverb_pre, 3.0f);
-		float rev_predelay_samples
-			= pre_curve * (kReverbPreDelayMaxMs * 0.001f * out_sr);
-		const float rev_predelay_max = static_cast<float>(kReverbPreDelayMaxSamples - 1);
-		if (rev_predelay_samples > rev_predelay_max)
-		{
-			rev_predelay_samples = rev_predelay_max;
-		}
-		cached_reverb_predelay_samples = rev_predelay_samples;
-		if (fabsf(rev_feedback - last_rev_feedback) > kFxParamEpsilon)
-		{
-			reverb.SetFeedback(rev_feedback);
-			last_rev_feedback = rev_feedback;
-		}
-		if (fabsf(rev_lp - last_rev_lp) > kFxParamEpsilon)
-		{
-			reverb.SetLpFreq(rev_lp);
-			last_rev_lp = rev_lp;
-		}
-		if (fabsf(rev_predelay_samples - last_rev_predelay) >= 0.5f)
-		{
-			reverb_predelay_l.SetDelay(rev_predelay_samples);
-			reverb_predelay_r.SetDelay(rev_predelay_samples);
-			last_rev_predelay = rev_predelay_samples;
-		}
+		last_chorus_depth = fxp.chorus_depth_mapped;
+	}
+	if (fabsf(fxp.chorus_rate_hz - last_chorus_rate) > kFxParamEpsilon)
+	{
+		chorus_l.SetLfoFreq(fxp.chorus_rate_hz);
+		chorus_r.SetLfoFreq(-fxp.chorus_rate_hz);
+		last_chorus_rate = fxp.chorus_rate_hz;
+	}
+	if (fabsf(cached_chorus_wow - last_chorus_wow) > kFxParamEpsilon)
+	{
+		last_chorus_wow = cached_chorus_wow;
+	}
+	if (fabsf(cached_delay_wet - last_delay_wet) > kFxParamEpsilon)
+	{
+		last_delay_wet = cached_delay_wet;
+	}
+	if (fabsf(cached_delay_feedback - last_delay_feedback) > kFxParamEpsilon)
+	{
+		last_delay_feedback = cached_delay_feedback;
+	}
+	if (fabsf(cached_delay_spread - last_delay_spread) > kFxParamEpsilon)
+	{
+		last_delay_spread = cached_delay_spread;
+	}
+	if (fabsf(cached_delay_freeze - last_delay_freeze) > kFxParamEpsilon)
+	{
+		last_delay_freeze = cached_delay_freeze;
+	}
+	if (fabsf(fxp.reverb_feedback - last_rev_feedback) > kFxParamEpsilon)
+	{
+		reverb.SetFeedback(fxp.reverb_feedback);
+		last_rev_feedback = fxp.reverb_feedback;
+	}
+	if (fabsf(fxp.reverb_lp_hz - last_rev_lp) > kFxParamEpsilon)
+	{
+		reverb.SetLpFreq(fxp.reverb_lp_hz);
+		last_rev_lp = fxp.reverb_lp_hz;
+	}
+	if (fabsf(fxp.reverb_predelay_samples - last_rev_predelay) >= 0.5f)
+	{
+		reverb_predelay_l.SetDelay(fxp.reverb_predelay_samples);
+		reverb_predelay_r.SetDelay(fxp.reverb_predelay_samples);
+		last_rev_predelay = fxp.reverb_predelay_samples;
 	}
 
 	static float drop_phase = 0.0f;
@@ -8854,7 +8972,6 @@ static float last_chorus_wow = -1.0f;
 
 	const int32_t sat_mode_local = cached_sat_mode;
 	const float sat_mix = cached_sat_mix;
-	const float bit_reso = cached_sat_reso;
 	const float bit_smpl = cached_sat_smpl;
 	const int32_t chorus_mode_local = cached_chorus_mode;
 	const float chorus_mix = cached_chorus_mix;
@@ -8865,17 +8982,12 @@ static float last_chorus_wow = -1.0f;
 		|| (cached_delay_freeze >= 0.5f);
 	const bool reverb_active = (cached_reverb_wet > kFxParamEpsilon);
 	const float rev_shimmer = cached_reverb_shimmer;
-	const float dt = static_cast<float>(size) / out_sr;
-	const float time_tau = kDelayTimeSlewMs * 0.001f;
-	const float time_alpha = (time_tau > 0.0f) ? (1.0f - expf(-dt / time_tau)) : 1.0f;
-	const float param_tau = kDelayParamSlewMs * 0.001f;
-	const float param_alpha = (param_tau > 0.0f) ? (1.0f - expf(-dt / param_tau)) : 1.0f;
-	const float time_curve = cached_delay_time * cached_delay_time;
-	float delay_ms = kDelayTimeMinMs
-		+ (time_curve * (kDelayTimeMaxMs - kDelayTimeMinMs));
-	const float delay_samples = delay_ms * 0.001f * out_sr;
+	const float bit_step = fxp.bit_step;
+	const float tape_drop_amt_mapped = fxp.tape_drop_amt_mapped;
+	const float time_alpha = g_delay_time_alpha;
+	const float param_alpha = g_delay_param_alpha;
 	const float max_delay = static_cast<float>(kDelayMaxSamples - 1);
-	float delay_target = delay_samples;
+	float delay_target = fxp.delay_time_samples;
 	if (delay_target > max_delay)
 	{
 		delay_target = max_delay;
@@ -8905,21 +9017,17 @@ static float last_chorus_wow = -1.0f;
 		delay_line_r.SetDelay(delay_time_smoothed);
 		last_delay_time = delay_time_smoothed;
 	}
-	const bool perform_mode = IsPerformUiMode(ui_mode);
-	const bool main_mode = (ui_mode == UiMode::Main);
-	const bool fx_allowed = perform_mode || IsPlayUiMode(ui_mode) || ui_mode == UiMode::FxDetail;
+	const bool perform_mode = (flags_bits & kFlagInPerformMode) != 0;
+	const bool main_mode = (flags_bits & kFlagInMainMode) != 0;
+	const bool fx_allowed = (flags_bits & kFlagFxAllowed) != 0;
 	const bool amp_env_active = perform_mode;
 	const float amp_attack_ms = AmpEnvMsFromFader(amp_attack);
 	const float amp_release_ms = AmpEnvMsFromFader(amp_release);
 	const float amp_attack_samples = amp_attack_ms * 0.001f * out_sr;
 	const float amp_release_samples = amp_release_ms * 0.001f * out_sr;
-	const bool play_seq_mode = IsPlayUiMode(ui_mode) && sample_loaded;
-	const bool play_master_fx = IsPlayUiMode(ui_mode);
-	const int32_t live_track = (perform_context == PerformContext::Track
-		&& perform_context_track >= 0
-		&& perform_context_track < kPlayTrackCount)
-		? perform_context_track
-		: -1;
+	const bool play_seq_mode = (flags_bits & kFlagPlaySeqMode) != 0;
+	const bool play_master_fx = (flags_bits & kFlagPlayMasterFx) != 0;
+	const int32_t live_track = ui_state.live_track;
 	float track_mod_send[kPlayTrackCount] = {};
 	float track_delay_send[kPlayTrackCount] = {};
 	float track_reverb_send[kPlayTrackCount] = {};
@@ -8928,9 +9036,9 @@ static float last_chorus_wow = -1.0f;
 		for (int t = 0; t < kPlayTrackCount; ++t)
 		{
 			const bool use_live = (t == live_track);
-			float mod_send = use_live ? fx_c_wet : track_perform_state[t].fx_c_wet;
-			float delay_send = use_live ? delay_wet : track_perform_state[t].delay_wet;
-			float reverb_send = use_live ? reverb_wet : track_perform_state[t].reverb_wet;
+			float mod_send = use_live ? fx_c_wet : ui_state.track_mod_send[t];
+			float delay_send = use_live ? delay_wet : ui_state.track_delay_send[t];
+			float reverb_send = use_live ? reverb_wet : ui_state.track_reverb_send[t];
 			if (mod_send < 0.0f) mod_send = 0.0f;
 			if (mod_send > 1.0f) mod_send = 1.0f;
 			if (delay_send < 0.0f) delay_send = 0.0f;
@@ -8942,7 +9050,7 @@ static float last_chorus_wow = -1.0f;
 			track_reverb_send[t] = reverb_send;
 		}
 	}
-	const bool use_poly = (record_state != RecordState::Recording)
+	const bool use_poly = (!record_active)
 		&& ((perform_mode && sample_loaded) || play_seq_mode);
 	const bool sample_stereo = (sample_channels == 2);
 	const float flt_cutoff_hz = FltCutoffFromFader(flt_cutoff, out_sr);
@@ -8999,9 +9107,7 @@ static float last_chorus_wow = -1.0f;
 			{
 				--bit_hold;
 			}
-			const int bits_idx = BitResoIndexFromValue(bit_reso);
-			const int bits = kBitResoSteps[bits_idx];
-			const float step = 1.0f / powf(2.0f, static_cast<float>(bits - 1));
+			const float step = bit_step;
 			wet_l = roundf(bit_hold_l / step) * step;
 			wet_r = roundf(bit_hold_r / step) * step;
 			if (wet_l > 1.0f) wet_l = 1.0f;
@@ -9025,7 +9131,7 @@ static float last_chorus_wow = -1.0f;
 			const float drop_amt = cached_chorus_wow;
 			if (drop_amt > 0.0f)
 			{
-				const float drop_amt_mapped = powf(drop_amt, 0.6f);
+				const float drop_amt_mapped = tape_drop_amt_mapped;
 				const float drop_curve = drop_amt_mapped * drop_amt_mapped;
 				const float rate_curve = cached_tape_rate * cached_tape_rate;
 				const float rate_scale = 0.2f + (rate_curve * 6.0f);
@@ -9280,16 +9386,11 @@ static float last_chorus_wow = -1.0f;
 		: 0.0f;
 
 	const float kSendEps = 1e-7f;
-	const bool monitor_active =
-		(ui_mode == UiMode::Record
-			&& record_state != RecordState::Review
-			&& record_state != RecordState::SourceSelect
-			&& record_state != RecordState::BackConfirm
-			&& record_state != RecordState::TargetSelect);
+	const bool monitor_active = (flags_bits & kFlagMonitorEnabled) != 0;
 	const bool idle_audio = !playback_active
 		&& !preview_active
 		&& !monitor_active
-		&& record_state != RecordState::Recording
+		&& !record_active
 		&& !AnyPerformVoiceActive()
 		&& !playhead_running
 		&& !play_seq_mode
@@ -9339,15 +9440,19 @@ static float last_chorus_wow = -1.0f;
 		float monitor_r = 0.0f;
 		if (monitor_active)
 		{
-			const float monitor_sel = (record_input == RecordInput::Mic) ? in[1][i] : in[0][i];
+			const float monitor_sel = (ui_state.record_input == RecordInput::Mic)
+				? in[1][i]
+				: in[0][i];
 			monitor_l = monitor_sel;
 			monitor_r = monitor_sel;
 		}
-		if (record_state == RecordState::Recording)
-	{
-		if (record_pos < kRecordMaxFrames)
+		if (record_active)
 		{
-			const float in_sel = (record_input == RecordInput::Mic) ? in[1][i] : in[0][i];
+			if (record_pos < kRecordMaxFrames)
+			{
+				const float in_sel = (ui_state.record_input == RecordInput::Mic)
+					? in[1][i]
+					: in[0][i];
 				int32_t s = static_cast<int32_t>(in_sel * 32767.0f);
 				if (s > 32767)
 				{
@@ -9396,20 +9501,16 @@ static float last_chorus_wow = -1.0f;
 				sample_rate = 48000;
 				sample_loaded = (sample_length > 0);
 				playback_active = false;
-				request_playback_stop_log = true;
 				trim_start = 0.0f;
 				trim_end = 1.0f;
 				waveform_from_recording = true;
-				record_state = RecordState::Review;
-				record_waveform_pending = true;
-				if (sample_loaded)
-				{
-					request_length_redraw = true;
-				}
+				g_audio_recording_active = false;
+				record_active = false;
+				PushAudioEvent(kAudioEventPlaybackStopped | kAudioEventRecFinished);
 			}
 		}
 		const bool reverse_playback = (playback_reverse >= 0.5f);
-		if (sample_loaded && playback_active && record_state != RecordState::Recording && window_valid)
+		if (sample_loaded && playback_active && !record_active && window_valid)
 		{
 			float amp_env = 1.0f;
 			if (amp_env_active)
@@ -9503,7 +9604,7 @@ static float last_chorus_wow = -1.0f;
 					if (playback_phase >= static_cast<float>(window_end - 1))
 					{
 						playback_active = false;
-						request_playback_stop_log = true;
+						PushAudioEvent(kAudioEventPlaybackStopped);
 					}
 				}
 				else if (reverse_playback && idx > window_start)
@@ -9524,7 +9625,7 @@ static float last_chorus_wow = -1.0f;
 					if (playback_phase <= static_cast<float>(window_start))
 					{
 						playback_active = false;
-						request_playback_stop_log = true;
+						PushAudioEvent(kAudioEventPlaybackStopped);
 					}
 				}
 				else if (reverse_playback && idx == window_start)
@@ -9539,12 +9640,12 @@ static float last_chorus_wow = -1.0f;
 						sig_r *= amp_env;
 					}
 					playback_active = false;
-					request_playback_stop_log = true;
+					PushAudioEvent(kAudioEventPlaybackStopped);
 				}
 				else
 				{
 					playback_active = false;
-					request_playback_stop_log = true;
+					PushAudioEvent(kAudioEventPlaybackStopped);
 				}
 			}
 			if (playback_active)
@@ -9563,7 +9664,7 @@ static float last_chorus_wow = -1.0f;
 						playback_release_active = false;
 						playback_release_pos = 0.0f;
 						playback_release_start = 0.0f;
-						request_playback_stop_log = true;
+						PushAudioEvent(kAudioEventPlaybackStopped);
 					}
 				}
 			}
@@ -9927,8 +10028,9 @@ int main(void)
 	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
 	DWT->CYCCNT = 0;
 	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-	hw.SetAudioBlockSize(48); // number of samples handled per callback
+	hw.SetAudioBlockSize(kAudioBlockSize); // number of samples handled per callback
 	hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
+	UpdateDelaySlewCoeffs();
 	UpdateMasterFxTailSamples(hw.AudioSampleRate());
 	reverb.Init(hw.AudioSampleRate());
 	reverb.SetFeedback(kReverbFeedback);
@@ -10021,6 +10123,7 @@ int main(void)
 	g_last_draw_ms = System::GetNow();
 	{
 		uint32_t bits = 0;
+		AudioUiState ui_state = {};
 		const bool in_play_mode = IsPlayUiMode(ui_mode);
 		const bool in_perform_mode = IsPerformUiMode(ui_mode);
 		if (in_play_mode) bits |= kFlagInPlayMode;
@@ -10040,9 +10143,25 @@ int main(void)
 		{
 			bits |= kFlagMonitorEnabled;
 		}
+		ui_state.record_input = record_input;
+		if (perform_context == PerformContext::Track
+			&& perform_context_track >= 0
+			&& perform_context_track < kPlayTrackCount)
+		{
+			ui_state.live_track = perform_context_track;
+		}
+		for (int t = 0; t < kPlayTrackCount; ++t)
+		{
+			ui_state.track_mod_send[t] = track_perform_state[t].fx_c_wet;
+			ui_state.track_delay_send[t] = track_perform_state[t].delay_wet;
+			ui_state.track_reverb_send[t] = track_perform_state[t].reverb_wet;
+		}
+		const uint8_t next_idx = g_audio_ui_state_idx ^ 1;
+		g_audio_ui_state_buf[next_idx] = ui_state;
 		{
 			daisy::ScopedIrqBlocker irq;
 			g_audio_flags_bits = bits;
+			g_audio_ui_state_idx = next_idx;
 		}
 	}
 
@@ -10082,6 +10201,30 @@ int main(void)
 				JobStartWaveform(waveform_compute_ctx, false);
 			}
 		}
+		{
+			uint32_t audio_events = 0;
+			{
+				daisy::ScopedIrqBlocker irq;
+				audio_events = g_audio_event_bits;
+				g_audio_event_bits = 0;
+			}
+			if (audio_events & kAudioEventRecFinished)
+			{
+				if (record_state == RecordState::Recording)
+				{
+					record_state = RecordState::Review;
+				}
+				record_waveform_pending = true;
+				if (sample_loaded)
+				{
+					request_length_redraw = true;
+				}
+			}
+			if (audio_events & kAudioEventPlaybackStopped)
+			{
+				request_playback_stop_log = true;
+			}
+		}
 
 		{
 			const uint32_t now = System::GetNow();
@@ -10117,6 +10260,7 @@ int main(void)
 		}
 		{
 			uint32_t bits = 0;
+			AudioUiState ui_state = {};
 			const bool in_play_mode = IsPlayUiMode(ui_mode);
 			const bool in_perform_mode = IsPerformUiMode(ui_mode);
 			if (in_play_mode) bits |= kFlagInPlayMode;
@@ -10136,9 +10280,25 @@ int main(void)
 			{
 				bits |= kFlagMonitorEnabled;
 			}
+			ui_state.record_input = record_input;
+			if (perform_context == PerformContext::Track
+				&& perform_context_track >= 0
+				&& perform_context_track < kPlayTrackCount)
+			{
+				ui_state.live_track = perform_context_track;
+			}
+			for (int t = 0; t < kPlayTrackCount; ++t)
+			{
+				ui_state.track_mod_send[t] = track_perform_state[t].fx_c_wet;
+				ui_state.track_delay_send[t] = track_perform_state[t].delay_wet;
+				ui_state.track_reverb_send[t] = track_perform_state[t].reverb_wet;
+			}
+			const uint8_t next_idx = g_audio_ui_state_idx ^ 1;
+			g_audio_ui_state_buf[next_idx] = ui_state;
 			{
 				daisy::ScopedIrqBlocker irq;
 				g_audio_flags_bits = bits;
+				g_audio_ui_state_idx = next_idx;
 			}
 		}
 
