@@ -21,6 +21,18 @@ using PodDisplay = OledDisplay<SSD130xI2c128x64Driver>;
 #define RAM_D3_MEM_SECTION __attribute__((section(".ramd3_bss")))
 #endif
 
+#ifndef PERF_DIAGNOSTICS
+#define PERF_DIAGNOSTICS 0
+#endif
+
+#if PERF_DIAGNOSTICS
+#define PERF_CYCLES_START(var) const uint32_t var = DWT->CYCCNT
+#define PERF_CYCLES_END(var)   const uint32_t var = DWT->CYCCNT
+#else
+#define PERF_CYCLES_START(var) do {} while (0)
+#define PERF_CYCLES_END(var)   do {} while (0)
+#endif
+
 constexpr int32_t kMenuCount = 3;
 constexpr int32_t kShiftMenuCount = 2;
 constexpr int32_t kRecordTargetCount = 2;
@@ -1462,9 +1474,11 @@ volatile bool record_waveform_pending = false;
 volatile int32_t encoder_r_accum = 0;
 volatile bool encoder_r_button_press = false;
 volatile bool request_length_redraw = false;
+#if PERF_DIAGNOSTICS
+static float cpu_load_ema = 0.0f;
 static volatile float cpu_load_pct = 0.0f;
 static volatile float cpu_load_peak_pct = 0.0f;
-static float cpu_load_ema = 0.0f;
+#endif
 volatile bool request_playhead_redraw = false;
 volatile bool button1_press = false;
 volatile bool button2_press = false;
@@ -4162,7 +4176,11 @@ static void DrawPerformScreen(int32_t selected,
 	{
 		const FontDef font = Font_6x8;
 		char cpu_label[12];
+	#if PERF_DIAGNOSTICS
 		int cpu_pct = static_cast<int>(cpu_load_pct + 0.5f);
+	#else
+		int cpu_pct = 0;
+	#endif
 		cpu_pct = ClampI(cpu_pct, 0, 100);
 		snprintf(cpu_label, sizeof(cpu_label), "CPU %d%%", cpu_pct);
 		const int text_w = static_cast<int>(StrLen(cpu_label)) * font.FontWidth;
@@ -7627,7 +7645,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 
 void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, size_t size)
 {
-	const uint32_t cyc_start = DWT->CYCCNT;
+	PERF_CYCLES_START(cyc_start);
 
 	uint32_t cmd = 0;
 	{
@@ -8776,7 +8794,8 @@ audio_done:
 		fx_chain_pause_pending = false;
 		fx_chain_fade_gain = 0.0f;
 	}
-	const uint32_t cyc_end = DWT->CYCCNT;
+	#if PERF_DIAGNOSTICS
+	PERF_CYCLES_END(cyc_end);
 	const uint32_t cyc_used = cyc_end - cyc_start;
 	static uint32_t sys_clk_hz = 0;
 	if (sys_clk_hz == 0)
@@ -8804,6 +8823,7 @@ audio_done:
 			cpu_load_peak_pct = 0.0f;
 		}
 	}
+	#endif
 	request_playhead_redraw = true;
 }
 
@@ -8811,9 +8831,11 @@ int main(void)
 {
 	hw.Init();
 	InitSineTable();
+	#if PERF_DIAGNOSTICS
 	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
 	DWT->CYCCNT = 0;
 	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+	#endif
 	hw.SetAudioBlockSize(kAudioBlockSize); // number of samples handled per callback
 	hw.SetAudioSampleRate(SaiHandle::Config::SampleRate::SAI_48KHZ);
 	UpdateDelaySlewCoeffs();
