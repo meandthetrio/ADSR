@@ -782,6 +782,21 @@ static inline bool MidiCmdPopAudio(MidiCmd &out)
 	g_midi_cmd_rd = (uint8_t)((g_midi_cmd_rd + 1) & (kMidiCmdQSize - 1));
 	return true;
 }
+
+static inline uint8_t MidiCmdPopBatchAudio(MidiCmd* out, uint8_t max_n)
+{
+	daisy::ScopedIrqBlocker irq;
+	uint8_t rd = g_midi_cmd_rd;
+	const uint8_t wr = g_midi_cmd_wr;
+	uint8_t n = 0;
+	while (rd != wr && n < max_n)
+	{
+		out[n++] = g_midi_cmd_q[rd];
+		rd = (uint8_t)((rd + 1) & (kMidiCmdQSize - 1));
+	}
+	g_midi_cmd_rd = rd;
+	return n;
+}
 static daisy::TimerHandle g_ctrl_timer;
 static volatile bool g_ctrl_timer_running = false;
 
@@ -1433,6 +1448,7 @@ static volatile uint32_t g_audio_flags_bits = 0;
 static AudioUiState g_audio_ui_state_buf[2];
 static volatile uint8_t g_audio_ui_state_idx = 0;
 static volatile bool g_audio_recording_active = false;
+static bool g_reset_voices_pending = false;
 static volatile float g_delay_time_alpha = 1.0f;
 static volatile float g_delay_param_alpha = 1.0f;
 
@@ -7643,6 +7659,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	}
 	if (cmd & kCmdAllNotesOff)
 	{
+		g_reset_voices_pending = true;
+	}
+	if (g_reset_voices_pending)
+	{
+		g_reset_voices_pending = false;
 		ResetPerformVoices();
 	}
 
@@ -7655,9 +7676,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	}
 	// Apply queued MIDI note commands in audio thread (low latency).
 	bool record_active = g_audio_recording_active;
-	MidiCmd c;
-	while (MidiCmdPopAudio(c))
+	MidiCmd batch[4];
+	const uint8_t n = MidiCmdPopBatchAudio(batch, 4);
+	for (uint8_t i = 0; i < n; ++i)
 	{
+		const MidiCmd& c = batch[i];
 		if (record_active)
 		{
 			continue;
