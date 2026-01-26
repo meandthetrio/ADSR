@@ -4173,14 +4173,11 @@ static void DrawPerformScreen(int32_t selected,
 						false);
 		}
 	}
+	#if PERF_DIAGNOSTICS
 	{
 		const FontDef font = Font_6x8;
 		char cpu_label[12];
-	#if PERF_DIAGNOSTICS
 		int cpu_pct = static_cast<int>(cpu_load_pct + 0.5f);
-	#else
-		int cpu_pct = 0;
-	#endif
 		cpu_pct = ClampI(cpu_pct, 0, 100);
 		snprintf(cpu_label, sizeof(cpu_label), "CPU %d%%", cpu_pct);
 		const int text_w = static_cast<int>(StrLen(cpu_label)) * font.FontWidth;
@@ -4192,6 +4189,7 @@ static void DrawPerformScreen(int32_t selected,
 		display.SetCursor(x, 0);
 		display.WriteString(cpu_label, font, true);
 	}
+	#endif
 	RequestDisplayUpdate();
 }
 
