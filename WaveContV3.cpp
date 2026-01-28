@@ -1212,6 +1212,7 @@ enum AudioCmdBits : uint32_t
 	kCmdPreviewStop  = 1U << 6,
 	kCmdCommitPreview = 1U << 7,
 	kCmdPlaybackReverse = 1U << 8,
+	kCmdCommitAudioParams = 1U << 9,
 };
 
 static volatile uint32_t g_audio_cmd = 0;
@@ -1512,7 +1513,9 @@ static void BuildAndPublishFxParamsAudio(const AudioParams &p, float out_sr)
 	}
 }
 
-DTCM_MEM_SECTION static AudioParams g_audio_params = {};
+DTCM_MEM_SECTION static AudioParams g_audio_params_buf[2] = {};
+static volatile uint8_t g_audio_params_pub_idx = 0;
+static uint8_t g_audio_params_active_idx = 0;
 
 static SmoothParam sm_amp_attack;
 static SmoothParam sm_amp_decay;
@@ -1569,7 +1572,19 @@ struct WaveformUi
 struct AudioUiState
 {
 	WaveformUi live_wave;
+	bool preview_active = false;
+	uint32_t preview_read_index = 0;
+	bool playback_active = false;
+	float playback_phase = 0.0f;
+	bool perform_voices_active = false;
+#if PERF_DIAGNOSTICS
+	float cpu_load_pct = 0.0f;
+	float cpu_load_peak_pct = 0.0f;
+#endif
 };
+
+static const AudioUiState& GetAudioUiStateSnapshot(uint8_t& idx);
+static void PublishAudioParamsFromUi(const AudioParams& p);
 
 static volatile uint32_t g_audio_flags_bits = 0;
 static AudioUiState g_audio_ui_state_buf[2];
@@ -2558,8 +2573,6 @@ static void __attribute__((unused)) ComputeWaveform()
 	}
 }
 
-static bool PlaybackActiveAudio();
-static bool PerformVoicesActiveAudio();
 
 static inline bool JobsAllowedNow()
 {
@@ -2567,9 +2580,13 @@ static inline bool JobsAllowedNow()
 	{
 		return false;
 	}
-	if (PlaybackActiveAudio() || PerformVoicesActiveAudio())
 	{
-		return false;
+		uint8_t ui_idx = 0;
+		const AudioUiState& uir = GetAudioUiStateSnapshot(ui_idx);
+		if (uir.playback_active || uir.perform_voices_active)
+		{
+			return false;
+		}
 	}
 	return true;
 }
@@ -2946,10 +2963,7 @@ static void UpdateSmoothedParamsPerTick()
 	p.reverb_shimmer = sm_reverb_shimmer.Process();
 	p.playback_reverse = playback_reverse;
 
-	{
-		daisy::ScopedIrqBlocker irq;
-		std::memcpy(&g_audio_params, &p, sizeof(AudioParams));
-	}
+	PublishAudioParamsFromUi(p);
 	{
 		static uint32_t next_fx_map_ms = 0;
 		const uint32_t now = System::GetNow();
@@ -3256,6 +3270,17 @@ static void PublishPreviewControlFromUi()
 		daisy::ScopedIrqBlocker irq;
 		g_preview_pub_idx = next;
 		g_audio_cmd |= kCmdCommitPreview;
+	}
+}
+
+static void PublishAudioParamsFromUi(const AudioParams& p)
+{
+	const uint8_t next = static_cast<uint8_t>(g_audio_params_pub_idx ^ 1u);
+	g_audio_params_buf[next] = p;
+	{
+		daisy::ScopedIrqBlocker irq;
+		g_audio_params_pub_idx = next;
+		g_audio_cmd |= kCmdCommitAudioParams;
 	}
 }
 
@@ -3758,56 +3783,6 @@ static size_t PreviewFreeFrames(size_t read_idx, size_t write_idx)
 	return (kPreviewBufferFrames - 1) - used;
 }
 
-static bool PreviewActiveAudio()
-{
-	bool active = false;
-	{
-		daisy::ScopedIrqBlocker irq;
-		active = preview_active;
-	}
-	return active;
-}
-
-static size_t PreviewReadIndexAudio()
-{
-	size_t idx = 0;
-	{
-		daisy::ScopedIrqBlocker irq;
-		idx = preview_read_index;
-	}
-	return idx;
-}
-
-static bool PlaybackActiveAudio()
-{
-	bool active = false;
-	{
-		daisy::ScopedIrqBlocker irq;
-		active = playback_active;
-	}
-	return active;
-}
-
-static float PlaybackPhaseAudio()
-{
-	float phase = 0.0f;
-	{
-		daisy::ScopedIrqBlocker irq;
-		phase = playback_phase;
-	}
-	return phase;
-}
-
-static bool PerformVoicesActiveAudio()
-{
-	bool active = false;
-	{
-		daisy::ScopedIrqBlocker irq;
-		active = g_perform_voices_active;
-	}
-	return active;
-}
-
 static const AudioUiState& GetAudioUiStateSnapshot(uint8_t& idx)
 {
 	{
@@ -3819,14 +3794,17 @@ static const AudioUiState& GetAudioUiStateSnapshot(uint8_t& idx)
 
 static void FillPreviewBuffer()
 {
-	if (!PreviewActiveAudio() || !preview_file_open)
+	uint8_t ui_idx = 0;
+	const AudioUiState& uir = GetAudioUiStateSnapshot(ui_idx);
+	if (!uir.preview_active || !preview_file_open)
 	{
 		return;
 	}
 	const uint32_t start_ms = System::GetNow();
 	while (true)
 	{
-		const size_t read_idx = PreviewReadIndexAudio();
+		const AudioUiState& cur = GetAudioUiStateSnapshot(ui_idx);
+		const size_t read_idx = static_cast<size_t>(cur.preview_read_index);
 		size_t write_idx = 0;
 		{
 			daisy::ScopedIrqBlocker irq;
@@ -5651,24 +5629,28 @@ static void DrawWaveform()
 	DrawBracket(start_x, true);
 	DrawBracket(end_x,   false);
 
-	if (ui_mode == UiMode::Edt && PlaybackActiveAudio())
 	{
-		const SampleRuntime rt = g_rt_buf[g_rt_active_idx];
-		const size_t length = rt.length;
-		if (length > 1)
+		uint8_t ui_idx = 0;
+		const AudioUiState& uir = GetAudioUiStateSnapshot(ui_idx);
+		if (ui_mode == UiMode::Edt && uir.playback_active)
 		{
-			const float denom = static_cast<float>(length - 1);
-			float norm = PlaybackPhaseAudio() / denom;
-		if (norm < 0.0f)
-		{
-			norm = 0.0f;
-		}
-		else if (norm > 1.0f)
-		{
-			norm = 1.0f;
-		}
-			const int play_x = ClampI(static_cast<int>(norm * static_cast<float>(W - 1) + 0.5f), 0, W - 1);
-			display.DrawLine(play_x, text_h, play_x, H - 1, true);
+			const SampleRuntime rt = g_rt_buf[g_rt_active_idx];
+			const size_t length = rt.length;
+			if (length > 1)
+			{
+				const float denom = static_cast<float>(length - 1);
+				float norm = uir.playback_phase / denom;
+				if (norm < 0.0f)
+				{
+					norm = 0.0f;
+				}
+				else if (norm > 1.0f)
+				{
+					norm = 1.0f;
+				}
+				const int play_x = ClampI(static_cast<int>(norm * static_cast<float>(W - 1) + 0.5f), 0, W - 1);
+				display.DrawLine(play_x, text_h, play_x, H - 1, true);
+			}
 		}
 	}
 
@@ -8038,26 +8020,44 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	PERF_CYCLES_START(cyc_start);
 
 	uint32_t cmd = 0;
+	uint32_t flags_bits = 0;
+	RecordInput record_input_audio = RecordInput::LineIn;
+	bool reverse_target = false;
+	uint8_t pub_params_idx = 0;
+	uint8_t pub_rt_idx = 0;
+	uint8_t pub_fx_idx = 0;
+	uint8_t pub_preview_idx = 0;
 	{
 		daisy::ScopedIrqBlocker irq;
 		cmd = g_audio_cmd;
 		g_audio_cmd = 0;
+		flags_bits = g_audio_flags_bits;
+		record_input_audio = record_input;
+		reverse_target = g_playback_reverse_target;
+		pub_params_idx = g_audio_params_pub_idx;
+		pub_rt_idx = g_rt_pub_idx;
+		pub_fx_idx = g_fx_chain_pub_idx;
+		pub_preview_idx = g_preview_pub_idx;
 	}
 	const bool apply_reverse_cmd = (cmd & kCmdPlaybackReverse) != 0;
 
 	if (cmd & kCmdCommitRuntime)
 	{
-		g_rt_active_idx = g_rt_pub_idx;
+		g_rt_active_idx = pub_rt_idx;
 	}
 	if (cmd & kCmdCommitFxChain)
 	{
-		g_fx_chain_active_idx = g_fx_chain_pub_idx;
+		g_fx_chain_active_idx = pub_fx_idx;
 		g_fx_chain_audio = g_fx_chain_buf[g_fx_chain_active_idx];
 		g_fx_chain_audio_valid = true;
 	}
 	if (cmd & kCmdCommitPreview)
 	{
-		g_preview_active_idx = g_preview_pub_idx;
+		g_preview_active_idx = pub_preview_idx;
+	}
+	if (cmd & kCmdCommitAudioParams)
+	{
+		g_audio_params_active_idx = pub_params_idx;
 	}
 	if (cmd & kCmdPreviewStart)
 	{
@@ -8098,24 +8098,50 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		ResetPerformVoices();
 	}
 
-	uint32_t flags_bits = 0;
-	RecordInput record_input_audio = RecordInput::LineIn;
-	{
-		daisy::ScopedIrqBlocker irq;
-		flags_bits = g_audio_flags_bits;
-		record_input_audio = record_input;
-	}
-	AudioParams params = {};
-	{
-		daisy::ScopedIrqBlocker irq;
-		std::memcpy(&params, &g_audio_params, sizeof(AudioParams));
-	}
+	const AudioParams& params = g_audio_params_buf[g_audio_params_active_idx];
 	const bool reverse_playback = (params.playback_reverse >= 0.5f);
 	const uint8_t ui_pub_idx = g_audio_ui_state_idx;
 	const uint8_t ui_next_idx = ui_pub_idx ^ 1u;
+	const AudioUiState& uiprev = g_audio_ui_state_buf[ui_pub_idx];
 	AudioUiState& uiw = g_audio_ui_state_buf[ui_next_idx];
-	uiw = g_audio_ui_state_buf[ui_pub_idx];
+	uiw = uiprev;
 	bool ui_wave_dirty = false;
+	bool ui_state_changed = false;
+	const bool preview_active_now = preview_active;
+	const bool playback_active_now = playback_active;
+	const bool perform_active_now = g_perform_voices_active;
+	if (uiprev.preview_active != preview_active_now
+		|| uiprev.playback_active != playback_active_now
+		|| uiprev.perform_voices_active != perform_active_now)
+	{
+		ui_state_changed = true;
+	}
+	uiw.preview_active = preview_active_now;
+	uiw.preview_read_index = static_cast<uint32_t>(preview_read_index);
+	uiw.playback_active = playback_active_now;
+	uiw.playback_phase = playback_phase;
+	uiw.perform_voices_active = perform_active_now;
+	#if PERF_DIAGNOSTICS
+	uiw.cpu_load_pct = cpu_load_pct;
+	uiw.cpu_load_peak_pct = cpu_load_peak_pct;
+	#endif
+	{
+		static uint8_t ui_phase_tick = 0;
+		const bool want_phase_update = playback_active_now || preview_active_now;
+		if (want_phase_update)
+		{
+			++ui_phase_tick;
+			if (ui_phase_tick >= 4)
+			{
+				ui_state_changed = true;
+				ui_phase_tick = 0;
+			}
+		}
+		else
+		{
+			ui_phase_tick = 0;
+		}
+	}
 	if (cmd & kCmdRecStart)
 	{
 		if (!g_audio_recording_active)
@@ -8126,11 +8152,6 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	}
 	if (apply_reverse_cmd)
 	{
-		bool reverse_target = false;
-		{
-			daisy::ScopedIrqBlocker irq;
-			reverse_target = g_playback_reverse_target;
-		}
 		ApplyPlaybackReverseAudio(reverse_target);
 	}
 	// Apply queued MIDI note commands in audio thread (low latency).
@@ -9263,7 +9284,7 @@ static float last_chorus_wow = -1.0f;
 		out[1][i] = fx_r * fx_gain;
 	}
 audio_done:
-	if (ui_wave_dirty)
+	if (ui_wave_dirty || ui_state_changed)
 	{
 		daisy::ScopedIrqBlocker irq;
 		g_audio_ui_state_idx = ui_next_idx;
@@ -9494,6 +9515,7 @@ int main(void)
 	RecordState last_record_state = RecordState::Armed;
 	bool last_playback_active = false;
 	uint8_t last_wave_ui_idx = 0;
+	uint8_t last_audio_ui_idx = 0xFF;
 	uint32_t last_edt_playhead_ms = 0;
 	bool last_edt_playhead_active = false;
 	uint32_t last_ui_ms = System::GetNow();
@@ -9551,7 +9573,9 @@ int main(void)
 
 		{
 			const uint32_t now = System::GetNow();
-			const bool playback_busy = PlaybackActiveAudio() || PerformVoicesActiveAudio();
+			uint8_t ui_idx = 0;
+			const AudioUiState& uir = GetAudioUiStateSnapshot(ui_idx);
+			const bool playback_busy = uir.playback_active || uir.perform_voices_active;
 			const uint32_t ui_tick_ms = playback_busy ? kUiTickPlaybackMs : kUiTickMs;
 			int32_t loops = 0;
 			while ((int32_t)(now - last_ui_ms) >= (int32_t)ui_tick_ms && loops < 4)
@@ -9728,12 +9752,14 @@ int main(void)
 
 		if (!ui_blocked)
 		{
+			uint8_t ui_idx = 0;
+			const AudioUiState& uir = GetAudioUiStateSnapshot(ui_idx);
 			const bool preview_allowed = (ui_mode == UiMode::Load
 				&& !(kLoadPresetsPlaceholder && load_context == LoadContext::Main && !delete_mode)
 				&& wav_file_count > 0);
 			if (preview_hold && preview_allowed)
 			{
-				if (!PreviewActiveAudio() || preview_index != load_selected)
+				if (!uir.preview_active || preview_index != load_selected)
 				{
 					if (!BeginPreviewAtIndex(load_selected))
 					{
@@ -9743,15 +9769,19 @@ int main(void)
 			}
 			else
 			{
-				if (PreviewActiveAudio())
+				if (uir.preview_active)
 				{
 					StopPreview();
 				}
 			}
 		}
-		if (PreviewActiveAudio())
 		{
-			FillPreviewBuffer();
+			uint8_t ui_idx = 0;
+			const AudioUiState& uir = GetAudioUiStateSnapshot(ui_idx);
+			if (uir.preview_active)
+			{
+				FillPreviewBuffer();
+			}
 		}
 		if (request_delete_file)
 		{
@@ -10375,9 +10405,11 @@ int main(void)
 		{
 			DrawRecordBackConfirm();
 		}
+		uint8_t play_ui_idx = 0;
+		const AudioUiState& play_uir = GetAudioUiStateSnapshot(play_ui_idx);
 		const bool edt_playhead_active = (!ui_blocked
 			&& mode == UiMode::Edt
-			&& PlaybackActiveAudio());
+			&& play_uir.playback_active);
 		if (edt_playhead_active)
 		{
 			const uint32_t now = System::GetNow();
@@ -10399,7 +10431,7 @@ int main(void)
 			last_edt_playhead_ms = 0;
 		}
 		last_edt_playhead_active = edt_playhead_active;
-		const bool playback_active_now = PlaybackActiveAudio();
+		const bool playback_active_now = play_uir.playback_active;
 		if (!ui_blocked && (request_playhead_redraw || (playback_active_now != last_playback_active)))
 		{
 			request_playhead_redraw = false;
@@ -10442,6 +10474,15 @@ int main(void)
 			led1_level = 0.0f;
 		}
 		hw.led1.Set(0.0f, led1_level, 0.0f);
+		{
+			uint8_t audio_ui_idx = 0;
+			GetAudioUiStateSnapshot(audio_ui_idx);
+			if (audio_ui_idx != last_audio_ui_idx)
+			{
+				last_audio_ui_idx = audio_ui_idx;
+				RequestDisplayUpdate();
+			}
+		}
 		const uint32_t draw_now = System::GetNow();
 		const bool needs_draw = g_display_update_pending
 			|| request_shift_redraw
@@ -10459,4 +10500,3 @@ int main(void)
 		hw.DelayMs(1);
 	}
 }
-
