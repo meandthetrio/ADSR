@@ -1178,11 +1178,6 @@ static RecordInput waveform_record_input = RecordInput::LineIn;
 static volatile float perform_attack_norm = 0.0f;
 static volatile float perform_release_norm = 0.0f;
 static const char* waveform_title = nullptr;
-static int16_t live_wave_min[128];
-static int16_t live_wave_max[128];
-static int16_t live_wave_peak = 1;
-static bool live_wave_dirty = false;
-static int32_t live_wave_last_col = -1;
 
 constexpr size_t kRecordMaxFrames = static_cast<size_t>(kRecordMaxSeconds) * 48000U;
 constexpr uint32_t kRecordCountdownMs = 4000;
@@ -1560,9 +1555,20 @@ enum AudioEventBits : uint32_t
 	kAudioEventPlaybackStopped = 1u << 1,
 };
 
+constexpr int kWaveCols = 128;
+
+struct WaveformUi
+{
+	int16_t minv[kWaveCols] = {};
+	int16_t maxv[kWaveCols] = {};
+	int16_t peak = 1;
+	int16_t last_col = -1;
+	bool dirty = false;
+};
+
 struct AudioUiState
 {
-	RecordInput record_input = RecordInput::LineIn;
+	WaveformUi live_wave;
 };
 
 static volatile uint32_t g_audio_flags_bits = 0;
@@ -3253,6 +3259,18 @@ static void PublishPreviewControlFromUi()
 	}
 }
 
+static void AudioUiResetLiveWaveform(AudioUiState& uiw)
+{
+	for (int i = 0; i < kWaveCols; ++i)
+	{
+		uiw.live_wave.minv[i] = 0;
+		uiw.live_wave.maxv[i] = 0;
+	}
+	uiw.live_wave.last_col = -1;
+	uiw.live_wave.peak = 1;
+	uiw.live_wave.dirty = true;
+}
+
 static void CapturePerformState(PerformState& state)
 {
 	state.perform_index = perform_index;
@@ -3788,6 +3806,15 @@ static bool PerformVoicesActiveAudio()
 		active = g_perform_voices_active;
 	}
 	return active;
+}
+
+static const AudioUiState& GetAudioUiStateSnapshot(uint8_t& idx)
+{
+	{
+		daisy::ScopedIrqBlocker irq;
+		idx = g_audio_ui_state_idx;
+	}
+	return g_audio_ui_state_buf[idx];
 }
 
 static void FillPreviewBuffer()
@@ -5187,15 +5214,6 @@ static void PrepareRecordingUiState()
 
     CopyString(loaded_sample_name, "UNSAVED AUDIO", kMaxWavNameLen);
 
-    for (int i = 0; i < 128; ++i)
-    {
-        live_wave_min[i] = 0;
-        live_wave_max[i] = 0;
-    }
-    live_wave_last_col = -1;
-    live_wave_peak     = 1;
-    live_wave_dirty    = true;
-
     // Publish "empty" runtime so audio never sees half-cleared state
     PublishRuntimeFromUi();
 }
@@ -5342,7 +5360,7 @@ static void DrawRecordCountdown()
 	RequestDisplayUpdate();
 }
 
-static void DrawRecordRecording()
+static void DrawRecordRecording(const AudioUiState& ui_state)
 {
 	const FontDef font = Font_6x8;
 	display.Fill(false);
@@ -5354,8 +5372,8 @@ static void DrawRecordRecording()
 	const int mid = wave_top + (wave_bottom - wave_top) / 2;
 	for (int x = 0; x < 128; ++x)
 	{
-		int top = mid + live_wave_min[x];
-		int bottom = mid + live_wave_max[x];
+		int top = mid + ui_state.live_wave.minv[x];
+		int bottom = mid + ui_state.live_wave.maxv[x];
 		if (top > bottom)
 		{
 			const int tmp = top;
@@ -8054,12 +8072,12 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		preview_read_frac = 0.0f;
 	}
 	if (cmd & kCmdRecStart)
-{
-    if (!g_audio_recording_active)
-    {
-        StartRecordingAudioRT();
-    }
-}
+	{
+		if (!g_audio_recording_active)
+		{
+			StartRecordingAudioRT();
+		}
+	}
 
 	if (cmd & kCmdRecStop)
 	{
@@ -8081,11 +8099,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	}
 
 	uint32_t flags_bits = 0;
-	AudioUiState ui_state;
+	RecordInput record_input_audio = RecordInput::LineIn;
 	{
 		daisy::ScopedIrqBlocker irq;
 		flags_bits = g_audio_flags_bits;
-		ui_state = g_audio_ui_state_buf[g_audio_ui_state_idx];
+		record_input_audio = record_input;
 	}
 	AudioParams params = {};
 	{
@@ -8093,6 +8111,19 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		std::memcpy(&params, &g_audio_params, sizeof(AudioParams));
 	}
 	const bool reverse_playback = (params.playback_reverse >= 0.5f);
+	const uint8_t ui_pub_idx = g_audio_ui_state_idx;
+	const uint8_t ui_next_idx = ui_pub_idx ^ 1u;
+	AudioUiState& uiw = g_audio_ui_state_buf[ui_next_idx];
+	uiw = g_audio_ui_state_buf[ui_pub_idx];
+	bool ui_wave_dirty = false;
+	if (cmd & kCmdRecStart)
+	{
+		if (!g_audio_recording_active)
+		{
+			AudioUiResetLiveWaveform(uiw);
+			ui_wave_dirty = true;
+		}
+	}
 	if (apply_reverse_cmd)
 	{
 		bool reverse_target = false;
@@ -8764,7 +8795,7 @@ static float last_chorus_wow = -1.0f;
 		float monitor_r = 0.0f;
 		if (monitor_active)
 		{
-			const float monitor_sel = (ui_state.record_input == RecordInput::Mic)
+			const float monitor_sel = (record_input_audio == RecordInput::Mic)
 				? in[1][i]
 				: in[0][i];
 			monitor_l = monitor_sel;
@@ -8774,7 +8805,7 @@ static float last_chorus_wow = -1.0f;
 		{
 			if (record_pos < kRecordMaxFrames)
 			{
-				const float in_sel = (ui_state.record_input == RecordInput::Mic)
+				const float in_sel = (record_input_audio == RecordInput::Mic)
 					? in[1][i]
 					: in[0][i];
 				int32_t s = static_cast<int32_t>(in_sel * 32767.0f);
@@ -8790,12 +8821,13 @@ static float last_chorus_wow = -1.0f;
 				sample_buffer_l[record_pos] = samp;
 				sample_buffer_r[record_pos] = samp;
 				int16_t abs_s = samp < 0 ? static_cast<int16_t>(-samp) : samp;
-				if (abs_s > live_wave_peak)
+				if (abs_s > uiw.live_wave.peak)
 				{
-					live_wave_peak = abs_s;
+					uiw.live_wave.peak = abs_s;
+					ui_wave_dirty = true;
 				}
-				const float norm = (live_wave_peak > 0)
-					? (28.0f / (static_cast<float>(live_wave_peak) * kSampleScale))
+				const float norm = (uiw.live_wave.peak > 0)
+					? (28.0f / (static_cast<float>(uiw.live_wave.peak) * kSampleScale))
 					: 1.0f;
 				const float s_scaled = static_cast<float>(samp) * kSampleScale * norm;
 				int16_t s_pix = static_cast<int16_t>(s_scaled);
@@ -8803,17 +8835,20 @@ static float last_chorus_wow = -1.0f;
 					(static_cast<uint64_t>(record_pos) * 128U) / kRecordMaxFrames);
 				if (col >= 0 && col < 128)
 				{
-					if (col != live_wave_last_col)
+					if (col != uiw.live_wave.last_col)
 					{
-						live_wave_min[col] = s_pix;
-						live_wave_max[col] = s_pix;
-						live_wave_last_col = col;
-						live_wave_dirty = true;
+						uiw.live_wave.minv[col] = s_pix;
+						uiw.live_wave.maxv[col] = s_pix;
+						uiw.live_wave.last_col = static_cast<int16_t>(col);
+						uiw.live_wave.dirty = true;
+						ui_wave_dirty = true;
 					}
 					else
 					{
-						if (s_pix < live_wave_min[col]) live_wave_min[col] = s_pix;
-						if (s_pix > live_wave_max[col]) live_wave_max[col] = s_pix;
+						if (s_pix < uiw.live_wave.minv[col]) uiw.live_wave.minv[col] = s_pix;
+						if (s_pix > uiw.live_wave.maxv[col]) uiw.live_wave.maxv[col] = s_pix;
+						uiw.live_wave.dirty = true;
+						ui_wave_dirty = true;
 					}
 				}
 				++record_pos;
@@ -9228,6 +9263,11 @@ static float last_chorus_wow = -1.0f;
 		out[1][i] = fx_r * fx_gain;
 	}
 audio_done:
+	if (ui_wave_dirty)
+	{
+		daisy::ScopedIrqBlocker irq;
+		g_audio_ui_state_idx = ui_next_idx;
+	}
 	g_fx_chain_audio.fade_gain = fx_gain;
 	g_fx_chain_audio.fade_samples_left = fade_samples_left;
 	if (g_fx_chain_audio.pause_pending
@@ -9415,7 +9455,6 @@ int main(void)
 	g_last_draw_ms = System::GetNow();
 	{
 		uint32_t bits = 0;
-		AudioUiState ui_state = {};
 		const bool in_perform_mode = IsPerformUiMode(ui_mode);
 		if (in_perform_mode) bits |= kFlagInPerformMode;
 		if (ui_mode == UiMode::Main) bits |= kFlagInMainMode;
@@ -9431,13 +9470,9 @@ int main(void)
 		{
 			bits |= kFlagMonitorEnabled;
 		}
-		ui_state.record_input = record_input;
-		const uint8_t next_idx = g_audio_ui_state_idx ^ 1;
-		g_audio_ui_state_buf[next_idx] = ui_state;
 		{
 			daisy::ScopedIrqBlocker irq;
 			g_audio_flags_bits = bits;
-			g_audio_ui_state_idx = next_idx;
 		}
 	}
 
@@ -9458,6 +9493,7 @@ int main(void)
 	bool last_sd_mounted = false;
 	RecordState last_record_state = RecordState::Armed;
 	bool last_playback_active = false;
+	uint8_t last_wave_ui_idx = 0;
 	uint32_t last_edt_playhead_ms = 0;
 	bool last_edt_playhead_active = false;
 	uint32_t last_ui_ms = System::GetNow();
@@ -9547,7 +9583,6 @@ int main(void)
 		}
 		{
 			uint32_t bits = 0;
-			AudioUiState ui_state = {};
 			const bool in_perform_mode = IsPerformUiMode(ui_mode);
 			if (in_perform_mode) bits |= kFlagInPerformMode;
 			if (ui_mode == UiMode::Main) bits |= kFlagInMainMode;
@@ -9563,13 +9598,9 @@ int main(void)
 			{
 				bits |= kFlagMonitorEnabled;
 			}
-			ui_state.record_input = record_input;
-			const uint8_t next_idx = g_audio_ui_state_idx ^ 1;
-			g_audio_ui_state_buf[next_idx] = ui_state;
 			{
 				daisy::ScopedIrqBlocker irq;
 				g_audio_flags_bits = bits;
-				g_audio_ui_state_idx = next_idx;
 			}
 		}
 
@@ -10026,7 +10057,10 @@ int main(void)
 				}
 				else if (record_state == RecordState::Recording)
 				{
-					DrawRecordRecording();
+					uint8_t ui_idx = 0;
+					const AudioUiState& uir = GetAudioUiStateSnapshot(ui_idx);
+					DrawRecordRecording(uir);
+					last_wave_ui_idx = ui_idx;
 				}
 				else
 				{
@@ -10295,7 +10329,10 @@ int main(void)
 				}
 				else if (current_state == RecordState::Recording)
 				{
-					DrawRecordRecording();
+					uint8_t ui_idx = 0;
+					const AudioUiState& uir = GetAudioUiStateSnapshot(ui_idx);
+					DrawRecordRecording(uir);
+					last_wave_ui_idx = ui_idx;
 				}
 				else if (current_state == RecordState::TargetSelect)
 				{
@@ -10310,10 +10347,12 @@ int main(void)
 		}
 		if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::Recording)
 		{
-			if (live_wave_dirty)
+			uint8_t ui_idx = 0;
+			const AudioUiState& uir = GetAudioUiStateSnapshot(ui_idx);
+			if (ui_idx != last_wave_ui_idx)
 			{
-				live_wave_dirty = false;
-				DrawRecordRecording();
+				DrawRecordRecording(uir);
+				last_wave_ui_idx = ui_idx;
 			}
 		}
 		else if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::SourceSelect)
@@ -10409,7 +10448,6 @@ int main(void)
 			|| request_delete_redraw
 			|| request_playhead_redraw
 			|| waveform_dirty
-			|| live_wave_dirty
 			|| request_perform_redraw
 			|| request_fx_detail_redraw
 			|| request_length_redraw;
