@@ -244,7 +244,7 @@ static const char* kSaveNouns[] =
 	"Branch",
 	"Gales",
 	"Pool",
-	"Shimmer",
+	"Signal",
 	"Silence",
 	"Lineman",
 	"Brother",
@@ -300,11 +300,6 @@ constexpr float kReverbDampDefault =
 	(kReverbDampMaxHz - kReverbLpFreq) / (kReverbDampMaxHz - kReverbDampMinHz);
 constexpr float kReverbDefaultWet = 0.0f;
 constexpr float kReverbWetStep = 0.02f;
-constexpr float kShimmerHpHz = 900.0f;
-constexpr size_t kShimmerBufferSize = 8192;
-constexpr size_t kShimmerDelaySamples = 2048;
-constexpr float kShimmerRateUp = 2.0f;
-constexpr float kShimmerFeedback = 0.6f;
 constexpr float kChorusRateHz = 0.25f;
 constexpr float kChorusRateMinHz = 0.05f;
 constexpr float kChorusRateMaxHz = 0.9f;
@@ -892,13 +887,6 @@ FatFSInterface fsi;
 Encoder      encoder_r;
 Switch       shift_button;
 DSY_SDRAM_BSS ReverbSc reverb;
-OnePoleHp shimmer_hp_l;
-OnePoleHp shimmer_hp_r;
-DSY_SDRAM_BSS float shimmer_buf_l[kShimmerBufferSize];
-DSY_SDRAM_BSS float shimmer_buf_r[kShimmerBufferSize];
-static size_t shimmer_write_idx = 0;
-static float shimmer_read_idx = 0.0f;
-static int shimmer_mode = 0;
 DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_l;
 DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_r;
 DelayLine<float, kReverbPreDelayMaxSamples> DSY_SDRAM_BSS reverb_predelay_l;
@@ -1124,7 +1112,6 @@ struct PerformState
 	float reverb_pre = 0.0f;
 	float reverb_damp = 0.0f;
 	float reverb_decay = 0.0f;
-	float reverb_shimmer = 0.0f;
 	bool sat_params_initialized = false;
 	bool reverb_params_initialized = false;
 	bool delay_params_initialized = false;
@@ -1351,7 +1338,6 @@ struct AudioParams
 	float reverb_pre;
 	float reverb_damp;
 	float reverb_decay;
-	float reverb_shimmer;
 	float playback_reverse;
 };
 
@@ -1388,7 +1374,6 @@ struct FxParamsAudio
 	float reverb_feedback = 0.0f;
 	float reverb_release = 1.0f;
 	float reverb_gain = 1.0f;
-	float reverb_shimmer = 0.0f;
 };
 
 static FxParamsAudio g_fx_params_buf[2];
@@ -1427,7 +1412,6 @@ static void BuildAndPublishFxParamsAudio(const AudioParams &p, float out_sr)
 	const float reverb_pre = Clamp01(p.reverb_pre);
 	const float reverb_damp = Clamp01(p.reverb_damp);
 	const float reverb_decay = Clamp01(p.reverb_decay);
-	const float reverb_shimmer = Clamp01(p.reverb_shimmer);
 
 	// Saturation / bitcrush
 	fx.sat_mode = sat_mode;
@@ -1477,7 +1461,6 @@ static void BuildAndPublishFxParamsAudio(const AudioParams &p, float out_sr)
 
 	// Reverb mapping
 	fx.reverb_wet = reverb_wet;
-	fx.reverb_shimmer = reverb_shimmer;
 	fx.reverb_gain = 1.0f;
 	{
 		const float decay_ms = kReverbDecayMinMs
@@ -1542,7 +1525,6 @@ static SmoothParam sm_reverb_wet;
 static SmoothParam sm_reverb_pre;
 static SmoothParam sm_reverb_damp;
 static SmoothParam sm_reverb_decay;
-static SmoothParam sm_reverb_shimmer;
 
 enum AudioFlagBits : uint32_t
 {
@@ -1619,7 +1601,6 @@ volatile float reverb_wet = kReverbDefaultWet;
 volatile float reverb_pre = 0.5f;
 volatile float reverb_damp = 0.5f;
 volatile float reverb_decay = 0.5f;
-volatile float reverb_shimmer = 0.0f;
 volatile float delay_wet = kDelayDefaultWet;
 volatile float delay_time = 0.5f;
 volatile float delay_feedback = 0.5f;
@@ -2902,7 +2883,6 @@ static void InitSmoothers()
 	sm_reverb_pre.Init(reverb_pre, 60.0f, kUiTickHz);
 	sm_reverb_damp.Init(reverb_damp, 60.0f, kUiTickHz);
 	sm_reverb_decay.Init(reverb_decay, 80.0f, kUiTickHz);
-	sm_reverb_shimmer.Init(reverb_shimmer, 80.0f, kUiTickHz);
 }
 
 static void UpdateSmoothedParamsPerTick()
@@ -2932,7 +2912,6 @@ static void UpdateSmoothedParamsPerTick()
 	sm_reverb_pre.SetTarget(reverb_pre);
 	sm_reverb_damp.SetTarget(reverb_damp);
 	sm_reverb_decay.SetTarget(reverb_decay);
-	sm_reverb_shimmer.SetTarget(reverb_shimmer);
 
 	AudioParams p = {};
 	p.amp_attack = sm_amp_attack.Process();
@@ -2960,7 +2939,6 @@ static void UpdateSmoothedParamsPerTick()
 	p.reverb_pre = sm_reverb_pre.Process();
 	p.reverb_damp = sm_reverb_damp.Process();
 	p.reverb_decay = sm_reverb_decay.Process();
-	p.reverb_shimmer = sm_reverb_shimmer.Process();
 	p.playback_reverse = playback_reverse;
 
 	PublishAudioParamsFromUi(p);
@@ -2993,8 +2971,7 @@ static void UpdateSmoothedParamsPerTick()
 		|| !sm_reverb_wet.IsNearTarget()
 		|| !sm_reverb_pre.IsNearTarget()
 		|| !sm_reverb_damp.IsNearTarget()
-		|| !sm_reverb_decay.IsNearTarget()
-		|| !sm_reverb_shimmer.IsNearTarget())
+		|| !sm_reverb_decay.IsNearTarget())
 	{
 		fx_params_dirty = true;
 	}
@@ -3336,7 +3313,6 @@ static void CapturePerformState(PerformState& state)
 	state.reverb_pre = reverb_pre;
 	state.reverb_damp = reverb_damp;
 	state.reverb_decay = reverb_decay;
-	state.reverb_shimmer = reverb_shimmer;
 	state.sat_params_initialized = sat_params_initialized;
 	state.reverb_params_initialized = reverb_params_initialized;
 	state.delay_params_initialized = delay_params_initialized;
@@ -3383,7 +3359,6 @@ static void ApplyPerformState(const PerformState& state)
 	reverb_pre = state.reverb_pre;
 	reverb_damp = state.reverb_damp;
 	reverb_decay = state.reverb_decay;
-	reverb_shimmer = state.reverb_shimmer;
 	sat_params_initialized = state.sat_params_initialized;
 	reverb_params_initialized = state.reverb_params_initialized;
 	delay_params_initialized = state.delay_params_initialized;
@@ -7457,7 +7432,6 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 							reverb_pre = 0.5f;
 							reverb_damp = 0.5f;
 							reverb_decay = 0.5f;
-							reverb_shimmer = 0.0f;
 							reverb_params_initialized = true;
 							fx_params_dirty = true;
 						}
@@ -8260,7 +8234,6 @@ static float cached_tape_rate = 0.0f;
 	static float delay_feedback_smoothed = -1.0f;
 	static float delay_spread_smoothed = -1.0f;
 	static float cached_reverb_wet = 0.0f;
-	static float cached_reverb_shimmer = 0.0f;
 	static float cached_reverb_gain = 1.0f;
 	static float cached_reverb_release = 1.0f;
 	static float cached_reverb_predelay_samples = 0.0f;
@@ -8298,7 +8271,6 @@ static float last_chorus_wow = -1.0f;
 	cached_delay_spread = fxp.delay_spread;
 	cached_delay_freeze = fxp.delay_freeze;
 	cached_reverb_wet = fxp.reverb_wet;
-	cached_reverb_shimmer = fxp.reverb_shimmer;
 	cached_reverb_gain = fxp.reverb_gain;
 	cached_reverb_release = fxp.reverb_release;
 	cached_reverb_predelay_samples = fxp.reverb_predelay_samples;
@@ -8397,7 +8369,6 @@ static float last_chorus_wow = -1.0f;
 	const bool delay_active = (delay_mix > kFxParamEpsilon)
 		|| (cached_delay_freeze >= 0.5f);
 	const bool reverb_active = (cached_reverb_wet > kFxParamEpsilon);
-	const float rev_shimmer = cached_reverb_shimmer;
 	const float bit_step = fxp.bit_step;
 	const float tape_drop_amt_mapped = fxp.tape_drop_amt_mapped;
 	float time_alpha = 1.0f;
@@ -8666,87 +8637,11 @@ static float last_chorus_wow = -1.0f;
 		{
 			reverb_tail_gain *= cached_reverb_release;
 		}
-		// Shimmer: pitch-shifted octave layer around midpoint (0.5 = no shimmer).
-		float shimmer_amount = 0.0f;
-		float shimmer_rate = 1.0f;
-		int next_mode = 0;
-		if (rev_shimmer > 0.0f)
-		{
-			shimmer_amount = rev_shimmer;
-			if (shimmer_amount > 1.0f)
-			{
-				shimmer_amount = 1.0f;
-			}
-			if (shimmer_amount < 0.25f)
-			{
-				shimmer_amount *= 2.0f;
-			}
-			else
-			{
-				shimmer_amount = 0.5f + (shimmer_amount - 0.25f) * (0.5f / 0.75f);
-			}
-			if (shimmer_amount > 1.0f)
-			{
-				shimmer_amount = 1.0f;
-			}
-			shimmer_rate = kShimmerRateUp;
-			next_mode = 1;
-		}
-		else
-		{
-			shimmer_amount = 0.0f;
-			shimmer_rate = kShimmerRateUp;
-			next_mode = 0;
-		}
-
-		if (next_mode != shimmer_mode)
-		{
-			shimmer_mode = next_mode;
-			shimmer_read_idx = static_cast<float>(
-				(shimmer_write_idx + kShimmerBufferSize - kShimmerDelaySamples)
-				% kShimmerBufferSize);
-		}
-
-		float shimmer_fb_l = 0.0f;
-		float shimmer_fb_r = 0.0f;
-		if (shimmer_amount > 0.0f)
-		{
-			const size_t read_i0 = static_cast<size_t>(shimmer_read_idx) % kShimmerBufferSize;
-			const size_t read_i1 = (read_i0 + 1) % kShimmerBufferSize;
-			const float frac = shimmer_read_idx - static_cast<float>(read_i0);
-			const float sh_l = shimmer_buf_l[read_i0]
-				+ (shimmer_buf_l[read_i1] - shimmer_buf_l[read_i0]) * frac;
-			const float sh_r = shimmer_buf_r[read_i0]
-				+ (shimmer_buf_r[read_i1] - shimmer_buf_r[read_i0]) * frac;
-			shimmer_fb_l = shimmer_amount * kShimmerFeedback * shimmer_hp_l.Process(sh_l);
-			shimmer_fb_r = shimmer_amount * kShimmerFeedback * shimmer_hp_r.Process(sh_r);
-
-			shimmer_read_idx += shimmer_rate;
-			while (shimmer_read_idx >= static_cast<float>(kShimmerBufferSize))
-			{
-				shimmer_read_idx -= static_cast<float>(kShimmerBufferSize);
-			}
-			const size_t read_int = static_cast<size_t>(shimmer_read_idx);
-			size_t dist = (shimmer_write_idx >= read_int)
-				? (shimmer_write_idx - read_int)
-				: (shimmer_write_idx + kShimmerBufferSize - read_int);
-			if (dist < 4)
-			{
-				shimmer_read_idx = static_cast<float>(
-					(shimmer_write_idx + kShimmerBufferSize - kShimmerDelaySamples)
-					% kShimmerBufferSize);
-			}
-		}
-
 		float rev_l = 0.0f;
 		float rev_r = 0.0f;
-		reverb.Process(rev_in_l + shimmer_fb_l, rev_in_r + shimmer_fb_r, &rev_l, &rev_r);
+		reverb.Process(rev_in_l, rev_in_r, &rev_l, &rev_r);
 		rev_l *= cached_reverb_gain * reverb_tail_gain;
 		rev_r *= cached_reverb_gain * reverb_tail_gain;
-
-		shimmer_buf_l[shimmer_write_idx] = rev_l;
-		shimmer_buf_r[shimmer_write_idx] = rev_r;
-		shimmer_write_idx = (shimmer_write_idx + 1) % kShimmerBufferSize;
 		const float wet = cached_reverb_wet;
 		float wet_mix = wet;
 		float dry_mix = 1.0f - wet;
@@ -9347,16 +9242,6 @@ int main(void)
 	reverb.Init(hw.AudioSampleRate());
 	reverb.SetFeedback(kReverbFeedback);
 	reverb.SetLpFreq(kReverbLpFreq);
-	shimmer_hp_l.Init(hw.AudioSampleRate(), kShimmerHpHz);
-	shimmer_hp_r.Init(hw.AudioSampleRate(), kShimmerHpHz);
-	for (size_t i = 0; i < kShimmerBufferSize; ++i)
-	{
-		shimmer_buf_l[i] = 0.0f;
-		shimmer_buf_r[i] = 0.0f;
-	}
-	shimmer_write_idx = 0;
-	shimmer_read_idx = static_cast<float>(kShimmerBufferSize - kShimmerDelaySamples);
-	shimmer_mode = 0;
 
 	sat_l.Init(hw.AudioSampleRate());
 	sat_r.Init(hw.AudioSampleRate());
