@@ -9112,12 +9112,22 @@ static float last_chorus_wow = -1.0f;
 				sig_r += samp;
 
 				float next_frac = preview_read_frac + pctl.rate;
-				while (next_frac >= 1.0f && available > 0)
+				uint32_t adv = (next_frac >= 1.0f) ? static_cast<uint32_t>(next_frac) : 0u;
+				if (available > 1)
 				{
-					next_frac -= 1.0f;
-					read_idx = (read_idx + 1) % kPreviewBufferFrames;
-					available = PreviewAvailableFrames(read_idx, write_idx);
+					const uint32_t max_adv = static_cast<uint32_t>(available - 1);
+					if (adv > max_adv) adv = max_adv;
 				}
+				else
+				{
+					adv = 0;
+				}
+				next_frac -= static_cast<float>(adv);
+				if (next_frac >= 1.0f)
+				{
+					next_frac = 0.0f;
+				}
+				read_idx = (read_idx + adv) % kPreviewBufferFrames;
 				preview_read_frac = next_frac;
 				preview_read_index = read_idx;
 			}
