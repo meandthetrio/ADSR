@@ -766,6 +766,31 @@ static volatile uint8_t g_midi_cmd_wr = 0;
 static volatile uint8_t g_midi_cmd_rd = 0;
 static volatile bool g_midi_rx_started = false;
 
+constexpr uint8_t kPlaybackCmdQSize = 8; // power of two
+enum PlaybackCmdKind : uint8_t
+{
+	kPlaybackCmdStart   = 1,
+	kPlaybackCmdStop    = 2,
+	kPlaybackCmdStopAll = 3,
+};
+enum PlaybackCmdFlags : uint8_t
+{
+	kPlaybackCmdApplyPitch   = 1u << 0,
+	kPlaybackCmdApplyRelease = 1u << 1,
+};
+
+struct PlaybackCmd
+{
+	uint8_t kind;
+	uint8_t note;
+	uint8_t flags;
+	uint8_t pad;
+};
+
+static PlaybackCmd g_playback_cmd_q[kPlaybackCmdQSize];
+static volatile uint8_t g_playback_cmd_wr = 0;
+static volatile uint8_t g_playback_cmd_rd = 0;
+
 
 static inline void MidiCmdPushIsr(uint8_t kind, uint8_t note, uint8_t vel)
 {
@@ -807,6 +832,37 @@ static inline uint8_t MidiCmdPopBatchAudio(MidiCmd* out, uint8_t max_n)
 		rd = (uint8_t)((rd + 1) & (kMidiCmdQSize - 1));
 	}
 	g_midi_cmd_rd = rd;
+	return n;
+}
+
+static inline void PlaybackCmdPushUi(uint8_t kind, uint8_t note, uint8_t flags)
+{
+	daisy::ScopedIrqBlocker irq;
+	const uint8_t wr = g_playback_cmd_wr;
+	const uint8_t next = (uint8_t)((wr + 1) & (kPlaybackCmdQSize - 1));
+	if (next == g_playback_cmd_rd)
+	{
+		return;
+	}
+	g_playback_cmd_q[wr].kind = kind;
+	g_playback_cmd_q[wr].note = note;
+	g_playback_cmd_q[wr].flags = flags;
+	g_playback_cmd_q[wr].pad = 0;
+	g_playback_cmd_wr = next;
+}
+
+static inline uint8_t PlaybackCmdPopBatchAudio(PlaybackCmd* out, uint8_t max_n)
+{
+	daisy::ScopedIrqBlocker irq;
+	uint8_t rd = g_playback_cmd_rd;
+	const uint8_t wr = g_playback_cmd_wr;
+	uint8_t n = 0;
+	while (rd != wr && n < max_n)
+	{
+		out[n++] = g_playback_cmd_q[rd];
+		rd = (uint8_t)((rd + 1) & (kPlaybackCmdQSize - 1));
+	}
+	g_playback_cmd_rd = rd;
 	return n;
 }
 static daisy::TimerHandle g_ctrl_timer;
@@ -959,6 +1015,9 @@ volatile bool playback_active = false;
 volatile float playback_rate = 1.0f;
 volatile float playback_phase = 0.0f;
 volatile float playback_reverse = 0.0f;
+static bool playback_reverse_audio = false;
+static volatile bool g_playback_reverse_target = false;
+static volatile bool g_perform_voices_active = false;
 volatile float playback_amp = 0.0f;
 volatile uint32_t playback_env_samples = 0;
 volatile bool playback_release_active = false;
@@ -978,9 +1037,36 @@ struct SampleRuntime
 	bool loaded = false;
 };
 
+struct FxChainRuntime
+{
+	uint8_t order[kPerformFaderCount] = {};
+	uint8_t count = kPerformFaderCount;
+	bool paused = false;
+	bool pause_pending = false;
+	float fade_gain = 1.0f;
+	float fade_target = 1.0f;
+	int32_t fade_samples_left = 0;
+};
+
+struct PreviewControl
+{
+	const int16_t* l = nullptr;
+	const int16_t* r = nullptr;
+	size_t length = 0;
+	float rate = 1.0f;
+	float gain = 1.0f;
+	bool mono = true;
+};
+
 static SampleRuntime g_rt_buf[2];
 static volatile uint8_t g_rt_pub_idx = 0;
 static volatile uint8_t g_rt_active_idx = 0;
+static FxChainRuntime g_fx_chain_buf[2];
+static volatile uint8_t g_fx_chain_pub_idx = 0;
+static volatile uint8_t g_fx_chain_active_idx = 0;
+static PreviewControl g_preview_ctl_buf[2];
+static volatile uint8_t g_preview_pub_idx = 0;
+static volatile uint8_t g_preview_active_idx = 0;
 
 struct PerformVoice
 {
@@ -1126,6 +1212,11 @@ enum AudioCmdBits : uint32_t
 	kCmdRecStop      = 1U << 1,
 	kCmdAllNotesOff  = 1U << 2,
 	kCmdCommitRuntime = 1U << 3,
+	kCmdCommitFxChain = 1U << 4,
+	kCmdPreviewStart = 1U << 5,
+	kCmdPreviewStop  = 1U << 6,
+	kCmdCommitPreview = 1U << 7,
+	kCmdPlaybackReverse = 1U << 8,
 };
 
 static volatile uint32_t g_audio_cmd = 0;
@@ -1137,6 +1228,23 @@ static void RequestAudioCmd(uint32_t bits)
 		daisy::ScopedIrqBlocker irq;
 		g_audio_cmd |= bits;
 	}
+}
+
+static inline void RequestPlaybackStart(uint8_t note, bool apply_pitch)
+{
+	const uint8_t flags = apply_pitch ? kPlaybackCmdApplyPitch : 0;
+	PlaybackCmdPushUi(kPlaybackCmdStart, note, flags);
+}
+
+static inline void RequestPlaybackStop(uint8_t note, bool apply_release)
+{
+	const uint8_t flags = apply_release ? kPlaybackCmdApplyRelease : 0;
+	PlaybackCmdPushUi(kPlaybackCmdStop, note, flags);
+}
+
+static inline void RequestPlaybackStopAll()
+{
+	PlaybackCmdPushUi(kPlaybackCmdStopAll, 0, 0);
 }
 
 static void PushAudioEvent(uint32_t bits)
@@ -1248,6 +1356,7 @@ struct AudioParams
 	float reverb_damp;
 	float reverb_decay;
 	float reverb_shimmer;
+	float playback_reverse;
 };
 
 // Audio-ready FX parameters (pre-mapped; no powf/expf needed in AudioCallback).
@@ -1463,6 +1572,8 @@ static volatile bool g_audio_recording_active = false;
 static bool g_reset_voices_pending = false;
 static volatile float g_delay_time_alpha = 1.0f;
 static volatile float g_delay_param_alpha = 1.0f;
+static FxChainRuntime g_fx_chain_audio = {};
+static bool g_fx_chain_audio_valid = false;
 
 volatile RecordState record_state = RecordState::Armed;
 volatile int32_t record_source_index = 0;
@@ -1519,12 +1630,12 @@ volatile int32_t fx_detail_param_index = 0;
 volatile float flt_cutoff = 1.0f;
 volatile float flt_res = 0.02f;
 volatile bool preview_hold = false;
-static volatile float fx_chain_fade_gain = 1.0f;
-static volatile float fx_chain_fade_target = 1.0f;
-static volatile int32_t fx_chain_fade_samples_left = 0;
-static volatile bool fx_chain_pause_pending = false;
-static volatile bool fx_chain_paused = false;
-static volatile uint32_t fx_chain_last_move_ms = 0;
+static float fx_chain_fade_gain = 1.0f;
+static float fx_chain_fade_target = 1.0f;
+static int32_t fx_chain_fade_samples_left = 0;
+static bool fx_chain_pause_pending = false;
+static bool fx_chain_paused = false;
+static uint32_t fx_chain_last_move_ms = 0;
 volatile bool preview_active = false;
 volatile int32_t preview_index = -1;
 volatile uint32_t preview_sample_rate = 48000;
@@ -2441,13 +2552,16 @@ static void __attribute__((unused)) ComputeWaveform()
 	}
 }
 
+static bool PlaybackActiveAudio();
+static bool PerformVoicesActiveAudio();
+
 static inline bool JobsAllowedNow()
 {
 	if (record_state == RecordState::Recording)
 	{
 		return false;
 	}
-	if (playback_active || AnyPerformVoiceActive())
+	if (PlaybackActiveAudio() || PerformVoicesActiveAudio())
 	{
 		return false;
 	}
@@ -2824,6 +2938,7 @@ static void UpdateSmoothedParamsPerTick()
 	p.reverb_damp = sm_reverb_damp.Process();
 	p.reverb_decay = sm_reverb_decay.Process();
 	p.reverb_shimmer = sm_reverb_shimmer.Process();
+	p.playback_reverse = playback_reverse;
 
 	{
 		daisy::ScopedIrqBlocker irq;
@@ -2877,8 +2992,11 @@ static void UpdateDelaySlewCoeffs()
 	const float param_alpha = (param_tau > 0.0f)
 		? (1.0f - expf(-dt / param_tau))
 		: 1.0f;
-	g_delay_time_alpha = time_alpha;
-	g_delay_param_alpha = param_alpha;
+	{
+		daisy::ScopedIrqBlocker irq;
+		g_delay_time_alpha = time_alpha;
+		g_delay_param_alpha = param_alpha;
+	}
 }
 
 static void JobCancel()
@@ -2993,6 +3111,8 @@ static void JobTick()
 }
 
 static void PublishRuntimeFromUi();
+static void PublishFxChainFromUi();
+static void PublishPreviewControlFromUi();
 
 static void UpdateTrimFrames()
 {
@@ -3090,6 +3210,46 @@ static void PublishRuntimeFromUi()
 		daisy::ScopedIrqBlocker irq;
 		g_rt_pub_idx = next;
 		g_audio_cmd |= kCmdCommitRuntime;
+	}
+}
+
+static void PublishFxChainFromUi()
+{
+	const uint8_t next = static_cast<uint8_t>(g_fx_chain_pub_idx ^ 1u);
+	FxChainRuntime rt = {};
+	for (int i = 0; i < kPerformFaderCount; ++i)
+	{
+		rt.order[i] = static_cast<uint8_t>(fx_chain_order[i]);
+	}
+	rt.count = kPerformFaderCount;
+	rt.paused = fx_chain_paused;
+	rt.pause_pending = fx_chain_pause_pending;
+	rt.fade_gain = fx_chain_fade_gain;
+	rt.fade_target = fx_chain_fade_target;
+	rt.fade_samples_left = fx_chain_fade_samples_left;
+	g_fx_chain_buf[next] = rt;
+	{
+		daisy::ScopedIrqBlocker irq;
+		g_fx_chain_pub_idx = next;
+		g_audio_cmd |= kCmdCommitFxChain;
+	}
+}
+
+static void PublishPreviewControlFromUi()
+{
+	const uint8_t next = static_cast<uint8_t>(g_preview_pub_idx ^ 1u);
+	PreviewControl ctl = {};
+	ctl.l = preview_buffer;
+	ctl.r = nullptr;
+	ctl.length = kPreviewBufferFrames;
+	ctl.rate = preview_rate;
+	ctl.gain = 1.0f;
+	ctl.mono = true;
+	g_preview_ctl_buf[next] = ctl;
+	{
+		daisy::ScopedIrqBlocker irq;
+		g_preview_pub_idx = next;
+		g_audio_cmd |= kCmdCommitPreview;
 	}
 }
 
@@ -3279,12 +3439,11 @@ static bool LoadSampleFromPath(const char* path)
 	FIL* file = &wav_file;
 	UINT bytes_read = 0;
 
-	playback_active = false;
-	playback_phase = 0.0f;
+	RequestPlaybackStopAll();
+	RequestAudioCmd(kCmdAllNotesOff);
 	sample_loaded = false;
 	perform_attack_norm = 0.0f;
 	perform_release_norm = 0.0f;
-	ResetPerformVoices();
 	sample_length = 0;
 	sample_channels = 1;
 	trim_start = 0.0f;
@@ -3462,12 +3621,13 @@ static bool LoadSampleAtIndex(int32_t index)
 
 static void StopPreview()
 {
-	preview_active = false;
 	preview_hold = false;
 	preview_index = -1;
-	preview_read_frac = 0.0f;
-	preview_read_index = 0;
-	preview_write_index = 0;
+	{
+		daisy::ScopedIrqBlocker irq;
+		preview_write_index = 0;
+	}
+	RequestAudioCmd(kCmdPreviewStop);
 	if (preview_file_open)
 	{
 		f_close(&preview_file);
@@ -3551,11 +3711,13 @@ static bool BeginPreviewAtIndex(int32_t index)
 		return false;
 	}
 
-	preview_read_frac = 0.0f;
-	preview_read_index = 0;
-	preview_write_index = 0;
+	{
+		daisy::ScopedIrqBlocker irq;
+		preview_write_index = 0;
+	}
 	preview_index = index;
-	preview_active = true;
+	PublishPreviewControlFromUi();
+	RequestAudioCmd(kCmdPreviewStart);
 	return true;
 }
 
@@ -3578,17 +3740,71 @@ static size_t PreviewFreeFrames(size_t read_idx, size_t write_idx)
 	return (kPreviewBufferFrames - 1) - used;
 }
 
+static bool PreviewActiveAudio()
+{
+	bool active = false;
+	{
+		daisy::ScopedIrqBlocker irq;
+		active = preview_active;
+	}
+	return active;
+}
+
+static size_t PreviewReadIndexAudio()
+{
+	size_t idx = 0;
+	{
+		daisy::ScopedIrqBlocker irq;
+		idx = preview_read_index;
+	}
+	return idx;
+}
+
+static bool PlaybackActiveAudio()
+{
+	bool active = false;
+	{
+		daisy::ScopedIrqBlocker irq;
+		active = playback_active;
+	}
+	return active;
+}
+
+static float PlaybackPhaseAudio()
+{
+	float phase = 0.0f;
+	{
+		daisy::ScopedIrqBlocker irq;
+		phase = playback_phase;
+	}
+	return phase;
+}
+
+static bool PerformVoicesActiveAudio()
+{
+	bool active = false;
+	{
+		daisy::ScopedIrqBlocker irq;
+		active = g_perform_voices_active;
+	}
+	return active;
+}
+
 static void FillPreviewBuffer()
 {
-	if (!preview_active || !preview_file_open)
+	if (!PreviewActiveAudio() || !preview_file_open)
 	{
 		return;
 	}
 	const uint32_t start_ms = System::GetNow();
 	while (true)
 	{
-		const size_t read_idx = preview_read_index;
-		const size_t write_idx = preview_write_index;
+		const size_t read_idx = PreviewReadIndexAudio();
+		size_t write_idx = 0;
+		{
+			daisy::ScopedIrqBlocker irq;
+			write_idx = preview_write_index;
+		}
 		const size_t free_frames = PreviewFreeFrames(read_idx, write_idx);
 		if (free_frames == 0)
 		{
@@ -3631,7 +3847,10 @@ static void FillPreviewBuffer()
 			preview_buffer[w] = static_cast<int16_t>(mono);
 			w = (w + 1) % kPreviewBufferFrames;
 		}
-		preview_write_index = w;
+		{
+			daisy::ScopedIrqBlocker irq;
+			preview_write_index = w;
+		}
 		if ((System::GetNow() - start_ms) >= kPreviewReadBudgetMs)
 		{
 			break;
@@ -4957,8 +5176,8 @@ static void PrepareRecordingUiState()
     perform_attack_norm  = 0.0f;
     perform_release_norm = 0.0f;
 
-    ResetPerformVoices();        // OK here (not in audio thread)
-    playback_active = false;
+    RequestAudioCmd(kCmdAllNotesOff);
+    RequestPlaybackStopAll();
 
     sample_channels = 1;
     sample_rate     = 48000;
@@ -5414,14 +5633,14 @@ static void DrawWaveform()
 	DrawBracket(start_x, true);
 	DrawBracket(end_x,   false);
 
-	if (ui_mode == UiMode::Edt && playback_active)
+	if (ui_mode == UiMode::Edt && PlaybackActiveAudio())
 	{
 		const SampleRuntime rt = g_rt_buf[g_rt_active_idx];
 		const size_t length = rt.length;
 		if (length > 1)
 		{
 			const float denom = static_cast<float>(length - 1);
-			float norm = playback_phase / denom;
+			float norm = PlaybackPhaseAudio() / denom;
 		if (norm < 0.0f)
 		{
 			norm = 0.0f;
@@ -6336,20 +6555,36 @@ static void ApplyPlaybackReverse(bool reverse)
 		return;
 	}
 	playback_reverse = reverse ? 1.0f : 0.0f;
-	if (!sample_loaded || sample_length == 0)
+	{
+		daisy::ScopedIrqBlocker irq;
+		g_playback_reverse_target = reverse;
+	}
+	RequestAudioCmd(kCmdPlaybackReverse);
+}
+
+static void ApplyPlaybackReverseAudio(bool reverse)
+{
+	if (reverse == playback_reverse_audio)
 	{
 		return;
 	}
-	size_t window_start = sample_play_start;
-	size_t window_end = sample_play_end;
-	if (window_end > sample_length || window_end == 0)
+	playback_reverse_audio = reverse;
+
+	const SampleRuntime rt = g_rt_buf[g_rt_active_idx];
+	if (!rt.loaded || rt.length == 0 || rt.l == nullptr)
 	{
-		window_end = sample_length;
+		return;
+	}
+	size_t window_start = rt.play_start;
+	size_t window_end = rt.play_end;
+	if (window_end > rt.length || window_end == 0)
+	{
+		window_end = rt.length;
 	}
 	if (window_end <= window_start)
 	{
 		window_start = 0;
-		window_end = sample_length;
+		window_end = rt.length;
 	}
 	if (window_end <= window_start + 1)
 	{
@@ -6385,44 +6620,7 @@ static void ApplyPlaybackReverse(bool reverse)
 	}
 }
 
-static void StartPlayback(uint8_t note)
-{
-	const SampleRuntime rt = g_rt_buf[g_rt_active_idx];
-	if (!rt.loaded || rt.length < 1 || rt.l == nullptr)
-	{
-		return;
-	}
-	size_t window_start = rt.play_start;
-	size_t window_end = rt.play_end;
-	if (window_end > rt.length || window_end == 0)
-	{
-		window_end = rt.length;
-	}
-	if (window_end <= window_start)
-	{
-		window_start = 0;
-		window_end = rt.length;
-	}
-	if (window_end == 0)
-	{
-		return;
-	}
-	current_note = note;
-	playback_amp = 1.0f;
-	playback_env_samples = 0;
-	playback_release_active = false;
-	playback_release_pos = 0.0f;
-	playback_release_start = 0.0f;
-	const float semis = static_cast<float>(note - kBaseMidiNote);
-	const float pitch = powf(2.0f, semis / 12.0f);
-	const float sr = (rt.rate == 0) ? 48000.0f : static_cast<float>(rt.rate);
-	playback_rate = pitch * (sr / hw.AudioSampleRate());
-	const bool reverse = (playback_reverse >= 0.5f);
-	playback_phase = static_cast<float>(reverse ? (window_end - 1) : window_start);
-	playback_active = true;
-}
-
-static void StartPlayback(uint8_t note, bool apply_pitch)
+static void StartPlaybackAudio(uint8_t note, bool apply_pitch, bool reverse_playback)
 {
 	const SampleRuntime rt = g_rt_buf[g_rt_active_idx];
 	if (!rt.loaded || rt.length < 1 || rt.l == nullptr)
@@ -6454,16 +6652,15 @@ static void StartPlayback(uint8_t note, bool apply_pitch)
 	const float pitch = powf(2.0f, semis / 12.0f);
 	const float sr = (rt.rate == 0) ? 48000.0f : static_cast<float>(rt.rate);
 	playback_rate = pitch * (sr / hw.AudioSampleRate());
-	const bool reverse = (playback_reverse >= 0.5f);
-	playback_phase = static_cast<float>(reverse ? (window_end - 1) : window_start);
+	playback_phase = static_cast<float>(reverse_playback ? (window_end - 1) : window_start);
 	playback_active = true;
 }
 
-static void StopPlayback(uint8_t note)
+static void StopPlaybackAudio(uint8_t note, bool apply_release)
 {
 	if (note == current_note)
 	{
-		if (IsPerformUiMode(ui_mode) && playback_active)
+		if (apply_release && playback_active)
 		{
 			playback_release_active = true;
 			playback_release_pos = 0.0f;
@@ -6476,8 +6673,21 @@ static void StopPlayback(uint8_t note)
 			playback_release_active = false;
 			playback_release_pos = 0.0f;
 			playback_release_start = 0.0f;
-				PushAudioEvent(kAudioEventPlaybackStopped);
+			PushAudioEvent(kAudioEventPlaybackStopped);
 		}
+	}
+}
+
+static void StopPlaybackAllAudio()
+{
+	if (playback_active)
+	{
+		playback_active = false;
+		playback_env_samples = 0;
+		playback_release_active = false;
+		playback_release_pos = 0.0f;
+		playback_release_start = 0.0f;
+		PushAudioEvent(kAudioEventPlaybackStopped);
 	}
 }
 
@@ -6624,18 +6834,18 @@ static void __attribute__((unused)) HandleMidiMessage(MidiEvent msg)
 			const NoteOnEvent note = msg.AsNoteOn();
 			if (note.velocity == 0)
 			{
-				StopPlayback(note.note);
+				RequestPlaybackStop((uint8_t)note.note, false);
 			}
 			else
 			{
-				StartPlayback(note.note);
+				RequestPlaybackStart((uint8_t)note.note, true);
 			}
 		}
 		break;
 		case NoteOff:
 	{
 		const NoteOffEvent note = msg.AsNoteOff();
-		StopPlayback(note.note);
+		RequestPlaybackStop((uint8_t)note.note, false);
 	}
 	break;
 	default:
@@ -6864,8 +7074,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			ui_mode = UiMode::Record;
 			record_source_index = (record_input == RecordInput::Mic) ? 1 : 0;
 			record_state = RecordState::SourceSelect;
-			record_pos = 0;
-			playback_active = false;
+			RequestPlaybackStopAll();
 			record_anim_start_ms = NowMs();
 		}
 		else if (encoder_r_pressed && menu_index == 2)
@@ -7063,25 +7272,6 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			}
 			else if (record_state == RecordState::Recording)
 			{
-				sample_length = record_pos;
-				sample_channels = 1;
-				sample_rate = 48000;
-				sample_loaded = (sample_length > 0);
-				playback_active = false;
-				trim_start = 0.0f;
-				trim_end = 1.0f;
-				waveform_from_recording = true;
-				PublishRuntimeFromUi();
-				record_state = RecordState::Review;
-				record_waveform_pending = true;
-				if (sample_loaded)
-				{
-					// Request waveform computation from main loop instead
-					waveform_compute_ctx = current_sample_context;
-					waveform_compute_pending = true;
-					UpdateTrimFrames();
-					request_length_redraw = true;
-				}
 				RequestAudioCmd(kCmdRecStop);
 			}
 			else if (record_state == RecordState::Review && sample_loaded)
@@ -7111,7 +7301,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				waveform_ready = false;
 				waveform_dirty = true;
 				waveform_from_recording = false;
-				playback_active = false;
+				RequestPlaybackStopAll();
 				PublishRuntimeFromUi();
 				record_state = RecordState::SourceSelect;
 				request_length_redraw = true;
@@ -7128,7 +7318,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			else if (record_state == RecordState::SourceSelect)
 			{
 				ui_mode = UiMode::Main;
-				playback_active = false;
+				RequestPlaybackStopAll();
 				record_anim_start_ms = -1.0;
 			}
 			else if (record_state == RecordState::BackConfirm)
@@ -7145,7 +7335,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			else
 			{
 				record_state = RecordState::SourceSelect;
-				playback_active = false;
+				RequestPlaybackStopAll();
 				record_anim_start_ms = -1.0;
 			}
 		}
@@ -7371,7 +7561,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			}
 			request_perform_redraw = true;
 			fx_chain_last_move_ms = now_ms;
-			if (!fx_chain_paused)
+			if (fx_chain_fade_target > 0.0f)
 			{
 				const int32_t fade_samples
 					= static_cast<int32_t>((out_sr * (kFxChainFadeMs * 0.001f)) + 0.5f);
@@ -7379,6 +7569,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 				fx_chain_fade_samples_left = (fade_samples > 0) ? fade_samples : 1;
 				fx_chain_pause_pending = true;
 			}
+			PublishFxChainFromUi();
 		}
 		else if (fx_select_active && perf_r_inc != 0)
 		{
@@ -7800,18 +7991,18 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 		}
 	}
 
-	if (fx_chain_paused)
+	if (fx_chain_last_move_ms != 0
+		&& (now_ms - fx_chain_last_move_ms) >= kFxChainIdleMs
+		&& fx_chain_fade_target < 1.0f)
 	{
-		if (fx_chain_last_move_ms != 0
-			&& (now_ms - fx_chain_last_move_ms) >= kFxChainIdleMs)
-		{
-			const int32_t fade_samples
-				= static_cast<int32_t>((out_sr * (kFxChainFadeMs * 0.001f)) + 0.5f);
-			fx_chain_paused = false;
-			fx_chain_fade_target = 1.0f;
-			fx_chain_fade_samples_left = (fade_samples > 0) ? fade_samples : 1;
-			fx_chain_fade_gain = 0.0f;
-		}
+		const int32_t fade_samples
+			= static_cast<int32_t>((out_sr * (kFxChainFadeMs * 0.001f)) + 0.5f);
+		fx_chain_paused = false;
+		fx_chain_pause_pending = false;
+		fx_chain_fade_target = 1.0f;
+		fx_chain_fade_samples_left = (fade_samples > 0) ? fade_samples : 1;
+		fx_chain_fade_gain = 0.0f;
+		PublishFxChainFromUi();
 	}
 
 	if (record_state == RecordState::Countdown)
@@ -7834,10 +8025,33 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		cmd = g_audio_cmd;
 		g_audio_cmd = 0;
 	}
+	const bool apply_reverse_cmd = (cmd & kCmdPlaybackReverse) != 0;
 
 	if (cmd & kCmdCommitRuntime)
 	{
 		g_rt_active_idx = g_rt_pub_idx;
+	}
+	if (cmd & kCmdCommitFxChain)
+	{
+		g_fx_chain_active_idx = g_fx_chain_pub_idx;
+		g_fx_chain_audio = g_fx_chain_buf[g_fx_chain_active_idx];
+		g_fx_chain_audio_valid = true;
+	}
+	if (cmd & kCmdCommitPreview)
+	{
+		g_preview_active_idx = g_preview_pub_idx;
+	}
+	if (cmd & kCmdPreviewStart)
+	{
+		preview_active = true;
+		preview_read_index = 0;
+		preview_read_frac = 0.0f;
+	}
+	if (cmd & kCmdPreviewStop)
+	{
+		preview_active = false;
+		preview_read_index = 0;
+		preview_read_frac = 0.0f;
 	}
 	if (cmd & kCmdRecStart)
 {
@@ -7873,6 +8087,21 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		flags_bits = g_audio_flags_bits;
 		ui_state = g_audio_ui_state_buf[g_audio_ui_state_idx];
 	}
+	AudioParams params = {};
+	{
+		daisy::ScopedIrqBlocker irq;
+		std::memcpy(&params, &g_audio_params, sizeof(AudioParams));
+	}
+	const bool reverse_playback = (params.playback_reverse >= 0.5f);
+	if (apply_reverse_cmd)
+	{
+		bool reverse_target = false;
+		{
+			daisy::ScopedIrqBlocker irq;
+			reverse_target = g_playback_reverse_target;
+		}
+		ApplyPlaybackReverseAudio(reverse_target);
+	}
 	// Apply queued MIDI note commands in audio thread (low latency).
 	bool record_active = g_audio_recording_active;
 	MidiCmd batch[4];
@@ -7900,19 +8129,42 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		{
 			if (c.kind == kMidiCmdNoteOn)
 			{
-				StartPlayback((uint8_t)c.note);
+				StartPlaybackAudio((uint8_t)c.note, true, reverse_playback);
 			}
 			else
 			{
-				StopPlayback((uint8_t)c.note);
+				StopPlaybackAudio((uint8_t)c.note, false);
 			}
 		}
 	}
-	AudioParams params = {};
+	PlaybackCmd pb_batch[4];
+	const uint8_t pb_n = PlaybackCmdPopBatchAudio(pb_batch, 4);
+	for (uint8_t i = 0; i < pb_n; ++i)
 	{
-		daisy::ScopedIrqBlocker irq;
-		std::memcpy(&params, &g_audio_params, sizeof(AudioParams));
+		const PlaybackCmd& c = pb_batch[i];
+		if (record_active)
+		{
+			continue;
+		}
+		if (c.kind == kPlaybackCmdStart)
+		{
+			const bool apply_pitch = (c.flags & kPlaybackCmdApplyPitch) != 0;
+			StartPlaybackAudio(c.note, apply_pitch, reverse_playback);
+		}
+		else if (c.kind == kPlaybackCmdStop)
+		{
+			const bool apply_release = (c.flags & kPlaybackCmdApplyRelease) != 0;
+			StopPlaybackAudio(c.note, apply_release);
+		}
+		else if (c.kind == kPlaybackCmdStopAll)
+		{
+			StopPlaybackAllAudio();
+		}
 	}
+	const FxChainRuntime& fxrt = g_fx_chain_audio_valid
+		? g_fx_chain_audio
+		: g_fx_chain_buf[g_fx_chain_active_idx];
+	const PreviewControl& pctl = g_preview_ctl_buf[g_preview_active_idx];
 	const float out_sr = hw.AudioSampleRate();
 	const SampleRuntime& rt = g_rt_buf[g_rt_active_idx];
 	const int16_t* rt_l = rt.l;
@@ -8096,8 +8348,13 @@ static float last_chorus_wow = -1.0f;
 	const float rev_shimmer = cached_reverb_shimmer;
 	const float bit_step = fxp.bit_step;
 	const float tape_drop_amt_mapped = fxp.tape_drop_amt_mapped;
-	const float time_alpha = g_delay_time_alpha;
-	const float param_alpha = g_delay_param_alpha;
+	float time_alpha = 1.0f;
+	float param_alpha = 1.0f;
+	{
+		daisy::ScopedIrqBlocker irq;
+		time_alpha = g_delay_time_alpha;
+		param_alpha = g_delay_param_alpha;
+	}
 	const float max_delay = static_cast<float>(kDelayMaxSamples - 1);
 	float delay_target = fxp.delay_time_samples;
 	if (delay_target > max_delay)
@@ -8133,14 +8390,14 @@ static float last_chorus_wow = -1.0f;
 	const bool main_mode = (flags_bits & kFlagInMainMode) != 0;
 	const bool fx_allowed = (flags_bits & kFlagFxAllowed) != 0;
 	const bool amp_env_active = perform_mode;
-	const float amp_attack_ms = AmpEnvMsFromFader(amp_attack);
-	const float amp_release_ms = AmpEnvMsFromFader(amp_release);
+	const float amp_attack_ms = AmpEnvMsFromFader(params.amp_attack);
+	const float amp_release_ms = AmpEnvMsFromFader(params.amp_release);
 	const float amp_attack_samples = amp_attack_ms * 0.001f * out_sr;
 	const float amp_release_samples = amp_release_ms * 0.001f * out_sr;
 	const bool use_poly = (!record_active) && (perform_mode && rt.loaded);
 	const bool sample_stereo = (rt.channels == 2);
-	const float flt_cutoff_hz = FltCutoffFromFader(flt_cutoff, out_sr);
-	const float flt_q = FltQFromFader(flt_res);
+	const float flt_cutoff_hz = FltCutoffFromFader(params.flt_cutoff, out_sr);
+	const float flt_q = FltQFromFader(params.flt_res);
 	static float last_flt_cutoff = -1.0f;
 	static float last_flt_q = -1.0f;
 	if (flt_cutoff_hz != last_flt_cutoff || flt_q != last_flt_q)
@@ -8158,7 +8415,7 @@ static float last_chorus_wow = -1.0f;
 	int32_t fx_order[kPerformFaderCount];
 	for (int i = 0; i < kPerformFaderCount; ++i)
 	{
-		fx_order[i] = fx_chain_order[i];
+		fx_order[i] = fxrt.order[i];
 	}
 
 	auto apply_saturation = [&](float &l, float &r)
@@ -8465,24 +8722,26 @@ static float last_chorus_wow = -1.0f;
 		r = (r * dry_mix) + (rev_r * wet_mix);
 	};
 
-	float fx_gain = fx_chain_fade_gain;
-	int32_t fade_samples_left = fx_chain_fade_samples_left;
+	float fx_gain = fxrt.fade_gain;
+	int32_t fade_samples_left = fxrt.fade_samples_left;
 	const float fade_step = (fade_samples_left > 0)
-		? (fx_chain_fade_target - fx_gain) / static_cast<float>(fade_samples_left)
+		? (fxrt.fade_target - fx_gain) / static_cast<float>(fade_samples_left)
 		: 0.0f;
 
 	const bool monitor_active = (flags_bits & kFlagMonitorEnabled) != 0;
+	const bool any_perform_active = AnyPerformVoiceActive();
+	g_perform_voices_active = any_perform_active;
 	const bool idle_audio = !playback_active
 		&& !preview_active
 		&& !monitor_active
 		&& !record_active
-		&& !AnyPerformVoiceActive()
+		&& !any_perform_active
 		&& !sat_active
 		&& !chorus_active
 		&& (!delay_active || !rt.loaded)
 		&& (!reverb_active || !rt.loaded)
-		&& (fx_chain_fade_samples_left == 0)
-		&& !fx_chain_pause_pending;
+		&& (fxrt.fade_samples_left == 0)
+		&& !fxrt.pause_pending;
 	if (idle_audio)
 	{
 		for (size_t i = 0; i < size; ++i)
@@ -8567,7 +8826,6 @@ static float last_chorus_wow = -1.0f;
 				PushAudioEvent(kAudioEventPlaybackStopped | kAudioEventRecFinished);
 			}
 		}
-		const bool reverse_playback = (playback_reverse >= 0.5f);
 		if (rt.loaded && playback_active && !record_active && window_valid)
 		{
 			float amp_env = 1.0f;
@@ -8884,20 +9142,25 @@ static float last_chorus_wow = -1.0f;
 		if (preview_active)
 		{
 			size_t read_idx = preview_read_index;
-			const size_t write_idx = preview_write_index;
+			size_t write_idx = 0;
+			{
+				daisy::ScopedIrqBlocker irq;
+				write_idx = preview_write_index;
+			}
 			size_t available = PreviewAvailableFrames(read_idx, write_idx);
 			if (available >= 2)
 			{
 				const size_t idx0 = read_idx;
 				const size_t idx1 = (idx0 + 1) % kPreviewBufferFrames;
 				const float frac = preview_read_frac;
-				const float s0 = static_cast<float>(preview_buffer[idx0]);
-				const float s1 = static_cast<float>(preview_buffer[idx1]);
-				const float samp = (s0 + (s1 - s0) * frac) * kSampleScale;
+				const int16_t* preview_buf = pctl.l;
+				const float s0 = static_cast<float>(preview_buf[idx0]);
+				const float s1 = static_cast<float>(preview_buf[idx1]);
+				const float samp = (s0 + (s1 - s0) * frac) * kSampleScale * pctl.gain;
 				sig_l += samp;
 				sig_r += samp;
 
-				float next_frac = preview_read_frac + preview_rate;
+				float next_frac = preview_read_frac + pctl.rate;
 				while (next_frac >= 1.0f && available > 0)
 				{
 					next_frac -= 1.0f;
@@ -8919,10 +9182,10 @@ static float last_chorus_wow = -1.0f;
 			--fade_samples_left;
 			if (fade_samples_left == 0)
 			{
-				fx_gain = fx_chain_fade_target;
+				fx_gain = fxrt.fade_target;
 			}
 		}
-		if (fx_chain_paused)
+		if (fxrt.paused)
 		{
 			out[0][i] = 0.0f;
 			out[1][i] = 0.0f;
@@ -8965,15 +9228,15 @@ static float last_chorus_wow = -1.0f;
 		out[1][i] = fx_r * fx_gain;
 	}
 audio_done:
-	fx_chain_fade_gain = fx_gain;
-	fx_chain_fade_samples_left = fade_samples_left;
-	if (fx_chain_pause_pending
-		&& fx_chain_fade_samples_left == 0
-		&& fx_chain_fade_target <= 0.0f)
+	g_fx_chain_audio.fade_gain = fx_gain;
+	g_fx_chain_audio.fade_samples_left = fade_samples_left;
+	if (g_fx_chain_audio.pause_pending
+		&& g_fx_chain_audio.fade_samples_left == 0
+		&& g_fx_chain_audio.fade_target <= 0.0f)
 	{
-		fx_chain_paused = true;
-		fx_chain_pause_pending = false;
-		fx_chain_fade_gain = 0.0f;
+		g_fx_chain_audio.paused = true;
+		g_fx_chain_audio.pause_pending = false;
+		g_fx_chain_audio.fade_gain = 0.0f;
 	}
 	#if PERF_DIAGNOSTICS
 	PERF_CYCLES_END(cyc_end);
@@ -9112,6 +9375,36 @@ int main(void)
 	g_rt_pub_idx = 0;
 	g_rt_active_idx = 0;
 
+	FxChainRuntime fx_init = {};
+	for (int i = 0; i < kPerformFaderCount; ++i)
+	{
+		fx_init.order[i] = static_cast<uint8_t>(fx_chain_order[i]);
+	}
+	fx_init.count = kPerformFaderCount;
+	fx_init.paused = fx_chain_paused;
+	fx_init.pause_pending = fx_chain_pause_pending;
+	fx_init.fade_gain = fx_chain_fade_gain;
+	fx_init.fade_target = fx_chain_fade_target;
+	fx_init.fade_samples_left = fx_chain_fade_samples_left;
+	g_fx_chain_buf[0] = fx_init;
+	g_fx_chain_buf[1] = fx_init;
+	g_fx_chain_pub_idx = 0;
+	g_fx_chain_active_idx = 0;
+	g_fx_chain_audio = fx_init;
+	g_fx_chain_audio_valid = true;
+
+	PreviewControl preview_init = {};
+	preview_init.l = preview_buffer;
+	preview_init.r = nullptr;
+	preview_init.length = kPreviewBufferFrames;
+	preview_init.rate = 1.0f;
+	preview_init.gain = 1.0f;
+	preview_init.mono = true;
+	g_preview_ctl_buf[0] = preview_init;
+	g_preview_ctl_buf[1] = preview_init;
+	g_preview_pub_idx = 0;
+	g_preview_active_idx = 0;
+
 	SdmmcHandler::Config sd_cfg;
 	sd_cfg.Defaults();
 	sdcard.Init(sd_cfg);
@@ -9191,11 +9484,16 @@ int main(void)
 			{
 				if (record_state == RecordState::Recording)
 				{
-					sample_length = g_recorded_length_audio;
+					size_t recorded_length = 0;
+					{
+						daisy::ScopedIrqBlocker irq;
+						recorded_length = g_recorded_length_audio;
+					}
+					sample_length = recorded_length;
 					sample_channels = 1;
 					sample_rate = 48000;
 					sample_loaded = (sample_length > 0);
-					playback_active = false;
+					RequestPlaybackStopAll();
 					trim_start = 0.0f;
 					trim_end = 1.0f;
 					waveform_from_recording = true;
@@ -9217,7 +9515,7 @@ int main(void)
 
 		{
 			const uint32_t now = System::GetNow();
-			const bool playback_busy = playback_active || AnyPerformVoiceActive();
+			const bool playback_busy = PlaybackActiveAudio() || PerformVoicesActiveAudio();
 			const uint32_t ui_tick_ms = playback_busy ? kUiTickPlaybackMs : kUiTickMs;
 			int32_t loops = 0;
 			while ((int32_t)(now - last_ui_ms) >= (int32_t)ui_tick_ms && loops < 4)
@@ -9308,7 +9606,7 @@ int main(void)
 				}
 				else
 				{
-					StartPlayback(kBaseMidiNote, false);
+					RequestPlaybackStart(kBaseMidiNote, false);
 				}
 				request_playhead_redraw = true;
 			}
@@ -9404,7 +9702,7 @@ int main(void)
 				&& wav_file_count > 0);
 			if (preview_hold && preview_allowed)
 			{
-				if (!preview_active || preview_index != load_selected)
+				if (!PreviewActiveAudio() || preview_index != load_selected)
 				{
 					if (!BeginPreviewAtIndex(load_selected))
 					{
@@ -9414,13 +9712,13 @@ int main(void)
 			}
 			else
 			{
-				if (preview_active)
+				if (PreviewActiveAudio())
 				{
 					StopPreview();
 				}
 			}
 		}
-		if (preview_active)
+		if (PreviewActiveAudio())
 		{
 			FillPreviewBuffer();
 		}
@@ -9607,7 +9905,7 @@ int main(void)
 			}
 			if (IsPerformUiMode(last_mode) && !IsPerformUiMode(mode))
 			{
-				ResetPerformVoices();
+				RequestAudioCmd(kCmdAllNotesOff);
 			}
 			if (mode == UiMode::Record)
 			{
@@ -10040,7 +10338,7 @@ int main(void)
 		}
 		const bool edt_playhead_active = (!ui_blocked
 			&& mode == UiMode::Edt
-			&& playback_active);
+			&& PlaybackActiveAudio());
 		if (edt_playhead_active)
 		{
 			const uint32_t now = System::GetNow();
@@ -10062,7 +10360,8 @@ int main(void)
 			last_edt_playhead_ms = 0;
 		}
 		last_edt_playhead_active = edt_playhead_active;
-		if (!ui_blocked && (request_playhead_redraw || (playback_active != last_playback_active)))
+		const bool playback_active_now = PlaybackActiveAudio();
+		if (!ui_blocked && (request_playhead_redraw || (playback_active_now != last_playback_active)))
 		{
 			request_playhead_redraw = false;
 			if (mode == UiMode::Edt
@@ -10078,7 +10377,7 @@ int main(void)
 				}
 			}
 		}
-		last_playback_active = playback_active;
+		last_playback_active = playback_active_now;
 		if (request_playback_stop_log)
 		{
 			request_playback_stop_log = false;
