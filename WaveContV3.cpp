@@ -8135,6 +8135,7 @@ static float last_chorus_wow = -1.0f;
 			else
 			{
 				const uint8_t active = preview_pp_active;
+				__DMB();
 				if (preview_pp_ready[active] == 0)
 				{
 					const uint8_t other = static_cast<uint8_t>(active ^ 1u);
@@ -8178,6 +8179,7 @@ static float last_chorus_wow = -1.0f;
 				daisy::ScopedIrqBlocker irq;
 				write_idx = preview_write_index;
 			}
+			__DMB();
 			size_t available = PreviewAvailableFrames(read_idx, write_idx);
 			if (available >= 2)
 			{

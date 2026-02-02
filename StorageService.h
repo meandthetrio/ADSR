@@ -97,11 +97,15 @@ public:
 
 	static constexpr size_t kOpQueueSize = 16;
 	static constexpr size_t kEventQueueSize = 16;
+	static constexpr uint32_t kMinStorageBudgetUs = 1000;
+
+	static inline void StoragePublishBarrier() { __DMB(); }
 
 	void Init();
 	void SetPreviewStreamConfig(const PreviewStreamConfig& cfg);
 	bool Enqueue(const Op& op);
 	bool DequeueEvent(Event& out_event);
+	// budget_us == 0 is clamped to kMinStorageBudgetUs.
 	void RunSlice(uint32_t budget_us);
 	void UnmountSd();
 	const char* GetSdPath() const;

@@ -340,7 +340,7 @@ void StorageService::RunSlice(uint32_t budget_us)
 {
 	if (budget_us == 0)
 	{
-		budget_us = 1000;
+		budget_us = kMinStorageBudgetUs;
 	}
 	const uint32_t slice_start_ms = daisy::System::GetNow();
 	if (op_rd_ != op_wr_)
@@ -906,10 +906,12 @@ void StorageService::RunSlice(uint32_t budget_us)
 					daisy::ScopedIrqBlocker irq;
 					if (pp_fill == 0)
 					{
+						StoragePublishBarrier();
 						*preview_pp_ready_a_ = 1;
 					}
 					else
 					{
+						StoragePublishBarrier();
 						*preview_pp_ready_b_ = 1;
 					}
 				}
@@ -935,6 +937,7 @@ void StorageService::RunSlice(uint32_t budget_us)
 				}
 				{
 					daisy::ScopedIrqBlocker irq;
+					StoragePublishBarrier();
 					*preview_write_index_ = w;
 				}
 			}
@@ -1073,7 +1076,7 @@ void StorageService::RunSlice(uint32_t budget_us)
 	{
 		const uint32_t start_ms = daisy::System::GetNow();
 		const uint32_t budget_ms = (budget_us + 999) / 1000;
-		const size_t max_frames_per_slice = 256;
+		const size_t max_frames_per_slice = 1024;
 
 		while (load_.frames_loaded < load_.frames_total)
 		{
