@@ -202,34 +202,26 @@ static bool BuildNextSavePath(char* out_name,
 	static uint32_t save_counter = 0;
 	if (save_counter == 0)
 	{
-		save_counter = static_cast<uint32_t>(daisy::System::GetNow()) & 0xFFFFu;
+		save_counter = static_cast<uint32_t>(daisy::System::GetNow());
 	}
-	for (uint32_t i = 0; i < 10000; ++i)
+	const uint32_t now = static_cast<uint32_t>(daisy::System::GetNow());
+	const uint32_t counter = save_counter++;
+	const int name_len = snprintf(out_name,
+								  out_name_len,
+								  "Rec_%08lX_%04lX.wav",
+								  static_cast<unsigned long>(now),
+								  static_cast<unsigned long>(counter & 0xFFFFu));
+	if (name_len <= 0 || name_len >= static_cast<int>(out_name_len))
 	{
-		const uint32_t idx = (save_counter + i) % 10000u;
-		const int name_len = snprintf(out_name, out_name_len, "Rec%04lu.wav",
-									  static_cast<unsigned long>(idx));
-		if (name_len <= 0 || name_len >= static_cast<int>(out_name_len))
-		{
-			continue;
-		}
-		const int path_len = snprintf(out_path, out_path_len, "%s%s",
-									  base_dir, out_name);
-		if (path_len <= 0 || path_len >= static_cast<int>(out_path_len))
-		{
-			continue;
-		}
-		FIL test = {};
-		const FRESULT res = f_open(&test, out_path, FA_WRITE | FA_CREATE_NEW);
-		if (res == FR_OK)
-		{
-			f_close(&test);
-			(void)f_unlink(out_path);
-			save_counter = idx + 1;
-			return true;
-		}
+		return false;
 	}
-	return false;
+	const int path_len = snprintf(out_path, out_path_len, "%s%s",
+								  base_dir, out_name);
+	if (path_len <= 0 || path_len >= static_cast<int>(out_path_len))
+	{
+		return false;
+	}
+	return true;
 }
 
 static bool EventQueueHasRoom(uint8_t wr, uint8_t rd, size_t size)
@@ -346,6 +338,10 @@ bool StorageService::DequeueEvent(Event& out_event)
 
 void StorageService::RunSlice(uint32_t budget_us)
 {
+	if (budget_us == 0)
+	{
+		budget_us = 1000;
+	}
 	const uint32_t slice_start_ms = daisy::System::GetNow();
 	if (op_rd_ != op_wr_)
 	{
@@ -705,7 +701,7 @@ void StorageService::RunSlice(uint32_t budget_us)
 	else
 	{
 		const uint32_t start_ms = daisy::System::GetNow();
-		const uint32_t budget_ms = (budget_us == 0) ? 0 : ((budget_us + 999) / 1000);
+		const uint32_t budget_ms = (budget_us + 999) / 1000;
 		const size_t max_frames_per_slice = 2048;
 
 		while (g_preview_open)
@@ -959,7 +955,7 @@ void StorageService::RunSlice(uint32_t budget_us)
 	if (save_.active && save_.header_written)
 	{
 		const uint32_t start_ms = daisy::System::GetNow();
-		const uint32_t budget_ms = (budget_us == 0) ? 0 : ((budget_us + 999) / 1000);
+		const uint32_t budget_ms = (budget_us + 999) / 1000;
 		const size_t max_frames_per_slice = 8192;
 
 		while (save_.frames_written < save_.frames_total)
@@ -1076,7 +1072,7 @@ void StorageService::RunSlice(uint32_t budget_us)
 	if (load_.active)
 	{
 		const uint32_t start_ms = daisy::System::GetNow();
-		const uint32_t budget_ms = (budget_us == 0) ? 0 : ((budget_us + 999) / 1000);
+		const uint32_t budget_ms = (budget_us + 999) / 1000;
 		const size_t max_frames_per_slice = 256;
 
 		while (load_.frames_loaded < load_.frames_total)
@@ -1162,7 +1158,7 @@ void StorageService::RunSlice(uint32_t budget_us)
 		else
 		{
 			const uint32_t start_ms = daisy::System::GetNow();
-			const uint32_t budget_ms = (budget_us == 0) ? 0 : ((budget_us + 999) / 1000);
+			const uint32_t budget_ms = (budget_us + 999) / 1000;
 			const uint32_t max_entries_per_slice = 8;
 			uint32_t entries = 0;
 
