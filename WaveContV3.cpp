@@ -6,6 +6,7 @@
 #include "util/wav_format.h"
 #include "util/bsp_sd_diskio.h"
 #include "util/scopedirqblocker.h"
+#include "StorageService.h"
 #include <cmath>
 #include <initializer_list>
 //#include <math.h>
@@ -14,6 +15,14 @@
 
 using namespace daisy;
 using namespace daisysp;
+
+#ifndef STORAGE_SERVICE_PREVIEW_STREAM
+#define STORAGE_SERVICE_PREVIEW_STREAM 1
+#endif
+
+#ifndef STORAGE_SERVICE_SAVE
+#define STORAGE_SERVICE_SAVE 1
+#endif
 
 using PodDisplay = OledDisplay<SSD130xI2c128x64Driver>;
 
@@ -81,8 +90,13 @@ constexpr size_t kSineTableSize = 1024;
 constexpr int kDisplayW = 128;
 constexpr int kDisplayH = 64;
 constexpr uint32_t kPreviewReadBudgetMs = 2;
-constexpr size_t kPreviewBufferFrames = 4096;
+constexpr size_t kPreviewBufferFrames = 16384;
 constexpr size_t kPreviewReadFrames = 256;
+constexpr size_t kPreviewPpFrames = 2048;
+constexpr size_t kPreviewPreloadFrames = 240000;
+constexpr uint32_t kStorageBudgetUs = 2000;
+constexpr uint32_t kStoragePreviewBudgetUs = 12000;
+constexpr uint32_t kPreviewFadeInMs = 10;
 constexpr uint32_t kUiTickMs = 1;
 constexpr uint32_t kUiTickPlaybackMs = 5;
 constexpr uint32_t kLoadScanGraceMs = 300;
@@ -91,197 +105,6 @@ constexpr float kRecordWaveformScaleMaxMic = 1.75f;
 constexpr float kRecordWaveformScaleMinLine = 0.7f;
 constexpr float kRecordWaveformScaleMaxLine = 2.0f;
 
-static const char* kSaveAdjectives[] =
-{
-	"Calm",
-	"Quiet",
-	"Soft",
-	"Still",
-	"Dream",
-	"Wish",
-	"Sigh",
-	"Hush",
-	"Ashen",
-	"Chill",
-	"Lunar",
-	"Solar",
-	"Aura",
-	"Chord",
-	"Tempo",
-	"Pulse",
-	"Reflect",
-	"Vibe",
-	"Tone",
-	"Hum",
-	"Fern",
-	"Moss",
-	"Briar",
-	"Grove",
-	"Shade",
-	"River",
-	"Raw",
-	"Shore",
-	"Tidal",
-	"Wave",
-	"Spray",
-	"Rain",
-	"Cloud",
-	"Spark",
-	"Smoke",
-	"Snow",
-	"Ice",
-	"Orbit",
-	"Terrain",
-	"Comet",
-	"Star",
-	"Sky",
-	"Void",
-	"Ether",
-	"Zen",
-	"Thin",
-	"Cliff",
-	"Ridge",
-	"Peak",
-	"Vale",
-	"Field",
-	"Path",
-	"Trail",
-	"Omni",
-	"Sad",
-	"Harp",
-	"Vast",
-	"Bass",
-	"Organ",
-	"Flute",
-	"Drone",
-	"Scale",
-	"Note",
-	"Desert",
-	"Hearth",
-	"Cove",
-	"Delta",
-	"Bland",
-	"Reef",
-	"Erase",
-	"Glint",
-	"Fable",
-	"Verse",
-	"Rhyme",
-	"Psalm",
-	"Chant",
-	"Veil",
-	"Glow",
-	"Curve",
-	"Fragile",
-	"Cursed",
-	"Magic",
-	"Holy",
-	"Fever",
-};
-
-static const char* kSaveNouns[] =
-{
-	"Mist",
-	"Horizon",
-	"Ember",
-	"Drift",
-	"Canopy",
-	"Echo",
-	"Mound",
-	"Stillness",
-	"Heater",
-	"Volcano",
-	"Breeze",
-	"Meadow",
-	"Shadow",
-	"Tides",
-	"Sorrow",
-	"Thicket",
-	"Dew",
-	"Lumens",
-	"Dusk",
-	"Frost",
-	"Hollow",
-	"Murmur",
-	"Storm",
-	"Feather",
-	"Veil",
-	"Ripple",
-	"Retro",
-	"Bloom",
-	"Stone",
-	"Whisper",
-	"Dawn",
-	"Drip",
-	"Current",
-	"Glimmer",
-	"Hammer",
-	"Soil",
-	"Flame",
-	"Canter",
-	"Fogbank",
-	"Reflection",
-	"Rain",
-	"Skyward",
-	"Tempest",
-	"Arrow",
-	"Leaf",
-	"Glow",
-	"Thunderhead",
-	"Pathway",
-	"Snowflake",
-	"Again",
-	"Breath",
-	"Overcast",
-	"Pool",
-	"Petal",
-	"Light",
-	"Club",
-	"Cradle",
-	"Death",
-	"Erosion",
-	"Flag",
-	"Branch",
-	"Gales",
-	"Pool",
-	"Signal",
-	"Silence",
-	"Lineman",
-	"Brother",
-	"Solstice",
-	"Driftwood",
-	"Clearing",
-	"Poison",
-	"Buffalo",
-	"Carnage",
-	"Basin",
-	"Frost",
-	"Skyscraper",
-	"Undertone",
-	"Wreckage",
-	"Lichen",
-	"Daybreak",
-	"Haze",
-	"Rambler",
-	"Shelf",
-	"Passenger",
-	"Stones",
-	"Backwind",
-	"Twilight",
-	"Stream",
-	"Overhang",
-	"Quiver",
-	"Shadowland",
-	"Fieldnote",
-	"Viper",
-	"String",
-	"Sundown",
-	"Nightmoves",
-	"Tiger",
-	"Mother",
-	"Lowtide",
-	"Fang",
-};
 constexpr int kPerformVoiceCount = 5;
 constexpr float kReverbFeedback = 0.85f;
 constexpr float kReverbLpFreq = 12000.0f;
@@ -884,6 +707,7 @@ static inline void FlushDisplayIfDue(uint32_t now)
 }
 SdmmcHandler   sdcard;
 FatFSInterface fsi;
+StorageService storage;
 Encoder      encoder_r;
 Switch       shift_button;
 DSY_SDRAM_BSS ReverbSc reverb;
@@ -924,8 +748,6 @@ volatile int32_t request_load_index = -1;
 volatile int32_t wav_file_count = 0;
 
 bool sd_mounted = false;
-static bool sd_detected_last = true;
-static bool sd_need_reinit = false;
 static bool sd_init_in_progress = false;
 static bool sd_init_done = false;
 static bool sd_init_success = false;
@@ -944,7 +766,9 @@ static uint32_t save_result_until_ms = 0;
 static uint32_t save_draw_next_ms = 0;
 static UiMode save_prev_mode = UiMode::Main;
 static char save_filename[kMaxWavNameLen] = {0};
+#if !STORAGE_SERVICE_SAVE
 static FIL save_file;
+#endif
 static size_t save_frames_written = 0;
 static bool save_file_open = false;
 static bool save_header_written = false;
@@ -1260,10 +1084,8 @@ struct FileListJob
 	bool active;
 	bool done;
 	bool wav_only;
-	bool dir_open;
 	int32_t count;
-	DIR dir;
-	FILINFO fno;
+	uint16_t cookie;
 };
 
 static FileListJob g_list_job = {};
@@ -1647,10 +1469,31 @@ volatile float preview_read_frac = 0.0f;
 volatile size_t preview_read_index = 0;
 volatile size_t preview_write_index = 0;
 volatile uint32_t preview_data_offset = 0;
-static FIL preview_file;
-static bool preview_file_open = false;
+#if STORAGE_SERVICE_PREVIEW_STREAM
+static volatile uint32_t preview_underrun_count = 0;
+static volatile uint32_t preview_rb_min_level = 0xFFFFFFFFu;
+#endif
+static volatile uint32_t preview_fade_samples_left = 0;
+static volatile uint32_t preview_fade_samples_total = 0;
+#if STORAGE_SERVICE_PREVIEW_STREAM
+static uint16_t preview_stream_cookie = 1;
+static uint16_t preview_stream_cookie_active = 0;
+#endif
+static bool preview_pending_start = false;
+static uint32_t preview_pending_start_ms = 0;
 alignas(32) static int16_t preview_buffer[kPreviewBufferFrames];
-  alignas(32) static int16_t preview_read_buf[kPreviewReadFrames * 2];
+#if !STORAGE_SERVICE_PREVIEW_STREAM
+alignas(32) static int16_t preview_read_buf[kPreviewReadFrames * 2];
+#endif
+#if STORAGE_SERVICE_PREVIEW_STREAM
+alignas(32) static int16_t preview_pp_buf[2][kPreviewPpFrames];
+static volatile uint8_t preview_pp_ready[2] = {0, 0};
+static volatile uint8_t preview_pp_active = 0;
+static volatile uint32_t preview_pp_pos = 0;
+DSY_SDRAM_BSS static int16_t preview_preload_buf[kPreviewPreloadFrames];
+static volatile size_t preview_preload_frames = 0;
+static volatile bool preview_preload_active = false;
+#endif
 float led1_level = 0.0f;
 float led1_phase_ms = 0.0f;
 static double record_anim_start_ms = -1.0;
@@ -1808,8 +1651,9 @@ static void ForCirclePixels(int cx, int cy, int r, F&& fn)
 	}
 }
 
+#if 0
 static FIL wav_file;
-  alignas(32) static int16_t DMA_BUFFER_MEM_SECTION wav_read[kSampleChunkFrames * 2];
+#endif
 
 const char* kMenuLabels[kMenuCount] = {"LOAD", "RECORD", "PERFORM"};
 
@@ -1863,129 +1707,9 @@ static int32_t NextPerformIndex(int32_t current, int32_t delta)
 	return order[pos];
 }
 
-struct WavInfo
-{
-	uint16_t num_channels = 0;
-	uint32_t sample_rate = 0;
-	uint16_t bits_per_sample = 0;
-	uint32_t data_offset = 0;
-	uint32_t data_size = 0;
-};
-
-  alignas(32) static uint8_t DMA_BUFFER_MEM_SECTION wav_riff_hdr[12];
-  alignas(32) static uint8_t DMA_BUFFER_MEM_SECTION wav_chunk_hdr[8];
-  alignas(32) static uint8_t DMA_BUFFER_MEM_SECTION wav_fmt_buf[32];
-  alignas(32) static int16_t wav_write[kSaveChunkFrames * 2];
-
-static bool ParseWavHeader(FIL* file, WavInfo& info)
-{
-	if (file == nullptr)
-	{
-		return false;
-	}
-
-	FRESULT fres;
-	UINT bytes_read = 0;
-	fres = f_lseek(file, 0);
-	if (fres != FR_OK)
-	{
-		return false;
-	}
-
-	fres = f_read(file, wav_riff_hdr, sizeof(wav_riff_hdr), &bytes_read);
-	if (fres != FR_OK || bytes_read != sizeof(wav_riff_hdr))
-	{
-		return false;
-	}
-
-	if (std::memcmp(wav_riff_hdr, "RIFF", 4) != 0
-		|| std::memcmp(wav_riff_hdr + 8, "WAVE", 4) != 0)
-	{
-		return false;
-	}
-
-	bool fmt_found = false;
-	bool data_found = false;
-	info = WavInfo();
-
-	while (!data_found)
-	{
-		fres = f_read(file, wav_chunk_hdr, sizeof(wav_chunk_hdr), &bytes_read);
-		if (fres != FR_OK || bytes_read != sizeof(wav_chunk_hdr))
-		{
-			return false;
-		}
-
-		const uint32_t chunk_size =
-			(uint32_t)wav_chunk_hdr[4]
-			| ((uint32_t)wav_chunk_hdr[5] << 8)
-			| ((uint32_t)wav_chunk_hdr[6] << 16)
-			| ((uint32_t)wav_chunk_hdr[7] << 24);
-
-		if (std::memcmp(wav_chunk_hdr, "fmt ", 4) == 0)
-		{
-			const UINT to_read = (UINT)((chunk_size < sizeof(wav_fmt_buf)) ? chunk_size : sizeof(wav_fmt_buf));
-
-			fres = f_read(file, wav_fmt_buf, to_read, &bytes_read);
-			if (fres != FR_OK || bytes_read < 16)
-			{
-				return false;
-			}
-
-			const uint16_t audio_format =
-				(uint16_t)(wav_fmt_buf[0] | (wav_fmt_buf[1] << 8));
-			info.num_channels =
-				(uint16_t)(wav_fmt_buf[2] | (wav_fmt_buf[3] << 8));
-			info.sample_rate =
-				(uint32_t)(wav_fmt_buf[4]
-					| (wav_fmt_buf[5] << 8)
-					| (wav_fmt_buf[6] << 16)
-					| (wav_fmt_buf[7] << 24));
-			info.bits_per_sample =
-				(uint16_t)(wav_fmt_buf[14] | (wav_fmt_buf[15] << 8));
-
-			if (audio_format != WAVE_FORMAT_PCM)
-			{
-				return false;
-			}
-
-			fmt_found = true;
-
-			if (chunk_size > to_read)
-			{
-				const FSIZE_t skip = (FSIZE_t)(chunk_size - to_read);
-				fres = f_lseek(file, f_tell(file) + skip);
-				if (fres != FR_OK)
-				{
-					return false;
-				}
-			}
-		}
-		else if (std::memcmp(wav_chunk_hdr, "data", 4) == 0)
-		{
-			info.data_offset = (uint32_t)f_tell(file);
-			info.data_size = chunk_size;
-			data_found = true;
-		}
-		else
-		{
-			const FSIZE_t skip_to = f_tell(file) + (FSIZE_t)chunk_size;
-			fres = f_lseek(file, skip_to);
-			if (fres != FR_OK)
-			{
-				return false;
-			}
-		}
-	}
-
-	if (!fmt_found || !data_found)
-	{
-		return false;
-	}
-
-
-	return true;
-}
+#if !STORAGE_SERVICE_SAVE
+alignas(32) static int16_t wav_write[kSaveChunkFrames * 2];
+#endif
 
 static size_t StrLen(const char* str)
 {
@@ -2103,114 +1827,31 @@ static void MountSd()
 	{
 		return;
 	}
-	sd_mounted = (f_mount(&fsi.GetSDFileSystem(), fsi.GetSDPath(), 1) == FR_OK);
-	if (sd_mounted)
+	StorageService::Op op = {};
+	op.kind = StorageService::OpKind::Mount;
+	if (!storage.Enqueue(op))
 	{
+		return;
 	}
-	else
+	storage.RunSlice(0);
+	StorageService::Event ev = {};
+	while (storage.DequeueEvent(ev))
 	{
+		if (ev.kind == StorageService::EventKind::MountOk)
+		{
+			sd_mounted = true;
+			return;
+		}
+		if (ev.kind == StorageService::EventKind::MountFail)
+		{
+			sd_mounted = false;
+			return;
+		}
 	}
+	sd_mounted = (storage.GetMountState() == StorageService::MountState::Mounted);
 }
 
-static bool BuildNextSaveName(char* out_name, size_t out_len)
-{
-	if (out_len == 0)
-	{
-		return false;
-	}
-	static uint32_t save_name_seed = 0;
-	if (save_name_seed == 0)
-	{
-		save_name_seed = static_cast<uint32_t>(System::GetNow()) ^ 0xA5A5A5A5u;
-	}
-	auto next_rand = [&]()
-	{
-		save_name_seed = (save_name_seed * 1664525u) + 1013904223u;
-		return save_name_seed;
-	};
-
-	const size_t adj_count = ArraySize(kSaveAdjectives);
-	const size_t noun_count = ArraySize(kSaveNouns);
-
-	for (int attempt = 0; attempt < 5000; ++attempt)
-	{
-		const char* adj = kSaveAdjectives[next_rand() % adj_count];
-		const char* noun = kSaveNouns[next_rand() % noun_count];
-
-		char base[64];
-		const int base_len = snprintf(base, sizeof(base), "%s%s", adj, noun);
-		if (base_len <= 0)
-		{
-			continue;
-		}
-		if (static_cast<size_t>(base_len) + 4 >= out_len)
-		{
-			continue;
-		}
-		if (base_len >= static_cast<int>(sizeof(base) - 1))
-		{
-			continue;
-		}
-
-		for (int suffix = 0; suffix < 100; ++suffix)
-		{
-			char name[64];
-			if (suffix == 0)
-			{
-				if (static_cast<size_t>(base_len) + 4 >= sizeof(name))
-				{
-					continue;
-				}
-				int n = snprintf(name, sizeof(name), "%s.wav", base);
-				if (n < 0 || n >= static_cast<int>(sizeof(name)))
-				{
-					continue;
-				}
-			}
-			else
-			{
-				if (static_cast<size_t>(base_len) + 6 >= sizeof(name))
-				{
-					continue;
-				}
-				int n = snprintf(name, sizeof(name), "%s%02d.wav", base, suffix);
-				if (n < 0 || n >= static_cast<int>(sizeof(name)))
-				{
-					continue;
-				}
-			}
-			if (StrLen(name) >= out_len)
-			{
-				continue;
-			}
-			char path[64];
-			BuildFilePath(name, path, sizeof(path));
-			FILINFO finfo;
-			const FRESULT res = f_stat(path, &finfo);
-			if (res != FR_OK)
-			{
-				CopyString(out_name, name, out_len);
-				return true;
-			}
-		}
-	}
-
-	for (int i = 1; i <= 9999; ++i)
-	{
-		char name[16];
-		snprintf(name, sizeof(name), "Rec%04d.wav", i);
-		char path[64];
-		BuildFilePath(name, path, sizeof(path));
-		FILINFO finfo;
-		const FRESULT res = f_stat(path, &finfo);
-		if (res != FR_OK)
-		{
-			CopyString(out_name, name, out_len);
-			return true;
-		}
-	}
-	return false;
-}
+// Save names are generated inside StorageService.
 
 static void ResetSaveState()
 {
@@ -2223,133 +1864,7 @@ static void ResetSaveState()
 	save_last_error = FR_OK;
 }
 
-static bool BeginSaveRecordedSample()
-{
-	if (!sample_loaded || sample_length == 0 || !waveform_from_recording)
-	{
-		return false;
-	}
-	MountSd();
-	if (!sd_mounted)
-	{
-		return false;
-	}
-	if (!BuildNextSaveName(save_filename, sizeof(save_filename)))
-	{
-		return false;
-	}
-	char path[64];
-	BuildFilePath(save_filename, path, sizeof(path));
-
-	const FRESULT open_res = f_open(&save_file, path, FA_WRITE | FA_CREATE_NEW);
-	if (open_res != FR_OK)
-	{
-		return false;
-	}
-	save_file_open = true;
-
-	save_channels = (sample_channels == 0) ? 1 : sample_channels;
-	save_sr = (sample_rate == 0) ? 48000 : sample_rate;
-	save_data_bytes = static_cast<uint32_t>(sample_length * save_channels * sizeof(int16_t));
-
-	WAV_FormatTypeDef header = {};
-	header.ChunkId = kWavFileChunkId;
-	header.FileSize = 36 + save_data_bytes;
-	header.FileFormat = kWavFileWaveId;
-	header.SubChunk1ID = kWavFileSubChunk1Id;
-	header.SubChunk1Size = 16;
-	header.AudioFormat = WAVE_FORMAT_PCM;
-	header.NbrChannels = save_channels;
-	header.SampleRate = save_sr;
-	header.BlockAlign = static_cast<uint16_t>(save_channels * sizeof(int16_t));
-	header.ByteRate = save_sr * header.BlockAlign;
-	header.BitPerSample = 16;
-	header.SubChunk2ID = kWavFileSubChunk2Id;
-	header.SubCHunk2Size = save_data_bytes;
-
-	UINT written = 0;
-	save_last_error = f_write(&save_file, &header, sizeof(header), &written);
-	if (save_last_error != FR_OK || written != sizeof(header))
-	{
-		f_close(&save_file);
-		save_file_open = false;
-		return false;
-	}
-	save_header_written = true;
-	return true;
-}
-
-static bool StepSaveRecordedSample(bool& done)
-{
-	done = false;
-	if (!save_file_open || !save_header_written)
-	{
-		return false;
-	}
-	const uint32_t start_ms = System::GetNow();
-	while (save_frames_written < sample_length)
-	{
-		const size_t frames_left = sample_length - save_frames_written;
-		const size_t frames_this = (frames_left > kSaveChunkFrames) ? kSaveChunkFrames : frames_left;
-		UINT written = 0;
-		if (save_channels == 1)
-		{
-			const int16_t* src = sample_buffer_l + save_frames_written;
-			save_last_error = f_write(&save_file,
-									  src,
-									  static_cast<UINT>(frames_this * sizeof(int16_t)),
-									  &written);
-			if (save_last_error == FR_OK && written != (frames_this * sizeof(int16_t)))
-			{
-				save_last_error = FR_DISK_ERR;
-			}
-		}
-		else
-		{
-			for (size_t i = 0; i < frames_this; ++i)
-			{
-				wav_write[i * 2] = sample_buffer_l[save_frames_written + i];
-				wav_write[i * 2 + 1] = sample_buffer_r[save_frames_written + i];
-			}
-			save_last_error = f_write(&save_file,
-									  wav_write,
-									  static_cast<UINT>(frames_this * save_channels * sizeof(int16_t)),
-									  &written);
-			if (save_last_error == FR_OK && written != (frames_this * save_channels * sizeof(int16_t)))
-			{
-				save_last_error = FR_DISK_ERR;
-			}
-		}
-		if (save_last_error != FR_OK)
-		{
-			f_close(&save_file);
-			save_file_open = false;
-			return false;
-		}
-		save_frames_written += frames_this;
-		if ((System::GetNow() - start_ms) >= kSaveStepBudgetMs)
-		{
-			break;
-		}
-	}
-
-	if (save_frames_written >= sample_length)
-	{
-		save_last_error = f_sync(&save_file);
-		if (save_last_error != FR_OK)
-		{
-			f_close(&save_file);
-			save_file_open = false;
-			return false;
-		}
-		f_close(&save_file);
-		save_file_open = false;
-		done = true;
-		CopyString(loaded_sample_name, save_filename, kMaxWavNameLen);
-		return true;
-	}
-	return true;
-}
+// Legacy save path removed; StorageService handles save.
 
 static bool ReinitSdNow()
 {
@@ -2357,7 +1872,7 @@ static bool ReinitSdNow()
 	{
 		return false;
 	}
-	f_mount(0, fsi.GetSDPath(), 0);
+	storage.UnmountSd();
 	sd_mounted = false;
 	fsi.DeInit();
 	SdmmcHandler::Config sd_cfg;
@@ -2367,137 +1882,6 @@ static bool ReinitSdNow()
 	(void)BSP_SD_Init();
 	MountSd();
 	return sd_mounted;
-}
-
-static void __attribute__((unused)) ScanSdFiles(bool wav_only)
-{
-	bool detected = BSP_SD_IsDetected();
-	if (!detected)
-	{
-		SdmmcHandler::Config sd_cfg;
-		sd_cfg.Defaults();
-		sdcard.Init(sd_cfg);
-		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		(void)BSP_SD_Init();
-		detected = BSP_SD_IsDetected();
-		if (!detected)
-		{
-			sd_mounted = false;
-			sd_need_reinit = true;
-			sd_detected_last = false;
-			wav_file_count = 0;
-			load_selected = 0;
-			load_scroll = 0;
-			return;
-		}
-	}
-	if (BSP_SD_GetCardState() != SD_TRANSFER_OK)
-	{
-		sd_mounted = false;
-		sd_need_reinit = true;
-		wav_file_count = 0;
-		load_selected = 0;
-		load_scroll = 0;
-		return;
-	}
-	if (detected && !sd_detected_last)
-	{
-		sd_need_reinit = true;
-	}
-	sd_detected_last = true;
-
-	if (sd_need_reinit)
-	{
-		f_mount(0, fsi.GetSDPath(), 0);
-		sd_mounted = false;
-		SdmmcHandler::Config sd_cfg;
-		sd_cfg.Defaults();
-		sdcard.Init(sd_cfg);
-		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		(void)BSP_SD_Init();
-		MountSd();
-		sd_need_reinit = !sd_mounted;
-	}
-
-	if (!sd_mounted)
-	{
-		MountSd();
-	}
-	if (!sd_mounted)
-	{
-		wav_file_count = 0;
-		load_selected = 0;
-		load_scroll = 0;
-		return;
-	}
-
-	DIR dir;
-	FILINFO fno;
-	FRESULT res = f_opendir(&dir, fsi.GetSDPath());
-	if (res != FR_OK)
-	{
-		wav_file_count = 0;
-		load_selected = 0;
-		load_scroll = 0;
-		return;
-	}
-
-	int32_t count = 0;
-	for (;;)
-	{
-		res = f_readdir(&dir, &fno);
-		if (res != FR_OK || fno.fname[0] == 0)
-		{
-			break;
-		}
-		if (fno.fattrib & (AM_DIR | AM_HID))
-		{
-			continue;
-		}
-		if (wav_only && !HasWavExtension(fno.fname))
-		{
-			continue;
-		}
-		if (count >= kMaxWavFiles)
-		{
-			break;
-		}
-		CopyString(wav_files[count], fno.fname, kMaxWavNameLen);
-		++count;
-	}
-	f_closedir(&dir);
-	wav_file_count = count;
-	if (wav_file_count <= 0)
-	{
-		load_selected = 0;
-		load_scroll = 0;
-		return;
-	}
-	if (load_selected >= wav_file_count)
-	{
-		load_selected = wav_file_count - 1;
-	}
-	if (load_selected < load_scroll)
-	{
-		load_scroll = load_selected;
-	}
-	else if (load_selected >= load_scroll + LoadVisibleLines())
-	{
-		load_scroll = load_selected - (LoadVisibleLines() - 1);
-	}
-	if (load_scroll < 0)
-	{
-		load_scroll = 0;
-	}
-	const int32_t max_top = wav_file_count - LoadVisibleLines();
-	if (max_top < 0)
-	{
-		load_scroll = 0;
-	}
-	else if (load_scroll > max_top)
-	{
-		load_scroll = max_top;
-	}
 }
 
 static void __attribute__((unused)) ComputeWaveform()
@@ -2568,6 +1952,15 @@ static inline bool JobsAllowedNow()
 		{
 			return false;
 		}
+	}
+	return true;
+}
+
+static inline bool FileListAllowedNow()
+{
+	if (record_state == RecordState::Recording)
+	{
+		return false;
 	}
 	return true;
 }
@@ -2683,91 +2076,34 @@ static void WaveformJobTick(uint32_t budget_samples)
 
 static void FileListJobCancel()
 {
-	if (g_list_job.active && g_list_job.dir_open)
-	{
-		f_closedir(&g_list_job.dir);
-	}
 	g_list_job = {};
 }
+
+static uint16_t g_scan_cookie = 1;
 
 static void FileListJobStart(bool wav_only)
 {
 	FileListJobCancel();
-	bool detected = BSP_SD_IsDetected();
-	if (!detected)
-	{
-		SdmmcHandler::Config sd_cfg;
-		sd_cfg.Defaults();
-		sdcard.Init(sd_cfg);
-		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		(void)BSP_SD_Init();
-		detected = BSP_SD_IsDetected();
-		if (!detected)
-		{
-			sd_mounted = false;
-			sd_need_reinit = true;
-			sd_detected_last = false;
-			wav_file_count = 0;
-			load_selected = 0;
-			load_scroll = 0;
-			return;
-		}
-	}
-	if (BSP_SD_GetCardState() != SD_TRANSFER_OK)
-	{
-		sd_mounted = false;
-		sd_need_reinit = true;
-		wav_file_count = 0;
-		load_selected = 0;
-		load_scroll = 0;
-		return;
-	}
-	if (detected && !sd_detected_last)
-	{
-		sd_need_reinit = true;
-	}
-	sd_detected_last = true;
-
-	if (sd_need_reinit)
-	{
-		f_mount(0, fsi.GetSDPath(), 0);
-		sd_mounted = false;
-		SdmmcHandler::Config sd_cfg;
-		sd_cfg.Defaults();
-		sdcard.Init(sd_cfg);
-		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		(void)BSP_SD_Init();
-		MountSd();
-		sd_need_reinit = !sd_mounted;
-	}
-
-	if (!sd_mounted)
-	{
-		MountSd();
-	}
-	if (!sd_mounted)
-	{
-		wav_file_count = 0;
-		load_selected = 0;
-		load_scroll = 0;
-		return;
-	}
-
-	FRESULT res = f_opendir(&g_list_job.dir, fsi.GetSDPath());
-	if (res != FR_OK)
-	{
-		wav_file_count = 0;
-		load_selected = 0;
-		load_scroll = 0;
-		return;
-	}
-
 	g_list_job.active = true;
 	g_list_job.done = false;
 	g_list_job.wav_only = wav_only;
-	g_list_job.dir_open = true;
 	g_list_job.count = 0;
+	g_list_job.cookie = g_scan_cookie++;
 	wav_file_count = 0;
+	load_selected = 0;
+	load_scroll = 0;
+
+	StorageService::Op op = {};
+	op.kind = StorageService::OpKind::ScanDir;
+	CopyString(op.path, fsi.GetSDPath(), sizeof(op.path));
+	op.max_entries = static_cast<uint16_t>(kMaxWavFiles);
+	op.cookie = g_list_job.cookie;
+	op.wav_only = wav_only;
+	if (!storage.Enqueue(op))
+	{
+		g_list_job.active = false;
+		g_list_job.done = true;
+	}
 }
 
 static void FinalizeFileList()
@@ -2810,50 +2146,7 @@ static void FinalizeFileList()
 
 static void FileListJobTick(uint32_t budget_entries)
 {
-	if (!g_list_job.active || budget_entries == 0)
-	{
-		return;
-	}
-	bool dirty = false;
-	for (uint32_t i = 0; i < budget_entries && g_list_job.active; ++i)
-	{
-		FRESULT res = f_readdir(&g_list_job.dir, &g_list_job.fno);
-		if (res != FR_OK || g_list_job.fno.fname[0] == 0)
-		{
-			f_closedir(&g_list_job.dir);
-			g_list_job.dir_open = false;
-			g_list_job.active = false;
-			g_list_job.done = true;
-			FinalizeFileList();
-			return;
-		}
-		if (g_list_job.fno.fattrib & (AM_DIR | AM_HID))
-		{
-			continue;
-		}
-		if (g_list_job.wav_only && !HasWavExtension(g_list_job.fno.fname))
-		{
-			continue;
-		}
-		if (g_list_job.count >= kMaxWavFiles)
-		{
-			f_closedir(&g_list_job.dir);
-			g_list_job.dir_open = false;
-			g_list_job.active = false;
-			g_list_job.done = true;
-			FinalizeFileList();
-			return;
-		}
-		CopyString(wav_files[g_list_job.count], g_list_job.fno.fname, kMaxWavNameLen);
-		g_list_job.count++;
-		wav_file_count = g_list_job.count;
-		dirty = true;
-	}
-	if (dirty)
-	{
-		request_delete_redraw = true;
-		RequestDisplayUpdate();
-	}
+	(void)budget_entries;
 }
 
 static void InitSmoothers()
@@ -3063,7 +2356,10 @@ static void JobTick()
 	{
 		return;
 	}
-	if (!JobsAllowedNow())
+	const bool allow_now = (g_job.type == JobType::FileListScan)
+		? FileListAllowedNow()
+		: JobsAllowedNow();
+	if (!allow_now)
 	{
 		if (!g_job.foreground)
 		{
@@ -3454,9 +2750,6 @@ static void ApplyLoadedSampleFade(size_t length, uint32_t rate)
 
 static bool LoadSampleFromPath(const char* path)
 {
-	FIL* file = &wav_file;
-	UINT bytes_read = 0;
-
 	RequestPlaybackStopAll();
 	RequestAudioCmd(kCmdAllNotesOff);
 	sample_loaded = false;
@@ -3468,125 +2761,19 @@ static bool LoadSampleFromPath(const char* path)
 	trim_end = 1.0f;
 	PublishRuntimeFromUi();
 
-	FILINFO finfo;
-	FRESULT res = f_stat(path, &finfo);
-	if (res == FR_OK)
-	{
-	}
-	else
-	{
-	}
-
-	if (BSP_SD_GetCardState() != SD_TRANSFER_OK)
-	{
-		return false;
-	}
-	res = f_open(file, path, FA_READ);
-	if (res != FR_OK)
-	{
-		return false;
-	}
-
-	WavInfo wav;
-	if (!ParseWavHeader(file, wav))
-	{
-		f_close(file);
-		return false;
-	}
-
-	if (wav.bits_per_sample != 16)
-	{
-		f_close(file);
-		return false;
-	}
-
-	if (wav.num_channels < 1 || wav.num_channels > 2)
-	{
-		f_close(file);
-		return false;
-	}
-	sample_channels = wav.num_channels;
-
-	const size_t bytes_per_sample = wav.bits_per_sample / 8;
-	const size_t frame_bytes = bytes_per_sample * wav.num_channels;
-	size_t total_frames = (frame_bytes == 0) ? 0 : (wav.data_size / frame_bytes);
-	if (total_frames == 0)
-	{
-		f_close(file);
-		return false;
-	}
-	if (total_frames > kMaxSampleSamples)
-	{
-		total_frames = kMaxSampleSamples;
-	}
-
-	const uint32_t data_offset = wav.data_offset;
-	res = f_lseek(file, data_offset);
-	if (res != FR_OK)
-	{
-		f_close(file);
-		return false;
-	}
-
-	size_t dest_index = 0;
-	int32_t last_percent = 0;
-	while (dest_index < total_frames)
-	{
-		size_t frames_to_read = total_frames - dest_index;
-		if (frames_to_read > kSampleChunkFrames)
-		{
-			frames_to_read = kSampleChunkFrames;
-		}
-		const size_t bytes_to_read = frames_to_read * wav.num_channels * sizeof(int16_t);
-		bytes_read = 0;
-		res = f_read(file, wav_read, bytes_to_read, &bytes_read);
-		if (res != FR_OK
-			|| bytes_read == 0)
-		{
-			break;
-		}
-		const size_t frames_read = bytes_read / (wav.num_channels * sizeof(int16_t));
-		for (size_t i = 0; i < frames_read; ++i)
-		{
-			if (wav.num_channels == 1)
-			{
-				const int16_t samp = wav_read[i];
-				sample_buffer_l[dest_index] = samp;
-				sample_buffer_r[dest_index] = samp;
-				dest_index++;
-			}
-			else
-			{
-				sample_buffer_l[dest_index] = wav_read[i * 2];
-				sample_buffer_r[dest_index] = wav_read[i * 2 + 1];
-				dest_index++;
-			}
-			if (dest_index >= kMaxSampleSamples)
-			{
-				break;
-			}
-		}
-		if (total_frames > 0)
-		{
-			const int32_t percent = static_cast<int32_t>(
-				(dest_index * 100U) / total_frames);
-			if (percent >= last_percent + kLoadProgressStep || percent == 100)
-			{
-				last_percent = percent;
-			}
-		}
-		if (frames_read < frames_to_read)
-		{
-			break;
-		}
-	}
-	f_close(file);
-
-	if (dest_index < total_frames)
-	{
-	}
-	sample_length = dest_index;
-	sample_rate = wav.sample_rate;
+	size_t frames = 0;
+	uint16_t channels = 1;
+	uint32_t rate = 0;
+	(void)storage.LoadSampleBlocking(path,
+											   sample_buffer_l,
+											   sample_buffer_r,
+											   kMaxSampleSamples,
+											   frames,
+											   channels,
+											   rate);
+	sample_length = frames;
+	sample_rate = rate;
+	sample_channels = channels;
 	sample_loaded = (sample_length > 0);
 	if (!sample_loaded)
 	{
@@ -3623,10 +2810,6 @@ static bool LoadSampleAtIndex(int32_t index)
 	{
 		return false;
 	}
-	if (BSP_SD_GetCardState() != SD_TRANSFER_OK)
-	{
-		return false;
-	}
 	if (index < 0 || index >= wav_file_count)
 	{
 		return false;
@@ -3641,16 +2824,25 @@ static void StopPreview()
 {
 	preview_hold = false;
 	preview_index = -1;
+#if STORAGE_SERVICE_PREVIEW_STREAM
+	preview_stream_cookie_active = 0;
+	preview_pending_start = false;
+	preview_pending_start_ms = 0;
+	preview_pp_ready[0] = 0;
+	preview_pp_ready[1] = 0;
+	preview_pp_active = 0;
+	preview_pp_pos = 0;
+#endif
 	{
 		daisy::ScopedIrqBlocker irq;
 		preview_write_index = 0;
 	}
 	RequestAudioCmd(kCmdPreviewStop);
-	if (preview_file_open)
-	{
-		f_close(&preview_file);
-		preview_file_open = false;
-	}
+#if STORAGE_SERVICE_PREVIEW_STREAM
+	StorageService::Op op = {};
+	op.kind = StorageService::OpKind::PreviewClose;
+	storage.Enqueue(op);
+#endif
 }
 
 static bool BeginPreviewAtIndex(int32_t index)
@@ -3685,60 +2877,28 @@ static bool BeginPreviewAtIndex(int32_t index)
 	char path[64];
 	BuildFilePath(wav_files[index], path, sizeof(path));
 
-	if (preview_file_open)
+#if STORAGE_SERVICE_PREVIEW_STREAM
+	if (preview_index == index && preview_stream_cookie_active != 0)
 	{
-		f_close(&preview_file);
-		preview_file_open = false;
+		return true;
 	}
-	const FRESULT open_res = f_open(&preview_file, path, FA_READ);
-	if (open_res != FR_OK)
-	{
-		return false;
-	}
-	preview_file_open = true;
-
-	WavInfo wav;
-	if (!ParseWavHeader(&preview_file, wav))
-	{
-		f_close(&preview_file);
-		preview_file_open = false;
-		return false;
-	}
-	if (wav.bits_per_sample != 16)
-	{
-		f_close(&preview_file);
-		preview_file_open = false;
-		return false;
-	}
-	if (wav.num_channels < 1 || wav.num_channels > 2)
-	{
-		f_close(&preview_file);
-		preview_file_open = false;
-		return false;
-	}
-	preview_sample_rate = wav.sample_rate;
-	preview_channels = wav.num_channels;
-	const uint32_t rate = (preview_sample_rate == 0) ? 48000 : preview_sample_rate;
-	preview_rate = static_cast<float>(rate) / hw.AudioSampleRate();
-	preview_data_offset = wav.data_offset;
-	FRESULT seek_res = f_lseek(&preview_file, preview_data_offset);
-	if (seek_res != FR_OK)
-	{
-		f_close(&preview_file);
-		preview_file_open = false;
-		return false;
-	}
-
-	{
-		daisy::ScopedIrqBlocker irq;
-		preview_write_index = 0;
-	}
+	StorageService::Op op = {};
+	op.kind = StorageService::OpKind::PreviewOpen;
+	CopyString(op.path, path, sizeof(op.path));
+	op.cookie = preview_stream_cookie++;
+	preview_stream_cookie_active = op.cookie;
 	preview_index = index;
-	PublishPreviewControlFromUi();
-	RequestAudioCmd(kCmdPreviewStart);
+	preview_pending_start = false;
+	preview_pending_start_ms = System::GetNow();
+	if (!storage.Enqueue(op))
+	{
+		return false;
+	}
 	return true;
+#endif
 }
 
+#if !STORAGE_SERVICE_PREVIEW_STREAM
 static size_t PreviewAvailableFrames(size_t read_idx, size_t write_idx)
 {
 	if (write_idx >= read_idx)
@@ -3747,7 +2907,9 @@ static size_t PreviewAvailableFrames(size_t read_idx, size_t write_idx)
 	}
 	return (kPreviewBufferFrames - read_idx) + write_idx;
 }
+#endif
 
+#if !STORAGE_SERVICE_PREVIEW_STREAM
 static size_t PreviewFreeFrames(size_t read_idx, size_t write_idx)
 {
 	const size_t used = PreviewAvailableFrames(read_idx, write_idx);
@@ -3757,6 +2919,8 @@ static size_t PreviewFreeFrames(size_t read_idx, size_t write_idx)
 	}
 	return (kPreviewBufferFrames - 1) - used;
 }
+#endif
+
 
 static const AudioUiState& GetAudioUiStateSnapshot(uint8_t& idx)
 {
@@ -3769,73 +2933,9 @@ static const AudioUiState& GetAudioUiStateSnapshot(uint8_t& idx)
 
 static void FillPreviewBuffer()
 {
-	uint8_t ui_idx = 0;
-	const AudioUiState& uir = GetAudioUiStateSnapshot(ui_idx);
-	if (!uir.preview_active || !preview_file_open)
-	{
-		return;
-	}
-	const uint32_t start_ms = System::GetNow();
-	while (true)
-	{
-		const AudioUiState& cur = GetAudioUiStateSnapshot(ui_idx);
-		const size_t read_idx = static_cast<size_t>(cur.preview_read_index);
-		size_t write_idx = 0;
-		{
-			daisy::ScopedIrqBlocker irq;
-			write_idx = preview_write_index;
-		}
-		const size_t free_frames = PreviewFreeFrames(read_idx, write_idx);
-		if (free_frames == 0)
-		{
-			break;
-		}
-		const size_t frames_to_read = (free_frames > kPreviewReadFrames) ? kPreviewReadFrames : free_frames;
-		const size_t bytes_to_read = frames_to_read * preview_channels * sizeof(int16_t);
-		UINT bytes_read = 0;
-		FRESULT res = f_read(&preview_file, preview_read_buf, bytes_to_read, &bytes_read);
-		if (res != FR_OK)
-		{
-			StopPreview();
-			return;
-		}
-		if (bytes_read == 0)
-		{
-			FRESULT seek_res = f_lseek(&preview_file, preview_data_offset);
-			if (seek_res != FR_OK)
-			{
-				StopPreview();
-				return;
-			}
-			continue;
-		}
-		const size_t frames_read = bytes_read / (preview_channels * sizeof(int16_t));
-		size_t w = write_idx;
-		for (size_t i = 0; i < frames_read; ++i)
-		{
-			int32_t mono = 0;
-			if (preview_channels == 1)
-			{
-				mono = preview_read_buf[i];
-			}
-			else
-			{
-				const int16_t l = preview_read_buf[i * 2];
-				const int16_t r = preview_read_buf[i * 2 + 1];
-				mono = (static_cast<int32_t>(l) + static_cast<int32_t>(r)) / 2;
-			}
-			preview_buffer[w] = static_cast<int16_t>(mono);
-			w = (w + 1) % kPreviewBufferFrames;
-		}
-		{
-			daisy::ScopedIrqBlocker irq;
-			preview_write_index = w;
-		}
-		if ((System::GetNow() - start_ms) >= kPreviewReadBudgetMs)
-		{
-			break;
-		}
-	}
+#if STORAGE_SERVICE_PREVIEW_STREAM
+	return;
+#endif
 }
 
 static bool DeleteFileAtIndex(int32_t index)
@@ -3859,22 +2959,13 @@ static bool DeleteFileAtIndex(int32_t index)
 	{
 		return false;
 	}
-	if (BSP_SD_GetCardState() != SD_TRANSFER_OK)
-	{
-		return false;
-	}
 	if (index < 0 || index >= wav_file_count)
 	{
 		return false;
 	}
 	char path[64];
 	BuildFilePath(wav_files[index], path, sizeof(path));
-	const FRESULT res = f_unlink(path);
-	if (res != FR_OK)
-	{
-		return false;
-	}
-	return true;
+	return storage.DeleteFileBlocking(path);
 }
 
 static void DrawTinyString(const char* str, int x, int y, bool on);
@@ -6981,6 +6072,7 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 		button2_press = true;
 	}
 	preview_hold = (ui_mode == UiMode::Load
+		&& (load_context == LoadContext::Edt || delete_mode)
 		&& !(kLoadPresetsPlaceholder && load_context == LoadContext::Main && !delete_mode))
 		? ui_button1_held
 		: false;
@@ -9092,6 +8184,85 @@ static float last_chorus_wow = -1.0f;
 		}
 		if (preview_active)
 		{
+#if STORAGE_SERVICE_PREVIEW_STREAM
+			if (preview_preload_active)
+			{
+				const size_t frames = preview_preload_frames;
+				if (frames < 2)
+				{
+					preview_underrun_count++;
+				}
+				else
+				{
+					const size_t idx0 = preview_read_index % frames;
+					const size_t idx1 = (idx0 + 1) % frames;
+					const float frac = preview_read_frac;
+					const float s0 = static_cast<float>(preview_preload_buf[idx0]);
+					const float s1 = static_cast<float>(preview_preload_buf[idx1]);
+					float samp = (s0 + (s1 - s0) * frac) * kSampleScale * pctl.gain;
+					if (preview_fade_samples_left > 0)
+					{
+						const float fade = 1.0f
+							- (static_cast<float>(preview_fade_samples_left)
+								/ static_cast<float>(preview_fade_samples_total));
+						samp *= fade;
+						preview_fade_samples_left--;
+					}
+					sig_l += samp;
+					sig_r += samp;
+
+					float next_frac = preview_read_frac + pctl.rate;
+					uint32_t adv = (next_frac >= 1.0f) ? static_cast<uint32_t>(next_frac) : 0u;
+					if (adv >= frames) adv %= frames;
+					next_frac -= static_cast<float>(adv);
+					if (next_frac >= 1.0f)
+					{
+						next_frac = 0.0f;
+					}
+					preview_read_index = (preview_read_index + adv) % frames;
+					preview_read_frac = next_frac;
+				}
+			}
+			else
+			{
+				const uint8_t active = preview_pp_active;
+				if (preview_pp_ready[active] == 0)
+				{
+					const uint8_t other = static_cast<uint8_t>(active ^ 1u);
+					if (preview_pp_ready[other] != 0)
+					{
+						preview_pp_active = other;
+					}
+					else
+					{
+						preview_underrun_count++;
+					}
+				}
+				else
+				{
+					const int16_t* buf = preview_pp_buf[active];
+					const size_t pos = preview_pp_pos;
+					float samp = static_cast<float>(buf[pos]) * kSampleScale * pctl.gain;
+					if (preview_fade_samples_left > 0)
+					{
+						const float fade = 1.0f
+							- (static_cast<float>(preview_fade_samples_left)
+								/ static_cast<float>(preview_fade_samples_total));
+						samp *= fade;
+						preview_fade_samples_left--;
+					}
+					sig_l += samp;
+					sig_r += samp;
+					preview_pp_pos = static_cast<uint32_t>(pos + 1);
+					if (preview_pp_pos >= kPreviewPpFrames)
+					{
+						preview_pp_pos = 0;
+						preview_pp_ready[active] = 0;
+						preview_pp_active = static_cast<uint8_t>(active ^ 1u);
+					}
+				}
+			}
+#else
 			size_t read_idx = preview_read_index;
 			size_t write_idx = 0;
 			{
@@ -9107,7 +8278,15 @@ static float last_chorus_wow = -1.0f;
 				const int16_t* preview_buf = pctl.l;
 				const float s0 = static_cast<float>(preview_buf[idx0]);
 				const float s1 = static_cast<float>(preview_buf[idx1]);
-				const float samp = (s0 + (s1 - s0) * frac) * kSampleScale * pctl.gain;
+				float samp = (s0 + (s1 - s0) * frac) * kSampleScale * pctl.gain;
+				if (preview_fade_samples_left > 0)
+				{
+					const float fade = 1.0f
+						- (static_cast<float>(preview_fade_samples_left)
+							/ static_cast<float>(preview_fade_samples_total));
+					samp *= fade;
+					preview_fade_samples_left--;
+				}
 				sig_l += samp;
 				sig_r += samp;
 
@@ -9131,6 +8310,7 @@ static float last_chorus_wow = -1.0f;
 				preview_read_frac = next_frac;
 				preview_read_index = read_idx;
 			}
+#endif
 		}
 		if (monitor_active)
 		{
@@ -9361,6 +8541,23 @@ int main(void)
 	g_preview_pub_idx = 0;
 	g_preview_active_idx = 0;
 
+	storage.Init();
+	{
+		StorageService::PreviewStreamConfig cfg = {};
+		cfg.buffer = preview_buffer;
+		cfg.frames = kPreviewBufferFrames;
+		cfg.write_index = &preview_write_index;
+		cfg.read_index = &preview_read_index;
+		cfg.preload_buf = preview_preload_buf;
+		cfg.preload_frames = kPreviewPreloadFrames;
+		cfg.pp_buf_a = &preview_pp_buf[0][0];
+		cfg.pp_buf_b = &preview_pp_buf[1][0];
+		cfg.pp_frames = kPreviewPpFrames;
+		cfg.pp_ready_a = &preview_pp_ready[0];
+		cfg.pp_ready_b = &preview_pp_ready[1];
+		cfg.pp_active = &preview_pp_active;
+		storage.SetPreviewStreamConfig(cfg);
+	}
 	SdmmcHandler::Config sd_cfg;
 	sd_cfg.Defaults();
 	sdcard.Init(sd_cfg);
@@ -9416,6 +8613,144 @@ int main(void)
 	uint32_t last_ui_ms = System::GetNow();
 	while(1)
 	{
+		const uint32_t storage_budget = (preview_pending_start || preview_hold)
+			? kStoragePreviewBudgetUs
+			: kStorageBudgetUs;
+		storage.RunSlice(storage_budget);
+		{
+			StorageService::Event ev = {};
+			while (storage.DequeueEvent(ev))
+			{
+				if (ev.kind == StorageService::EventKind::MountOk)
+				{
+					sd_mounted = true;
+				}
+				else if (ev.kind == StorageService::EventKind::MountFail)
+				{
+					sd_mounted = false;
+				}
+				else if (ev.kind == StorageService::EventKind::DirEntry)
+				{
+					if (!g_list_job.active || ev.cookie != g_list_job.cookie)
+					{
+						continue;
+					}
+					if (g_list_job.count >= kMaxWavFiles)
+					{
+						continue;
+					}
+					CopyString(wav_files[g_list_job.count], ev.name, kMaxWavNameLen);
+					g_list_job.count++;
+					wav_file_count = g_list_job.count;
+					request_delete_redraw = true;
+					RequestDisplayUpdate();
+				}
+				else if (ev.kind == StorageService::EventKind::ScanDone)
+				{
+					if (!g_list_job.active || ev.cookie != g_list_job.cookie)
+					{
+						continue;
+					}
+					g_list_job.active = false;
+					g_list_job.done = true;
+					FinalizeFileList();
+					if (g_job.type == JobType::FileListScan)
+					{
+						g_job = {};
+					}
+				}
+#if STORAGE_SERVICE_PREVIEW_STREAM
+				else if (ev.kind == StorageService::EventKind::PreviewOpenOk)
+				{
+					if (ev.cookie != preview_stream_cookie_active)
+					{
+						continue;
+					}
+					if (!preview_hold)
+					{
+						StorageService::Op op = {};
+						op.kind = StorageService::OpKind::PreviewClose;
+						storage.Enqueue(op);
+						continue;
+					}
+					preview_sample_rate = ev.sample_rate;
+					preview_channels = ev.channels;
+					const uint32_t rate = (preview_sample_rate == 0) ? 48000 : preview_sample_rate;
+					preview_rate = static_cast<float>(rate) / hw.AudioSampleRate();
+					{
+						daisy::ScopedIrqBlocker irq;
+						preview_read_index = 0;
+						preview_write_index = 0;
+					}
+					preview_underrun_count = 0;
+					preview_rb_min_level = 0xFFFFFFFFu;
+					preview_pp_ready[0] = 0;
+					preview_pp_ready[1] = 0;
+					preview_pp_active = 0;
+					preview_pp_pos = 0;
+					preview_preload_frames = static_cast<size_t>(ev.size);
+					preview_preload_active = (preview_preload_frames > 0);
+					const uint32_t fade_samples = static_cast<uint32_t>(
+						(hw.AudioSampleRate() * static_cast<float>(kPreviewFadeInMs)) / 1000.0f + 0.5f);
+					preview_fade_samples_total = (fade_samples > 0) ? fade_samples : 1;
+					preview_fade_samples_left = preview_fade_samples_total;
+					preview_pending_start = !preview_preload_active;
+					preview_pending_start_ms = System::GetNow();
+					if (preview_preload_active)
+					{
+						PublishPreviewControlFromUi();
+						RequestAudioCmd(kCmdPreviewStart);
+					}
+				}
+				else if (ev.kind == StorageService::EventKind::PreviewOpenFail)
+				{
+					if (ev.cookie != preview_stream_cookie_active)
+					{
+						continue;
+					}
+					StopPreview();
+				}
+				else if (ev.kind == StorageService::EventKind::PreviewReadError)
+				{
+					if (ev.cookie != preview_stream_cookie_active)
+					{
+						continue;
+					}
+					StopPreview();
+				}
+#endif
+#if STORAGE_SERVICE_SAVE
+				else if (ev.kind == StorageService::EventKind::SaveProgress)
+				{
+					save_frames_written = static_cast<size_t>(ev.value);
+					if (ev.name[0] != '\0')
+					{
+						CopyString(save_filename, ev.name, kMaxWavNameLen);
+					}
+				}
+				else if (ev.kind == StorageService::EventKind::SaveDone)
+				{
+					if (!save_done)
+					{
+						save_success = true;
+						save_done = true;
+						save_result_until_ms = System::GetNow() + kSaveResultMs;
+						request_load_scan = true;
+						CopyString(loaded_sample_name, save_filename, kMaxWavNameLen);
+					}
+				}
+				else if (ev.kind == StorageService::EventKind::SaveError)
+				{
+					if (!save_done)
+					{
+						save_success = false;
+						save_done = true;
+						save_result_until_ms = System::GetNow() + kSaveResultMs;
+					}
+				}
+#endif
+			}
+		}
 		// Service pending waveform computation (from audio callback)
 		if (waveform_compute_pending
 			&& record_state != RecordState::Recording)
@@ -9650,6 +8985,7 @@ int main(void)
 			uint8_t ui_idx = 0;
 			const AudioUiState& uir = GetAudioUiStateSnapshot(ui_idx);
 			const bool preview_allowed = (ui_mode == UiMode::Load
+				&& (load_context == LoadContext::Edt || delete_mode)
 				&& !(kLoadPresetsPlaceholder && load_context == LoadContext::Main && !delete_mode)
 				&& wav_file_count > 0);
 			if (preview_hold && preview_allowed)
@@ -9670,6 +9006,30 @@ int main(void)
 				}
 			}
 		}
+#if STORAGE_SERVICE_PREVIEW_STREAM
+		if (preview_pending_start && !preview_preload_active)
+		{
+			const size_t ready_count
+				= static_cast<size_t>(preview_pp_ready[0] != 0)
+				+ static_cast<size_t>(preview_pp_ready[1] != 0);
+			const uint32_t now = System::GetNow();
+			const bool timeout = (now - preview_pending_start_ms) >= 150;
+			if (ready_count >= 1 || timeout)
+			{
+				if (preview_pp_ready[0])
+				{
+					preview_pp_active = 0;
+				}
+				else if (preview_pp_ready[1])
+				{
+					preview_pp_active = 1;
+				}
+				PublishPreviewControlFromUi();
+				RequestAudioCmd(kCmdPreviewStart);
+				preview_pending_start = false;
+			}
+		}
+#endif
 		{
 			uint8_t ui_idx = 0;
 			const AudioUiState& uir = GetAudioUiStateSnapshot(ui_idx);
@@ -9767,6 +9127,28 @@ int main(void)
 				if (!save_started)
 				{
 					DrawSaveScreen();
+#if STORAGE_SERVICE_SAVE
+					save_success = false;
+					save_started = true;
+					save_frames_written = 0;
+					StorageService::Op op = {};
+					op.kind = StorageService::OpKind::SaveStart;
+					CopyString(op.path, fsi.GetSDPath(), sizeof(op.path));
+					op.src_l = sample_buffer_l;
+					op.src_r = sample_buffer_r;
+					op.frames = sample_length;
+					op.channels = (sample_channels == 0) ? 1 : sample_channels;
+					op.sample_rate = (sample_rate == 0) ? 48000 : sample_rate;
+					if (storage.Enqueue(op))
+					{
+						save_success = true;
+					}
+					if (!save_success)
+					{
+						save_done = true;
+						save_result_until_ms = now + kSaveResultMs;
+					}
+#else
 					save_success = BeginSaveRecordedSample();
 					save_started = true;
 					if (!save_success)
@@ -9774,11 +9156,15 @@ int main(void)
 						save_done = true;
 						save_result_until_ms = now + kSaveResultMs;
 					}
+#endif
 				}
 				else
 				{
 					bool step_done = false;
 					DrawSaveScreen();
+#if STORAGE_SERVICE_SAVE
+					(void)step_done;
+#else
 					save_success = StepSaveRecordedSample(step_done);
 					if (!save_success)
 					{
@@ -9791,6 +9177,7 @@ int main(void)
 						save_result_until_ms = now + kSaveResultMs;
 						request_load_scan = true;
 					}
+#endif
 				}
 			}
 			if (now >= save_draw_next_ms)
@@ -10384,7 +9771,7 @@ int main(void)
 			|| request_delete_redraw
 			|| request_playhead_redraw
 			|| waveform_dirty
-			|| request_perform_redraw
+  			|| request_perform_redraw
 			|| request_fx_detail_redraw
 			|| request_length_redraw;
 		if (needs_draw)
