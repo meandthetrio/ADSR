@@ -4,7 +4,7 @@ TARGET = WaveContV3
 USE_DAISYSP_LGPL = 1
 
 # Sources
-CPP_SOURCES = WaveContV3.cpp
+CPP_SOURCES = WaveContV3.cpp StorageService.cpp
 
 # Library Locations
 LIBDAISY_DIR = ../../libDaisy/
