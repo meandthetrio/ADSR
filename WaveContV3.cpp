@@ -1,10 +1,7 @@
 #include "daisy_pod.h"
 #include "daisysp.h"
 #include "dev/oled_ssd130x.h"
-#include "fatfs.h"
 #include "per/tim.h"
-#include "util/wav_format.h"
-#include "util/bsp_sd_diskio.h"
 #include "util/scopedirqblocker.h"
 #include "StorageService.h"
 #include <cmath>
@@ -705,8 +702,6 @@ static inline void FlushDisplayIfDue(uint32_t now)
 	display.Update();
 	g_display_update_pending = false;
 }
-SdmmcHandler   sdcard;
-FatFSInterface fsi;
 StorageService storage;
 Encoder      encoder_r;
 Switch       shift_button;
@@ -745,6 +740,10 @@ volatile bool request_load_scan = false;
 static volatile bool list_build_pending = false;
 volatile bool request_load_sample = false;
 volatile int32_t request_load_index = -1;
+static bool load_in_progress = false;
+static uint16_t load_cookie_next = 1;
+static uint16_t load_cookie_active = 0;
+static bool load_target_is_edt = false;
 volatile int32_t wav_file_count = 0;
 
 bool sd_mounted = false;
@@ -766,16 +765,7 @@ static uint32_t save_result_until_ms = 0;
 static uint32_t save_draw_next_ms = 0;
 static UiMode save_prev_mode = UiMode::Main;
 static char save_filename[kMaxWavNameLen] = {0};
-#if !STORAGE_SERVICE_SAVE
-static FIL save_file;
-#endif
 static size_t save_frames_written = 0;
-static bool save_file_open = false;
-static bool save_header_written = false;
-static uint16_t save_channels = 1;
-static uint32_t save_sr = 48000;
-static uint32_t save_data_bytes = 0;
-static FRESULT save_last_error = FR_OK;
 static volatile bool delete_mode = false;
 static UiMode delete_prev_mode = UiMode::Main;
 static volatile bool request_delete_scan = false;
@@ -784,6 +774,9 @@ static volatile int32_t request_delete_index = -1;
 static volatile bool delete_confirm = false;
 static bool request_delete_redraw = false;
 static char delete_confirm_name[kMaxWavNameLen] = {0};
+static bool delete_in_progress = false;
+static uint16_t delete_cookie_next = 1;
+static uint16_t delete_cookie_active = 0;
 char wav_files[kMaxWavFiles][kMaxWavNameLen];
 char loaded_sample_name[kMaxWavNameLen] = {0};
 int32_t load_lines = 1;
@@ -1652,7 +1645,6 @@ static void ForCirclePixels(int cx, int cy, int r, F&& fn)
 }
 
 #if 0
-static FIL wav_file;
 #endif
 
 const char* kMenuLabels[kMenuCount] = {"LOAD", "RECORD", "PERFORM"};
@@ -1777,7 +1769,7 @@ static void BuildFilePath(const char* name, char* out, size_t out_len)
 	{
 		return;
 	}
-	CopyString(out, fsi.GetSDPath(), out_len);
+	CopyString(out, storage.GetSdPath(), out_len);
 	size_t base_len = StrLen(out);
 	size_t i = 0;
 	while (name[i] != '\0' && base_len + 1 < out_len)
@@ -1823,32 +1815,18 @@ static void MountSd()
 	{
 		return;
 	}
-	if (!BSP_SD_IsDetected())
+	StorageService::Op op = {};
+	op.kind = StorageService::OpKind::Mount;
+	const StorageService::MountState mount_state = storage.GetMountState();
+	if (mount_state == StorageService::MountState::Mounting
+		|| mount_state == StorageService::MountState::Mounted)
 	{
 		return;
 	}
-	StorageService::Op op = {};
-	op.kind = StorageService::OpKind::Mount;
 	if (!storage.Enqueue(op))
 	{
 		return;
 	}
-	storage.RunSlice(0);
-	StorageService::Event ev = {};
-	while (storage.DequeueEvent(ev))
-	{
-		if (ev.kind == StorageService::EventKind::MountOk)
-		{
-			sd_mounted = true;
-			return;
-		}
-		if (ev.kind == StorageService::EventKind::MountFail)
-		{
-			sd_mounted = false;
-			return;
-		}
-	}
-	sd_mounted = (storage.GetMountState() == StorageService::MountState::Mounted);
 }
 
 // Save names are generated inside StorageService.
@@ -1856,33 +1834,9 @@ static void MountSd()
 static void ResetSaveState()
 {
 	save_frames_written = 0;
-	save_file_open = false;
-	save_header_written = false;
-	save_channels = 1;
-	save_sr = 48000;
-	save_data_bytes = 0;
-	save_last_error = FR_OK;
 }
 
 // Legacy save path removed; StorageService handles save.
-
-static bool ReinitSdNow()
-{
-	if (!BSP_SD_IsDetected())
-	{
-		return false;
-	}
-	storage.UnmountSd();
-	sd_mounted = false;
-	fsi.DeInit();
-	SdmmcHandler::Config sd_cfg;
-	sd_cfg.Defaults();
-	sdcard.Init(sd_cfg);
-	fsi.Init(FatFSInterface::Config::MEDIA_SD);
-	(void)BSP_SD_Init();
-	MountSd();
-	return sd_mounted;
-}
 
 static void __attribute__((unused)) ComputeWaveform()
 {
@@ -2095,7 +2049,7 @@ static void FileListJobStart(bool wav_only)
 
 	StorageService::Op op = {};
 	op.kind = StorageService::OpKind::ScanDir;
-	CopyString(op.path, fsi.GetSDPath(), sizeof(op.path));
+	CopyString(op.path, storage.GetSdPath(), sizeof(op.path));
 	op.max_entries = static_cast<uint16_t>(kMaxWavFiles);
 	op.cookie = g_list_job.cookie;
 	op.wav_only = wav_only;
@@ -2761,51 +2715,29 @@ static bool LoadSampleFromPath(const char* path)
 	trim_end = 1.0f;
 	PublishRuntimeFromUi();
 
-	size_t frames = 0;
-	uint16_t channels = 1;
-	uint32_t rate = 0;
-	(void)storage.LoadSampleBlocking(path,
-											   sample_buffer_l,
-											   sample_buffer_r,
-											   kMaxSampleSamples,
-											   frames,
-											   channels,
-											   rate);
-	sample_length = frames;
-	sample_rate = rate;
-	sample_channels = channels;
-	sample_loaded = (sample_length > 0);
-	if (!sample_loaded)
+	if (load_in_progress)
 	{
 		return false;
 	}
-	ApplyLoadedSampleFade(sample_length, sample_rate);
-	trim_start = 0.0f;
-	trim_end = 1.0f;
-	waveform_from_recording = false;
-	JobStartWaveform(current_sample_context, true);
-	UpdateTrimFrames();
-	PublishRuntimeFromUi();
+	StorageService::Op op = {};
+	op.kind = StorageService::OpKind::LoadStart;
+	CopyString(op.path, path, sizeof(op.path));
+	op.dst_l = sample_buffer_l;
+	op.dst_r = sample_buffer_r;
+	op.max_frames = kMaxSampleSamples;
+	op.cookie = load_cookie_next++;
+	load_cookie_active = op.cookie;
+	if (!storage.Enqueue(op))
+	{
+		return false;
+	}
+	load_in_progress = true;
 	return true;
 }
 
 static bool LoadSampleAtIndex(int32_t index)
 {
-	if (!BSP_SD_IsDetected())
-	{
-		sd_mounted = false;
-		return false;
-	}
 	MountSd();
-	if (!sd_mounted)
-	{
-		SdmmcHandler::Config sd_cfg;
-		sd_cfg.Defaults();
-		sdcard.Init(sd_cfg);
-		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		(void)BSP_SD_Init();
-		MountSd();
-	}
 	if (!sd_mounted)
 	{
 		return false;
@@ -2847,26 +2779,8 @@ static void StopPreview()
 
 static bool BeginPreviewAtIndex(int32_t index)
 {
-	if (!BSP_SD_IsDetected())
-	{
-		sd_mounted = false;
-		return false;
-	}
 	MountSd();
 	if (!sd_mounted)
-	{
-		SdmmcHandler::Config sd_cfg;
-		sd_cfg.Defaults();
-		sdcard.Init(sd_cfg);
-		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		(void)BSP_SD_Init();
-		MountSd();
-	}
-	if (!sd_mounted)
-	{
-		return false;
-	}
-	if (BSP_SD_GetCardState() != SD_TRANSFER_OK)
 	{
 		return false;
 	}
@@ -2940,22 +2854,12 @@ static void FillPreviewBuffer()
 
 static bool DeleteFileAtIndex(int32_t index)
 {
-	if (!BSP_SD_IsDetected())
-	{
-		sd_mounted = false;
-		return false;
-	}
 	MountSd();
 	if (!sd_mounted)
 	{
-		SdmmcHandler::Config sd_cfg;
-		sd_cfg.Defaults();
-		sdcard.Init(sd_cfg);
-		fsi.Init(FatFSInterface::Config::MEDIA_SD);
-		(void)BSP_SD_Init();
-		MountSd();
+		return false;
 	}
-	if (!sd_mounted)
+	if (delete_in_progress)
 	{
 		return false;
 	}
@@ -2965,7 +2869,18 @@ static bool DeleteFileAtIndex(int32_t index)
 	}
 	char path[64];
 	BuildFilePath(wav_files[index], path, sizeof(path));
-	return storage.DeleteFileBlocking(path);
+	StorageService::Op op = {};
+	op.kind = StorageService::OpKind::DeleteFile;
+	CopyString(op.path, path, sizeof(op.path));
+	op.cookie = delete_cookie_next++;
+	delete_cookie_active = op.cookie;
+	if (!storage.Enqueue(op))
+	{
+		delete_cookie_active = 0;
+		return false;
+	}
+	delete_in_progress = true;
+	return true;
 }
 
 static void DrawTinyString(const char* str, int x, int y, bool on);
@@ -3717,12 +3632,6 @@ static void DrawLoadMenu(int32_t top_index, int32_t selected)
 		return;
 	}
 
-	if (!BSP_SD_IsDetected() || BSP_SD_GetCardState() != SD_TRANSFER_OK)
-	{
-		sd_mounted = false;
-		DrawLoadMessage("SD NOT", "MOUNTED");
-		return;
-	}
 	if (!sd_mounted)
 	{
 		DrawLoadMessage("SD NOT", "MOUNTED");
@@ -8556,12 +8465,8 @@ int main(void)
 		cfg.pp_ready_a = &preview_pp_ready[0];
 		cfg.pp_ready_b = &preview_pp_ready[1];
 		cfg.pp_active = &preview_pp_active;
-		storage.SetPreviewStreamConfig(cfg);
+	storage.SetPreviewStreamConfig(cfg);
 	}
-	SdmmcHandler::Config sd_cfg;
-	sd_cfg.Defaults();
-	sdcard.Init(sd_cfg);
-	fsi.Init(FatFSInterface::Config::MEDIA_SD);
 	MountSd();
 
 	DrawMenu(menu_index);
@@ -8749,6 +8654,87 @@ int main(void)
 					}
 				}
 #endif
+#if 1
+				else if (ev.kind == StorageService::EventKind::LoadProgress)
+				{
+					if (ev.cookie == load_cookie_active)
+					{
+						load_in_progress = true;
+					}
+				}
+				else if (ev.kind == StorageService::EventKind::LoadDone)
+				{
+					if (ev.cookie != load_cookie_active)
+					{
+						continue;
+					}
+					load_in_progress = false;
+					sample_length = static_cast<size_t>(ev.value);
+					sample_channels = (ev.channels == 0) ? 1 : ev.channels;
+					sample_rate = (ev.sample_rate == 0) ? 48000 : ev.sample_rate;
+					sample_loaded = (sample_length > 0);
+					if (!sample_loaded)
+					{
+						ui_mode = UiMode::Load;
+						load_context = LoadContext::Main;
+						continue;
+					}
+					ApplyLoadedSampleFade(sample_length, sample_rate);
+					trim_start = 0.0f;
+					trim_end = 1.0f;
+					waveform_from_recording = false;
+					JobStartWaveform(current_sample_context, true);
+					UpdateTrimFrames();
+					PublishRuntimeFromUi();
+					if (load_target_is_edt)
+					{
+						ui_mode = UiMode::Edt;
+						waveform_ready = true;
+						waveform_dirty = true;
+						request_length_redraw = true;
+					}
+					else
+					{
+						ui_mode = UiMode::Perform;
+						menu_index = 2;
+					}
+					load_context = LoadContext::Main;
+				}
+				else if (ev.kind == StorageService::EventKind::LoadError)
+				{
+					if (ev.cookie != load_cookie_active)
+					{
+						continue;
+					}
+					load_in_progress = false;
+					load_cookie_active = 0;
+					ui_mode = UiMode::Load;
+					load_context = LoadContext::Main;
+				}
+				else if (ev.kind == StorageService::EventKind::DeleteOk)
+				{
+					if (ev.cookie != delete_cookie_active)
+					{
+						continue;
+					}
+					delete_in_progress = false;
+					delete_cookie_active = 0;
+					request_delete_scan = true;
+					delete_confirm = false;
+					request_delete_redraw = true;
+				}
+				else if (ev.kind == StorageService::EventKind::DeleteFail)
+				{
+					if (ev.cookie != delete_cookie_active)
+					{
+						continue;
+					}
+					delete_in_progress = false;
+					delete_cookie_active = 0;
+					delete_confirm = false;
+					request_delete_redraw = true;
+				}
+#endif
 			}
 		}
 		// Service pending waveform computation (from audio callback)
@@ -8914,7 +8900,7 @@ int main(void)
 				else
 				{
 					list_build_pending = false;
-					JobStartFileList(fsi.GetSDPath(), true, true);
+					JobStartFileList(storage.GetSdPath(), true, true);
 				}
 			}
 		}
@@ -8923,7 +8909,7 @@ int main(void)
 			if (!ui_blocked)
 			{
 				request_delete_scan = false;
-				JobStartFileList(fsi.GetSDPath(), false, true);
+				JobStartFileList(storage.GetSdPath(), false, true);
 			}
 		}
 		if (request_load_sample)
@@ -8947,35 +8933,12 @@ int main(void)
 				{
 					edt_sample_context = SampleContext::Perform;
 				}
-				if (index >= 0 && index < wav_file_count)
-				{
-				}
-				else
-				{
-				}
-				if (LoadSampleAtIndex(index))
-				{
-					if (load_context == LoadContext::Edt)
-					{
-						ui_mode = UiMode::Edt;
-						if (sample_loaded && sample_length > 0)
-						{
-							waveform_ready = true;
-						}
-						waveform_dirty = true;
-						request_length_redraw = true;
-					}
-					else
-					{
-						ui_mode = UiMode::Perform;
-						menu_index = 2;
-					}
-					load_context = LoadContext::Main;
-				}
-				else
+				load_target_is_edt = (load_context == LoadContext::Edt);
+				if (!LoadSampleAtIndex(index))
 				{
 					ui_mode = UiMode::Load;
 					load_context = LoadContext::Main;
+					load_in_progress = false;
 				}
 			}
 		}
@@ -9050,19 +9013,7 @@ int main(void)
 				request_delete_file = false;
 				const int32_t index = request_delete_index;
 				request_delete_index = -1;
-				if (index >= 0 && index < wav_file_count)
-				{
-				}
-				else
-				{
-				}
-				if (DeleteFileAtIndex(index))
-				{
-					request_delete_scan = true;
-					delete_confirm = false;
-					request_delete_redraw = true;
-				}
-				else
+				if (!DeleteFileAtIndex(index))
 				{
 					delete_confirm = false;
 					request_delete_redraw = true;
@@ -9075,18 +9026,25 @@ int main(void)
 			if (!sd_init_done)
 			{
 				const uint32_t now = System::GetNow();
-				if (sd_init_attempts < kSdInitAttempts && now >= sd_init_next_ms)
+				const StorageService::MountState ms = storage.GetMountState();
+				if (ms == StorageService::MountState::Mounted)
 				{
-					sd_init_success = ReinitSdNow();
+					sd_init_success = true;
+					sd_init_done = true;
+					sd_init_result_until_ms = now + kSdInitResultMs;
+				}
+				else if (sd_init_attempts < kSdInitAttempts
+					&& now >= sd_init_next_ms
+					&& ms != StorageService::MountState::Mounting)
+				{
+					MountSd();
 					sd_init_attempts++;
-					if (sd_init_success || sd_init_attempts >= kSdInitAttempts)
+					sd_init_next_ms = now + kSdInitRetryMs;
+					if (sd_init_attempts >= kSdInitAttempts)
 					{
+						sd_init_success = false;
 						sd_init_done = true;
 						sd_init_result_until_ms = now + kSdInitResultMs;
-					}
-					else
-					{
-						sd_init_next_ms = now + kSdInitRetryMs;
 					}
 				}
 			}
@@ -9133,7 +9091,7 @@ int main(void)
 					save_frames_written = 0;
 					StorageService::Op op = {};
 					op.kind = StorageService::OpKind::SaveStart;
-					CopyString(op.path, fsi.GetSDPath(), sizeof(op.path));
+					CopyString(op.path, storage.GetSdPath(), sizeof(op.path));
 					op.src_l = sample_buffer_l;
 					op.src_r = sample_buffer_r;
 					op.frames = sample_length;
