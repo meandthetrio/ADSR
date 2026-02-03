@@ -34,6 +34,10 @@ This project uses **PreloadToRam** as the release policy. All perform samples ar
 - No SD streaming playback in release builds.
 - No blocking I/O in the audio callback.
 
+## Preview Policy
+
+- Preview playback **may stream from SD** in the background only; the audio callback only consumes buffered data and outputs silence on underrun.
+
 ## Runtime Enforcement
 
 - If a sample load exceeds the RAM budget, the load fails and the previous sample remains.

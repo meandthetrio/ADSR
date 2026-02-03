@@ -19,7 +19,7 @@ using namespace daisy;
 using namespace daisysp;
 
 #ifndef STORAGE_SERVICE_PREVIEW_STREAM
-#define STORAGE_SERVICE_PREVIEW_STREAM 1
+#define STORAGE_SERVICE_PREVIEW_STREAM PREVIEW_STREAM_FROM_SD
 #endif
 
 #ifndef STORAGE_SERVICE_SAVE
@@ -1498,10 +1498,10 @@ static uint16_t preview_stream_cookie = 1;
 static uint16_t preview_stream_cookie_active = 0;
 #endif
 static bool preview_pending_start = false;
-static uint32_t preview_pending_start_ms = 0;
+__attribute__((unused)) static uint32_t preview_pending_start_ms = 0;
 alignas(32) static int16_t preview_buffer[kPreviewBufferFrames];
 #if !STORAGE_SERVICE_PREVIEW_STREAM
-alignas(32) static int16_t preview_read_buf[kPreviewReadFrames * 2];
+alignas(32) __attribute__((unused)) static int16_t preview_read_buf[kPreviewReadFrames * 2];
 #endif
 #if STORAGE_SERVICE_PREVIEW_STREAM
 alignas(32) static int16_t preview_pp_buf[2][kPreviewPpFrames];
@@ -2384,7 +2384,9 @@ static void JobTick()
 
 static void PublishRuntimeFromUi();
 static void PublishFxChainFromUi();
+#if STORAGE_SERVICE_PREVIEW_STREAM
 static void PublishPreviewControlFromUi();
+#endif
 
 static void UpdateTrimFrames()
 {
@@ -2516,6 +2518,7 @@ static void PublishFxChainFromUi()
 	}
 }
 
+#if STORAGE_SERVICE_PREVIEW_STREAM
 static void PublishPreviewControlFromUi()
 {
 	const uint8_t next = static_cast<uint8_t>(g_preview_pub_idx ^ 1u);
@@ -2533,6 +2536,7 @@ static void PublishPreviewControlFromUi()
 		g_audio_cmd |= kCmdCommitPreview;
 	}
 }
+#endif
 
 static void PublishAudioParamsFromUi(const AudioParams& p)
 {
@@ -2855,6 +2859,9 @@ static bool BeginPreviewAtIndex(int32_t index)
 		return false;
 	}
 	return true;
+#else
+	(void)path;
+	return false;
 #endif
 }
 
@@ -2870,6 +2877,7 @@ static size_t PreviewAvailableFrames(size_t read_idx, size_t write_idx)
 #endif
 
 #if !STORAGE_SERVICE_PREVIEW_STREAM
+static size_t PreviewFreeFrames(size_t read_idx, size_t write_idx) __attribute__((unused));
 static size_t PreviewFreeFrames(size_t read_idx, size_t write_idx)
 {
 	const size_t used = PreviewAvailableFrames(read_idx, write_idx);
@@ -8588,6 +8596,7 @@ int main(void)
 		cfg.frames = kPreviewBufferFrames;
 		cfg.write_index = &preview_write_index;
 		cfg.read_index = &preview_read_index;
+#if STORAGE_SERVICE_PREVIEW_STREAM
 		cfg.preload_buf = preview_preload_buf;
 		cfg.preload_frames = kPreviewPreloadFrames;
 		cfg.pp_buf_a = &preview_pp_buf[0][0];
@@ -8596,7 +8605,8 @@ int main(void)
 		cfg.pp_ready_a = &preview_pp_ready[0];
 		cfg.pp_ready_b = &preview_pp_ready[1];
 		cfg.pp_active = &preview_pp_active;
-	storage.SetPreviewStreamConfig(cfg);
+#endif
+		storage.SetPreviewStreamConfig(cfg);
 	}
 	MountSd();
 
@@ -8652,6 +8662,7 @@ int main(void)
 		const uint32_t storage_budget = (preview_pending_start || preview_hold)
 			? kStoragePreviewBudgetUs
 			: kStorageBudgetUs;
+		// Preview streaming advances only here (UI loop), never in audio.
 		storage.RunSlice(storage_budget);
 		{
 			StorageService::Event ev = {};

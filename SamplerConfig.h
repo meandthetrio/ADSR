@@ -10,6 +10,8 @@ enum class SampleIOPolicy
 };
 
 constexpr SampleIOPolicy kPolicy = SampleIOPolicy::PreloadToRam;
+#define PREVIEW_STREAM_FROM_SD 1
+constexpr bool kPreviewMayStreamFromSd = (PREVIEW_STREAM_FROM_SD != 0);
 
 constexpr uint32_t kSampleRateHz = 48000;
 constexpr uint32_t kMaxSampleSeconds = 5;
