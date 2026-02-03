@@ -28,7 +28,7 @@ using PodDisplay = OledDisplay<SSD130xI2c128x64Driver>;
 #endif
 
 #ifndef PERF_DIAGNOSTICS
-#define PERF_DIAGNOSTICS 0
+#define PERF_DIAGNOSTICS 1
 #endif
 
 #if PERF_DIAGNOSTICS
@@ -40,7 +40,7 @@ using PodDisplay = OledDisplay<SSD130xI2c128x64Driver>;
 #endif
 
 constexpr int32_t kMenuCount = 3;
-constexpr int32_t kShiftMenuCount = 2;
+constexpr int32_t kShiftMenuCount = 3;
 constexpr int32_t kRecordTargetCount = 2;
 constexpr int32_t kRecordTargetSave = 0;
 /// constexpr int32_t kRecordTargetDiscard = 1;
@@ -148,6 +148,7 @@ constexpr float kFltParamStep = 0.02f;
 constexpr float kAmpEnvMinMs = 5.0f;
 constexpr float kAmpEnvMaxMs = 5000.0f;
 constexpr float kAmpEnvStepMs = 20.0f;
+constexpr float kPhonesVolumeStep = 0.01f;
 
 enum class UiMode : int32_t
 {
@@ -774,6 +775,7 @@ static volatile int32_t request_delete_index = -1;
 static volatile bool delete_confirm = false;
 static bool request_delete_redraw = false;
 static char delete_confirm_name[kMaxWavNameLen] = {0};
+static volatile float phones_volume = 1.0f;
 static bool delete_in_progress = false;
 static uint16_t delete_cookie_next = 1;
 static uint16_t delete_cookie_active = 0;
@@ -1672,7 +1674,7 @@ static int32_t NextMenuIndex(int32_t current, int32_t delta)
 	}
 	return order[pos];
 }
-const char* kShiftMenuLabels[kShiftMenuCount] = {"SAVE PRESET", "DELETE"};
+const char* kShiftMenuLabels[kShiftMenuCount] = {"SAVE PRESET", "DELETE", "VOLUME"};
 
 static int32_t NextPerformIndex(int32_t current, int32_t delta)
 {
@@ -3565,7 +3567,7 @@ static void DrawPerformScreen(int32_t selected,
 						false);
 		}
 	}
-	#if PERF_DIAGNOSTICS
+#if PERF_DIAGNOSTICS
 	{
 		const FontDef font = Font_6x8;
 		char cpu_label[12];
@@ -3578,10 +3580,11 @@ static void DrawPerformScreen(int32_t selected,
 		{
 			x = 0;
 		}
+		const bool cpu_on = (selected != kPerformAmpIndex);
 		display.SetCursor(x, 0);
-		display.WriteString(cpu_label, font, true);
+		display.WriteString(cpu_label, font, cpu_on);
 	}
-	#endif
+#endif
 	RequestDisplayUpdate();
 }
 
@@ -4364,6 +4367,25 @@ static void DrawShiftMenu(int32_t selected)
 		}
 		display.SetCursor(2, y + 1);
 		display.WriteString(kShiftMenuLabels[i], font, !is_selected);
+		if (i == 2)
+		{
+			float vol = 1.0f;
+			{
+				daisy::ScopedIrqBlocker irq;
+				vol = phones_volume;
+			}
+			const int pct = ClampI(static_cast<int>(vol * 100.0f + 0.5f), 0, 100);
+			char pct_buf[8];
+			snprintf(pct_buf, sizeof(pct_buf), "%d", pct);
+			const int text_w = static_cast<int>(StrLen(pct_buf)) * font.FontWidth;
+			int x = kDisplayW - text_w - 2;
+			if (x < 2)
+			{
+				x = 2;
+			}
+			display.SetCursor(x, y + 1);
+			display.WriteString(pct_buf, font, !is_selected);
+		}
 	}
 	RequestDisplayUpdate();
 }
@@ -4435,6 +4457,11 @@ static void DrawSaveScreen()
 }
 
 static inline int ClampI(int v, int lo, int hi)
+{
+	return (v < lo) ? lo : (v > hi ? hi : v);
+}
+
+static inline float ClampF(float v, float lo, float hi)
 {
 	return (v < lo) ? lo : (v > hi ? hi : v);
 }
@@ -6005,6 +6032,20 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 			shift_menu_index = next;
 			request_shift_redraw = true;
 		}
+		if (shift_menu_index == 2 && encoder_r_inc != 0)
+		{
+			const int inc = encoder_r_inc;
+			const int abs_inc = (inc < 0) ? -inc : inc;
+			int step_mult = ClampI(abs_inc * abs_inc, 1, 25);
+			float next = phones_volume
+				+ (static_cast<float>(inc) * kPhonesVolumeStep * static_cast<float>(step_mult));
+			next = ClampF(next, 0.0f, 1.0f);
+			{
+				daisy::ScopedIrqBlocker irq;
+				phones_volume = next;
+			}
+			request_shift_redraw = true;
+		}
 		if (encoder_r_pressed)
 		{
 			if (shift_menu_index == 0)
@@ -6027,11 +6068,8 @@ static void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_e
 		}
 		if (encoder_l_pressed)
 		{
-			if (!sd_init_in_progress)
-			{
-				ui_mode = shift_prev_mode;
-				request_shift_redraw = true;
-			}
+			ui_mode = shift_prev_mode;
+			request_shift_redraw = true;
 		}
 	}
 	else if (!ui_blocked && ui_mode == UiMode::Main)
@@ -7017,6 +7055,11 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 		pub_rt_idx = g_rt_pub_idx;
 		pub_fx_idx = g_fx_chain_pub_idx;
 		pub_preview_idx = g_preview_pub_idx;
+	}
+	float phones_gain = 1.0f;
+	{
+		daisy::ScopedIrqBlocker irq;
+		phones_gain = phones_volume;
 	}
 	const bool apply_reverse_cmd = (cmd & kCmdPlaybackReverse) != 0;
 
@@ -8255,8 +8298,8 @@ static float last_chorus_wow = -1.0f;
 		}
 		if (!fx_allowed)
 		{
-			out[0][i] = sig_l;
-			out[1][i] = sig_r;
+			out[0][i] = sig_l * phones_gain;
+			out[1][i] = sig_r * phones_gain;
 			continue;
 		}
 		float fx_l = sig_l;
@@ -8280,8 +8323,8 @@ static float last_chorus_wow = -1.0f;
 				default: break;
 			}
 		}
-		out[0][i] = fx_l * fx_gain;
-		out[1][i] = fx_r * fx_gain;
+		out[0][i] = fx_l * fx_gain * phones_gain;
+		out[1][i] = fx_r * fx_gain * phones_gain;
 	}
 audio_done:
 	if (ui_wave_dirty || ui_state_changed)
@@ -8864,10 +8907,13 @@ int main(void)
 			button2_press = false;
 			if (!ui_blocked)
 			{
-				shift_prev_mode = ui_mode;
-				ui_mode = UiMode::Shift;
-				shift_menu_index = 0;
-				request_shift_redraw = true;
+				if (ui_mode != UiMode::Shift)
+				{
+					shift_prev_mode = ui_mode;
+					ui_mode = UiMode::Shift;
+					shift_menu_index = 0;
+					request_shift_redraw = true;
+				}
 			}
 		}
 		if (button1_press)
