@@ -3012,90 +3012,94 @@ static void DrawBitmap1bpp(PodDisplay& disp,
 
 static void DrawMenu(int32_t selected)
 {
-	constexpr int kMarginX = 2;
-	constexpr int kMarginY = 2;
-	constexpr int kGapX = 2;
-	constexpr int kGapY = 2;
-	constexpr int kTopBoxW = (kDisplayW - (kMarginX * 2) - kGapX) / 2;
-	constexpr int kBoxH = (kDisplayH - (kMarginY * 2) - kGapY) / 2;
 	display.Fill(false);
+	constexpr int kListLeftX = 2;
+	constexpr int kListGapY = 6;
+	const int text_h = Font5x7::H;
+	int max_label_w = 0;
 	for (int32_t i = 0; i < kMenuCount; ++i)
 	{
-		const bool is_bottom = (i == 2);
-		const int row = is_bottom ? 1 : 0;
-		const int col = is_bottom ? 0 : static_cast<int>(i);
-		const int box_w = is_bottom ? (kDisplayW - (kMarginX * 2)) : kTopBoxW;
-		const int box_h = kBoxH;
-		const int x = is_bottom ? kMarginX : (kMarginX + col * (kTopBoxW + kGapX));
-		const int y = kMarginY + row * (kBoxH + kGapY);
+		const int w = TinyStringWidth(kMenuLabels[i]);
+		if (w > max_label_w)
+		{
+			max_label_w = w;
+		}
+	}
+	const int total_h = (kMenuCount * text_h) + ((kMenuCount - 1) * kListGapY);
+	const int start_y = (kDisplayH - total_h) / 2;
+	const int list_w = max_label_w;
+	const int icon_area_x = list_w + 4;
+	const int icon_area_w = kDisplayW - icon_area_x;
+	for (int32_t i = 0; i < kMenuCount; ++i)
+	{
 		const bool is_selected = (i == selected);
-		display.DrawRect(x,
-						 y,
-						 x + box_w - 1,
-						 y + box_h - 1,
-						 false,
-						 true);
-		display.DrawRect(x,
-						 y,
-						 x + box_w - 1,
-						 y + box_h - 1,
-						 true,
-						 false);
-		display.DrawRect(x,
-						 y,
-						 x + box_w - 1,
-						 y + box_h - 1,
-						 false,
-						 true);
-
-		const uint8_t* icon = nullptr;
-		int icon_w = 0;
-		int icon_h = 0;
-		int icon_stride = 0;
-		if (i == 0)
+		const char* label = kMenuLabels[i];
+		const int text_x = kListLeftX;
+		const int text_y = start_y + i * (text_h + kListGapY);
+		if (is_selected)
 		{
-			icon = kIconLoadDisk61x29;
-			icon_w = kIconW;
-			icon_h = kIconH;
-			icon_stride = kIconStride;
+			const int pad = 1;
+			int rect_x0 = text_x - pad;
+			int rect_y0 = text_y - pad;
+			int rect_x1 = text_x + list_w + pad;
+			int rect_y1 = text_y + text_h + pad;
+			if (rect_x0 < 0) rect_x0 = 0;
+			if (rect_y0 < 0) rect_y0 = 0;
+			if (rect_x1 >= kDisplayW) rect_x1 = kDisplayW - 1;
+			if (rect_y1 >= kDisplayH) rect_y1 = kDisplayH - 1;
+			display.DrawRect(rect_x0,
+							 rect_y0,
+							 rect_x1,
+							 rect_y1,
+							 true,
+							 true);
+			DrawTinyString(label, text_x, text_y, false);
 		}
-		else if (i == 1)
+		else
 		{
-			icon = kIconRecordTape61x29;
-			icon_w = kIconW;
-			icon_h = kIconH;
-			icon_stride = kIconStride;
-		}
-		else if (i == 2)
-		{
-			icon = kIconPerformMpc61x29;
-			icon_w = kIconW;
-			icon_h = kIconH;
-			icon_stride = kIconStride;
-		}
-
-		if (icon != nullptr && is_selected)
-		{
-			const int icon_x = x + (box_w - icon_w) / 2;
-			const int icon_y = y + (box_h - icon_h) / 2;
-			DrawBitmap1bpp(display,
-						   icon_x,
-						   icon_y,
-						   icon_w,
-						   icon_h,
-						   icon_stride,
-						   icon,
-						   true);
-		}
-
-		if (!is_selected)
-		{
-			const char* label = kMenuLabels[i];
-			const int text_w = TinyStringWidth(label);
-			const int text_h = Font5x7::H;
-			const int text_x = x + (box_w - text_w) / 2;
-			const int text_y = y + (box_h - text_h) / 2;
 			DrawTinyString(label, text_x, text_y, true);
+		}
+
+		if (is_selected)
+		{
+			const uint8_t* icon = nullptr;
+			int icon_w = 0;
+			int icon_h = 0;
+			int icon_stride = 0;
+			if (i == 0)
+			{
+				icon = kIconLoadDisk61x29;
+				icon_w = kIconW;
+				icon_h = kIconH;
+				icon_stride = kIconStride;
+			}
+			else if (i == 1)
+			{
+				icon = kIconRecordTape61x29;
+				icon_w = kIconW;
+				icon_h = kIconH;
+				icon_stride = kIconStride;
+			}
+			else if (i == 2)
+			{
+				icon = kIconPerformMpc61x29;
+				icon_w = kIconW;
+				icon_h = kIconH;
+				icon_stride = kIconStride;
+			}
+			if (icon != nullptr && icon_area_w > icon_w)
+			{
+				const int icon_x = icon_area_x + (icon_area_w - icon_w) / 2;
+				const int icon_y = (kDisplayH - icon_h) / 2;
+				DrawBitmap1bpp(display,
+							   icon_x,
+							   icon_y,
+							   icon_w,
+							   icon_h,
+							   icon_stride,
+							   icon,
+							   true);
+			}
 		}
 	}
 	RequestDisplayUpdate();
