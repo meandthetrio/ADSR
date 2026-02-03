@@ -3,6 +3,11 @@
 #include "dev/oled_ssd130x.h"
 #include "per/tim.h"
 #include "util/scopedirqblocker.h"
+#include "SamplerConfig.h"
+#include "PerformVoice.h"
+#include "SampleMemoryManager.h"
+#include "VoiceManager.h"
+#include "WaveformCache.h"
 #include "StorageService.h"
 #include <cmath>
 #include <initializer_list>
@@ -20,6 +25,10 @@ using namespace daisysp;
 #ifndef STORAGE_SERVICE_SAVE
 #define STORAGE_SERVICE_SAVE 1
 #endif
+
+// Enforce IO policy: release builds preload into RAM.
+static_assert(kPolicy == SampleIOPolicy::PreloadToRam,
+	"StreamFromSd policy requires removing preload buffers; not supported in this build.");
 
 using PodDisplay = OledDisplay<SSD130xI2c128x64Driver>;
 
@@ -70,8 +79,6 @@ constexpr uint32_t kSaveStepBudgetMs = 20;
 constexpr int32_t kMaxWavFiles = 32;
 constexpr size_t kMaxWavNameLen = 32;
 constexpr int32_t kLoadFontScale = 1;
-constexpr size_t kMaxSampleSamples = 240000;
-constexpr int32_t kRecordMaxSeconds = 5;
 constexpr size_t kSampleChunkFrames = 256;
 constexpr size_t kSaveChunkFrames = 8192;
 constexpr int32_t kBaseMidiNote = 60;
@@ -87,10 +94,10 @@ constexpr size_t kSineTableSize = 1024;
 constexpr int kDisplayW = 128;
 constexpr int kDisplayH = 64;
 constexpr uint32_t kPreviewReadBudgetMs = 2;
-constexpr size_t kPreviewBufferFrames = 16384;
+// kPreviewBufferFrames defined in SamplerConfig.h
 constexpr size_t kPreviewReadFrames = 256;
 constexpr size_t kPreviewPpFrames = 2048;
-constexpr size_t kPreviewPreloadFrames = 240000;
+// kPreviewPreloadFrames defined in SamplerConfig.h
 constexpr uint32_t kStorageBudgetUs = 2000;
 constexpr uint32_t kStoragePreviewBudgetUs = 12000;
 constexpr uint32_t kPreviewFadeInMs = 10;
@@ -102,7 +109,7 @@ constexpr float kRecordWaveformScaleMaxMic = 1.75f;
 constexpr float kRecordWaveformScaleMinLine = 0.7f;
 constexpr float kRecordWaveformScaleMaxLine = 2.0f;
 
-constexpr int kPerformVoiceCount = 5;
+constexpr int kPerformVoiceCount = kMaxVoices;
 constexpr float kReverbFeedback = 0.85f;
 constexpr float kReverbLpFreq = 12000.0f;
 constexpr float kReverbFeedbackMin = 0.2f;
@@ -745,6 +752,21 @@ static bool load_in_progress = false;
 static uint16_t load_cookie_next = 1;
 static uint16_t load_cookie_active = 0;
 static bool load_target_is_edt = false;
+enum class LoaderState : uint8_t
+{
+	Idle,
+	Requested,
+	Loading,
+	Ready,
+	Failed,
+};
+static LoaderState loader_state = LoaderState::Idle;
+static volatile uint32_t load_success_count = 0;
+static volatile uint32_t load_fail_budget_count = 0;
+static volatile uint32_t load_fail_io_count = 0;
+static volatile size_t sample_mem_used_bytes = 0;
+static volatile size_t sample_mem_free_bytes = 0;
+static volatile size_t waveform_cache_bytes = 0;
 volatile int32_t wav_file_count = 0;
 
 bool sd_mounted = false;
@@ -808,10 +830,38 @@ struct SampleState
 static SampleState perform_sample_state;
 static SampleContext current_sample_context = SampleContext::Perform;
 
-DSY_SDRAM_BSS int16_t perform_sample_buffer_l[kMaxSampleSamples];
-DSY_SDRAM_BSS int16_t perform_sample_buffer_r[kMaxSampleSamples];
+static constexpr uint32_t kPerformSampleId = 1;
+
+// Memory Layout
+// Perform:
+// - perform_sample_buffer_l/r (SDRAM, kMaxSampleFrames frames each, 2 bytes/frame):
+//   writer: StorageService load path and record path (UI/background),
+//   reader: audio callback; valid when sample_loaded == true.
+// Record:
+// - recording writes into perform_sample_buffer_l/r (mono duplicated to L/R),
+//   bounded by kRecordMaxFrames.
+// Preview:
+// - preview_buffer (SRAM, kPreviewBufferFrames frames, 2 bytes/frame):
+//   writer: StorageService preview stream, reader: audio callback.
+// - preview_pp_buf (SRAM, 2 x kPreviewPpFrames frames, 2 bytes/frame):
+//   writer: StorageService preview stream, reader: audio callback.
+// - preview_preload_buf (SDRAM, kPreviewPreloadFrames frames, 2 bytes/frame):
+//   writer: StorageService preload, reader: audio callback.
+// - preview_read_buf (SRAM, kPreviewReadFrames * 2 samples, 2 bytes/sample):
+//   writer: StorageService, reader: StorageService only (scratch).
+// Waveform Cache:
+// - perform_waveform_cache (SRAM, 128 min + 128 max samples, 2 bytes/sample):
+//   writer: waveform jobs (UI thread), reader: UI draw.
+// Other:
+// - record_*_mask buffers (RAM_D3, 128x64 bytes each) for record UI overlay.
+// - perform_voices (DTCM) and filter state (DTCM) for audio processing.
+
+DSY_SDRAM_BSS int16_t perform_sample_buffer_l[kMaxSampleFrames];
+DSY_SDRAM_BSS int16_t perform_sample_buffer_r[kMaxSampleFrames];
 static int16_t* sample_buffer_l = perform_sample_buffer_l;
 static int16_t* sample_buffer_r = perform_sample_buffer_r;
+static SampleMemoryManager sample_mem_mgr(perform_sample_buffer_l, kPerformSampleRamBudgetBytes);
+static VoiceManager voice_mgr;
 volatile size_t sample_length = 0;
 volatile size_t sample_play_start = 0;
 volatile size_t sample_play_end = 0;
@@ -874,23 +924,6 @@ static volatile uint8_t g_fx_chain_active_idx = 0;
 static PreviewControl g_preview_ctl_buf[2];
 static volatile uint8_t g_preview_pub_idx = 0;
 static volatile uint8_t g_preview_active_idx = 0;
-
-struct PerformVoice
-{
-	bool active = false;
-	bool releasing = false;
-	float phase = 0.0f;
-	float rate = 1.0f;
-	float amp = 1.0f;
-	float env = 0.0f;
-	float release_start = 0.0f;
-	float release_pos = 0.0f;
-	int32_t note = -1;
-	int32_t track = -1;
-	size_t offset = 0;
-	size_t length = 0;
-	uint32_t env_samples = 0;
-};
 
 DTCM_MEM_SECTION static PerformVoice perform_voices[kPerformVoiceCount];
 
@@ -961,22 +994,12 @@ uint32_t snap_start_frame = 0;
 uint32_t snap_end_frame = 0;
 
 // Waveform preview buffers (128 columns)
-static int16_t waveform_min[128];
-static int16_t waveform_max[128];
 static bool waveform_ready = false;
 static bool waveform_dirty = false;
 
 // Waveform computation request (from audio callback to main loop)
 static volatile bool waveform_compute_pending = false;
 static volatile SampleContext waveform_compute_ctx = SampleContext::Perform;
-
-struct WaveformCache
-{
-	int16_t min[128] = {};
-	int16_t max[128] = {};
-	bool ready = false;
-	bool dirty = false;
-};
 
 static WaveformCache perform_waveform_cache;
 static bool waveform_from_recording = false;
@@ -985,7 +1008,7 @@ static volatile float perform_attack_norm = 0.0f;
 static volatile float perform_release_norm = 0.0f;
 static const char* waveform_title = nullptr;
 
-constexpr size_t kRecordMaxFrames = static_cast<size_t>(kRecordMaxSeconds) * 48000U;
+constexpr size_t kRecordMaxFrames = kMaxSampleFrames;
 constexpr uint32_t kRecordCountdownMs = 4000;
 
 // Control event bits (for snapshot-based input passing from main loop to audio callback)
@@ -1847,8 +1870,8 @@ static void __attribute__((unused)) ComputeWaveform()
 	{
 		for (int32_t i = 0; i < width; ++i)
 		{
-			waveform_min[i] = 0;
-			waveform_max[i] = 0;
+			perform_waveform_cache.Min()[i] = 0;
+			perform_waveform_cache.Max()[i] = 0;
 		}
 		return;
 	}
@@ -1889,8 +1912,8 @@ static void __attribute__((unused)) ComputeWaveform()
 			}
 		}
 
-		waveform_min[col] = static_cast<int16_t>(minv * scale);
-		waveform_max[col] = static_cast<int16_t>(maxv * scale);
+		perform_waveform_cache.Min()[col] = static_cast<int16_t>(minv * scale);
+		perform_waveform_cache.Max()[col] = static_cast<int16_t>(maxv * scale);
 	}
 }
 
@@ -1953,8 +1976,8 @@ static void WaveformJobStart(SampleContext ctx)
 	{
 		for (int32_t i = 0; i < 128; ++i)
 		{
-			waveform_min[i] = 0;
-			waveform_max[i] = 0;
+			perform_waveform_cache.Min()[i] = 0;
+			perform_waveform_cache.Max()[i] = 0;
 		}
 		waveform_ready = true;
 		waveform_dirty = true;
@@ -1994,9 +2017,9 @@ static void WaveformJobTick(uint32_t budget_samples)
 	{
 		if (g_wf_job.idx >= g_wf_job.end)
 		{
-			waveform_min[g_wf_job.col]
+			perform_waveform_cache.Min()[g_wf_job.col]
 				= static_cast<int16_t>(g_wf_job.minv * g_wf_job.scale);
-			waveform_max[g_wf_job.col]
+			perform_waveform_cache.Max()[g_wf_job.col]
 				= static_cast<int16_t>(g_wf_job.maxv * g_wf_job.scale);
 			g_wf_job.col++;
 			if (g_wf_job.col >= g_wf_job.columns)
@@ -2442,6 +2465,15 @@ static bool AnyPerformVoiceActive()
 	return false;
 }
 
+static inline void ReleaseVoiceSample(PerformVoice& voice)
+{
+	if (voice.sample_acquired)
+	{
+		sample_mem_mgr.Release(kPerformSampleId);
+		voice.sample_acquired = false;
+	}
+}
+
 static void PublishRuntimeFromUi()
 {
 	const uint8_t next = static_cast<uint8_t>(g_rt_pub_idx ^ 1u);
@@ -2646,8 +2678,10 @@ static void ResetPerformVoices()
 {
 	for (auto &voice : perform_voices)
 	{
+		ReleaseVoiceSample(voice);
 		voice.active = false;
 		voice.releasing = false;
+		voice.sample_acquired = false;
 		voice.phase = 0.0f;
 		voice.rate = 1.0f;
 		voice.amp = 1.0f;
@@ -2721,19 +2755,29 @@ static bool LoadSampleFromPath(const char* path)
 	{
 		return false;
 	}
+	void* sample_ptr = nullptr;
+	if (!sample_mem_mgr.Allocate(kPerformSampleId, kPerformSampleRamBudgetBytes, &sample_ptr))
+	{
+		load_fail_budget_count++;
+		return false;
+	}
 	StorageService::Op op = {};
 	op.kind = StorageService::OpKind::LoadStart;
 	CopyString(op.path, path, sizeof(op.path));
 	op.dst_l = sample_buffer_l;
 	op.dst_r = sample_buffer_r;
-	op.max_frames = kMaxSampleSamples;
+	op.max_frames = kMaxSampleFrames;
 	op.cookie = load_cookie_next++;
 	load_cookie_active = op.cookie;
 	if (!storage.Enqueue(op))
 	{
+		loader_state = LoaderState::Failed;
+		load_fail_io_count++;
+		sample_mem_mgr.Free(kPerformSampleId);
 		return false;
 	}
 	load_in_progress = true;
+	loader_state = LoaderState::Requested;
 	return true;
 }
 
@@ -3014,6 +3058,7 @@ static void DrawBitmap1bpp(PodDisplay& disp,
 
 static void DrawMenu(int32_t selected)
 {
+	auto clamp_i = [](int v, int lo, int hi) { return (v < lo) ? lo : (v > hi ? hi : v); };
 	display.Fill(false);
 	constexpr int kListLeftX = 2;
 	constexpr int kListGapY = 6;
@@ -3104,6 +3149,24 @@ static void DrawMenu(int32_t selected)
 			}
 		}
 	}
+#if PERF_DIAGNOSTICS
+	{
+		const FontDef font = Font_6x8;
+		char cpu_label[12];
+		int cpu_pct = static_cast<int>(cpu_load_pct + 0.5f);
+		cpu_pct = clamp_i(cpu_pct, 0, 100);
+		snprintf(cpu_label, sizeof(cpu_label), "CPU %d%%", cpu_pct);
+		const int text_w = static_cast<int>(StrLen(cpu_label)) * font.FontWidth;
+		int x = kDisplayW - text_w - 1;
+		if (x < 0)
+		{
+			x = 0;
+		}
+		const bool cpu_on = (selected != kPerformAmpIndex);
+		display.SetCursor(x, 0);
+		display.WriteString(cpu_label, font, cpu_on);
+	}
+#endif
 	RequestDisplayUpdate();
 }
 
@@ -4466,6 +4529,28 @@ static inline float ClampF(float v, float lo, float hi)
 	return (v < lo) ? lo : (v > hi ? hi : v);
 }
 
+static void ValidateConfig()
+{
+#if PERF_DIAGNOSTICS
+	if (kMaxSampleFrames != static_cast<size_t>(kSampleRateHz) * kMaxSampleSeconds)
+	{
+		while (1) {}
+	}
+	if (kPreviewPreloadFrames > kMaxSampleFrames)
+	{
+		while (1) {}
+	}
+	if (kPerformSampleRamBudgetBytes < kMaxSampleFrames * sizeof(int16_t) * 2)
+	{
+		while (1) {}
+	}
+	if (kWaveformCacheBytes < (128 * sizeof(int16_t) * 2))
+	{
+		while (1) {}
+	}
+#endif
+}
+
 static float AmpEnvMsFromFader(float value)
 {
 	if (value < 0.0f)
@@ -4556,8 +4641,8 @@ static void DrawWaveform()
 		int max_abs = 0;
 		for (int i = 0; i < W; ++i)
 		{
-			const int a = std::abs(static_cast<int>(waveform_min[i]));
-			const int b = std::abs(static_cast<int>(waveform_max[i]));
+			const int a = std::abs(static_cast<int>(perform_waveform_cache.Min()[i]));
+			const int b = std::abs(static_cast<int>(perform_waveform_cache.Max()[i]));
 			if (a > max_abs) max_abs = a;
 			if (b > max_abs) max_abs = b;
 		}
@@ -4584,8 +4669,8 @@ static void DrawWaveform()
 
 	for(int x = 0; x < W; x++)
 	{
-		int top    = mid + static_cast<int>(static_cast<float>(waveform_min[x]) * record_scale);
-		int bottom = mid + static_cast<int>(static_cast<float>(waveform_max[x]) * record_scale);
+		int top    = mid + static_cast<int>(static_cast<float>(perform_waveform_cache.Min()[x]) * record_scale);
+		int bottom = mid + static_cast<int>(static_cast<float>(perform_waveform_cache.Max()[x]) * record_scale);
 
 		if(top > bottom)
 		{
@@ -5722,34 +5807,24 @@ static void StartPerformVoice(int32_t note)
 		return;
 	}
 
-	int voice_index = -1;
-	for (int i = 0; i < kPerformVoiceCount; ++i)
-	{
-		if (perform_voices[i].active && perform_voices[i].note == note)
-		{
-			voice_index = i;
-			break;
-		}
-	}
+	const int voice_index = voice_mgr.SelectVoiceIndex(note);
 	if (voice_index < 0)
 	{
-		for (int i = 0; i < kPerformVoiceCount; ++i)
-		{
-			if (!perform_voices[i].active)
-			{
-				voice_index = i;
-				break;
-			}
-		}
-	}
-	if (voice_index < 0)
-	{
-		voice_index = 0;
+		return;
 	}
 
 	PerformVoice& voice = perform_voices[voice_index];
+	ReleaseVoiceSample(voice);
 	voice.active = true;
 	voice.releasing = false;
+	if (sample_mem_mgr.Acquire(kPerformSampleId))
+	{
+		voice.sample_acquired = true;
+	}
+	else
+	{
+		voice.sample_acquired = false;
+	}
 	voice.note = note;
 	voice.track = -1;
 	voice.phase = 0.0f;
@@ -5758,6 +5833,7 @@ static void StartPerformVoice(int32_t note)
 	voice.release_start = 0.0f;
 	voice.release_pos = 0.0f;
 	voice.env_samples = 0;
+	voice.start_tick = static_cast<uint32_t>(System::GetNow());
 	perform_lpf_l1[voice_index].Reset();
 	perform_lpf_l2[voice_index].Reset();
 	perform_lpf_r1[voice_index].Reset();
@@ -8043,6 +8119,7 @@ static float last_chorus_wow = -1.0f;
 						samp_r = perform_lpf_r2[v].Process(perform_lpf_r1[v].Process(samp_r));
 					}
 					add_voice(samp_l, samp_r);
+					ReleaseVoiceSample(voice);
 					voice.active = false;
 					voice.releasing = false;
 					voice.release_pos = 0.0f;
@@ -8052,6 +8129,7 @@ static float last_chorus_wow = -1.0f;
 				const size_t idx_rel = static_cast<size_t>(voice.phase);
 				if (idx_rel + 1 >= voice.length)
 				{
+					ReleaseVoiceSample(voice);
 					voice.active = false;
 					voice.releasing = false;
 					voice.release_pos = 0.0f;
@@ -8123,6 +8201,7 @@ static float last_chorus_wow = -1.0f;
 					voice.release_pos += 1.0f;
 					if (amp_release_samples > 1.0f && voice.release_pos >= amp_release_samples)
 					{
+						ReleaseVoiceSample(voice);
 						voice.active = false;
 						voice.releasing = false;
 						voice.release_pos = 0.0f;
@@ -8131,6 +8210,7 @@ static float last_chorus_wow = -1.0f;
 				}
 				if (voice.phase >= static_cast<float>(voice.length - 1))
 				{
+					ReleaseVoiceSample(voice);
 					voice.active = false;
 					voice.releasing = false;
 					voice.release_pos = 0.0f;
@@ -8500,6 +8580,8 @@ int main(void)
 	g_preview_active_idx = 0;
 
 	storage.Init();
+	voice_mgr.Init(perform_voices, kPerformVoiceCount);
+	ValidateConfig();
 	{
 		StorageService::PreviewStreamConfig cfg = {};
 		cfg.buffer = preview_buffer;
@@ -8709,6 +8791,7 @@ int main(void)
 					if (ev.cookie == load_cookie_active)
 					{
 						load_in_progress = true;
+						loader_state = LoaderState::Loading;
 					}
 				}
 				else if (ev.kind == StorageService::EventKind::LoadDone)
@@ -8718,6 +8801,7 @@ int main(void)
 						continue;
 					}
 					load_in_progress = false;
+					load_success_count++;
 					sample_length = static_cast<size_t>(ev.value);
 					sample_channels = (ev.channels == 0) ? 1 : ev.channels;
 					sample_rate = (ev.sample_rate == 0) ? 48000 : ev.sample_rate;
@@ -8748,6 +8832,7 @@ int main(void)
 						menu_index = 2;
 					}
 					load_context = LoadContext::Main;
+					loader_state = LoaderState::Ready;
 				}
 				else if (ev.kind == StorageService::EventKind::LoadError)
 				{
@@ -8757,8 +8842,11 @@ int main(void)
 					}
 					load_in_progress = false;
 					load_cookie_active = 0;
+					load_fail_io_count++;
+					sample_mem_mgr.Free(kPerformSampleId);
 					ui_mode = UiMode::Load;
 					load_context = LoadContext::Main;
+					loader_state = LoaderState::Failed;
 				}
 				else if (ev.kind == StorageService::EventKind::DeleteOk)
 				{
@@ -9788,6 +9876,9 @@ int main(void)
 		{
 			FlushDisplayIfDue(draw_now);
 		}
+		sample_mem_used_bytes = sample_mem_mgr.BytesUsed();
+		sample_mem_free_bytes = sample_mem_mgr.BytesFree();
+		waveform_cache_bytes = perform_waveform_cache.BytesUsed();
 		hw.UpdateLeds();
 		hw.DelayMs(1);
 	}
