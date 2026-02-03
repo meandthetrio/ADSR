@@ -770,6 +770,11 @@ static volatile size_t waveform_cache_bytes = 0;
 volatile int32_t wav_file_count = 0;
 
 bool sd_mounted = false;
+static bool sd_present = false;
+static bool sd_fault = false;
+static StorageService::SdErrorCode sd_fault_code = StorageService::SdErrorCode::None;
+static const char* sd_fault_text = nullptr;
+static uint32_t sd_retries_remaining = 0;
 static bool sd_init_in_progress = false;
 static bool sd_init_done = false;
 static bool sd_init_success = false;
@@ -1851,6 +1856,21 @@ static void MountSd()
 	if (!storage.Enqueue(op))
 	{
 		return;
+	}
+}
+
+static const char* SdFaultText(StorageService::SdErrorCode code)
+{
+	switch (code)
+	{
+		case StorageService::SdErrorCode::NoCard: return "INSERT SD";
+		case StorageService::SdErrorCode::MountFailed: return "MOUNT FAIL";
+		case StorageService::SdErrorCode::FsCorrupt: return "FS CORRUPT";
+		case StorageService::SdErrorCode::OpenFailed: return "OPEN ERROR";
+		case StorageService::SdErrorCode::ReadFailed: return "READ ERROR";
+		case StorageService::SdErrorCode::WriteFailed: return "WRITE ERROR";
+		case StorageService::SdErrorCode::Timeout: return "SD TIMEOUT";
+		default: return "SD ERROR";
 	}
 }
 
@@ -3710,11 +3730,16 @@ static void DrawLoadMenu(int32_t top_index, int32_t selected)
 		return;
 	}
 
+	if (sd_fault && sd_fault_text)
+	{
+		DrawLoadMessage(sd_fault_text, "FAILED TO LOAD FILES");
+		return;
+	}
 	if (!sd_mounted)
 	{
 		DrawLoadMessage("SD NOT", "MOUNTED");
 		return;
-	 }
+	}
 	if (wav_file_count == 0)
 	{
 		const uint32_t now = System::GetNow();
@@ -9015,9 +9040,29 @@ int main(void)
 				}
 			}
 		}
+		{
+			const StorageService::SdStatus& st = storage.GetSdStatus();
+			sd_present = st.present;
+			sd_mounted = st.mounted;
+			sd_fault_code = st.last_error.code;
+			sd_fault = (sd_fault_code != StorageService::SdErrorCode::None);
+			sd_fault_text = sd_fault ? SdFaultText(sd_fault_code) : nullptr;
+			const uint32_t max_retry = StorageService::kSdRetryMaxAttempts;
+			sd_retries_remaining = (sd_fault && max_retry > st.last_error.retries)
+				? (max_retry - st.last_error.retries)
+				: 0;
+		}
 		if (button1_press)
 		{
 			button1_press = false;
+			if (sd_fault && ui_mode == UiMode::Load)
+			{
+				storage.ClearSdError();
+				MountSd();
+				request_load_scan = true;
+			}
+			else
+			{
 			if (!ui_blocked
 				&& sample_loaded
 				&& ui_mode != UiMode::Load)
@@ -9031,6 +9076,7 @@ int main(void)
 					RequestPlaybackStart(kBaseMidiNote, false);
 				}
 				request_playhead_redraw = true;
+			}
 			}
 		}
 		// Step advance is audio-clocked in AudioCallback.

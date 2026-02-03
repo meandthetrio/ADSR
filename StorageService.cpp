@@ -22,11 +22,21 @@ static uint32_t g_preview_data_offset = 0;
 static uint32_t g_preview_sample_rate = 0;
 static uint16_t g_preview_channels = 0;
 static uint16_t g_preview_cookie = 0;
+static uint32_t g_preview_deadline_ms = 0;
 
 static volatile uint32_t g_storage_slice_max_us = 0;
 static volatile uint32_t g_storage_readchunk_max_us = 0;
 static volatile uint32_t g_storage_readchunk_bytes = 0;
 static volatile uint32_t g_storage_readchunk_calls = 0;
+
+static constexpr uint32_t kSdRetryBaseBackoffMs = 200;
+static constexpr uint32_t kSdRetryMaxBackoffMs = 2000;
+static constexpr uint32_t kSdOpTimeoutMountMs = 1500;
+static constexpr uint32_t kSdOpTimeoutLoadMs = 8000;
+static constexpr uint32_t kSdOpTimeoutSaveMs = 8000;
+static constexpr uint32_t kSdOpTimeoutPreviewMs = 1500;
+static constexpr uint32_t kSdOpTimeoutScanMs = 3000;
+static constexpr uint32_t kSdOpTimeoutDeleteMs = 2000;
 
 alignas(32) static uint8_t wav_riff_hdr[12];
 alignas(32) static uint8_t wav_chunk_hdr[8];
@@ -246,6 +256,44 @@ static bool PushEvent(StorageService::Event* queue,
 	return true;
 }
 
+static bool IsRetryable(StorageService::SdErrorCode code)
+{
+	switch (code)
+	{
+		case StorageService::SdErrorCode::MountFailed:
+		case StorageService::SdErrorCode::ReadFailed:
+		case StorageService::SdErrorCode::WriteFailed:
+		case StorageService::SdErrorCode::Timeout:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static uint32_t BackoffMs(uint8_t attempt)
+{
+	uint32_t backoff = kSdRetryBaseBackoffMs << attempt;
+	if (backoff > kSdRetryMaxBackoffMs)
+	{
+		backoff = kSdRetryMaxBackoffMs;
+	}
+	return backoff;
+}
+
+static uint32_t DefaultDeadlineMs(StorageService::OpKind kind)
+{
+	switch (kind)
+	{
+		case StorageService::OpKind::Mount: return kSdOpTimeoutMountMs;
+		case StorageService::OpKind::ScanDir: return kSdOpTimeoutScanMs;
+		case StorageService::OpKind::PreviewOpen: return kSdOpTimeoutPreviewMs;
+		case StorageService::OpKind::SaveStart: return kSdOpTimeoutSaveMs;
+		case StorageService::OpKind::LoadStart: return kSdOpTimeoutLoadMs;
+		case StorageService::OpKind::DeleteFile: return kSdOpTimeoutDeleteMs;
+		default: return 1000;
+	}
+}
+
 void StorageService::Init()
 {
 	op_wr_ = 0;
@@ -285,6 +333,8 @@ void StorageService::Init()
 	g_preview_channels = 0;
 	g_preview_cookie = 0;
 	fsi.Init(daisy::FatFSInterface::Config::MEDIA_SD);
+	sd_status_ = {};
+	next_op_id_ = 1;
 }
 
 void StorageService::SetPreviewStreamConfig(const PreviewStreamConfig& cfg)
@@ -308,6 +358,37 @@ void StorageService::UnmountSd()
 	(void)f_mount(0, fsi.GetSDPath(), 0);
 }
 
+void StorageService::ClearSdError()
+{
+	sd_status_.last_error = {};
+	sd_status_.last_error_time_ms = daisy::System::GetNow();
+}
+
+void StorageService::CancelAllOps(SdErrorCode reason)
+{
+	op_rd_ = op_wr_;
+	scan_active_ = false;
+	scan_done_pending_ = false;
+	if (g_scan_dir_open)
+	{
+		f_closedir(&g_scan_dir);
+		g_scan_dir_open = false;
+	}
+	if (g_preview_open)
+	{
+		f_close(&g_preview_file);
+		g_preview_open = false;
+	}
+	save_.active = false;
+	load_.active = false;
+	preview_preload_active_ = false;
+	preview_preload_filled_ = 0;
+	preview_preload_target_frames_ = 0;
+	sd_status_.last_error.code = reason;
+	sd_status_.last_error_time_ms = daisy::System::GetNow();
+	++sd_counters_.cancels;
+}
+
 const char* StorageService::GetSdPath() const
 {
 	return fsi.GetSDPath();
@@ -320,7 +401,20 @@ bool StorageService::Enqueue(const Op& op)
 	{
 		return false;
 	}
-	op_queue_[op_wr_] = op;
+	Op queued = op;
+	if (queued.op_id == 0)
+	{
+		queued.op_id = next_op_id_++;
+	}
+	if (queued.start_ms == 0)
+	{
+		queued.start_ms = daisy::System::GetNow();
+	}
+	if (queued.deadline_ms == 0)
+	{
+		queued.deadline_ms = queued.start_ms + DefaultDeadlineMs(queued.kind);
+	}
+	op_queue_[op_wr_] = queued;
 	op_wr_ = next;
 	return true;
 }
@@ -343,15 +437,83 @@ void StorageService::RunSlice(uint32_t budget_us)
 		budget_us = kMinStorageBudgetUs;
 	}
 	const uint32_t slice_start_ms = daisy::System::GetNow();
+	static constexpr uint32_t kMaxStepsPerSlice = 8;
+	uint32_t steps = 0;
+	auto step_guard = [&]()
+	{
+		if (++steps > kMaxStepsPerSlice)
+		{
+			++sd_counters_.op_timeouts;
+		}
+	};
+	const bool present = BSP_SD_IsDetected();
+	sd_status_.present = present;
+	if (!present)
+	{
+		mount_state_ = MountState::NoCard;
+		sd_status_.mounted = false;
+		CancelAllOps(SdErrorCode::NoCard);
+		return;
+	}
 	if (op_rd_ != op_wr_)
 	{
+		step_guard();
 		const Op op = op_queue_[op_rd_];
+		if (op.next_attempt_ms != 0 && slice_start_ms < op.next_attempt_ms)
+		{
+			return;
+		}
+		if (op.deadline_ms != 0 && slice_start_ms > op.deadline_ms)
+		{
+			sd_status_.last_error = {SdErrorCode::Timeout, -1, op.op_id, op.attempt};
+			sd_status_.last_error_time_ms = daisy::System::GetNow();
+			++sd_counters_.op_timeouts;
+			Event ev = {};
+			switch (op.kind)
+			{
+				case OpKind::Mount: ev.kind = EventKind::MountFail; break;
+				case OpKind::ScanDir: ev.kind = EventKind::ScanDone; ev.cookie = op.cookie; break;
+				case OpKind::PreviewOpen: ev.kind = EventKind::PreviewOpenFail; ev.cookie = op.cookie; break;
+				case OpKind::SaveStart: ev.kind = EventKind::SaveError; break;
+				case OpKind::LoadStart: ev.kind = EventKind::LoadError; ev.cookie = op.cookie; break;
+				case OpKind::DeleteFile: ev.kind = EventKind::DeleteFail; ev.cookie = op.cookie; break;
+				default: break;
+			}
+			if (ev.kind != EventKind::None)
+			{
+				PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
+			}
+			op_rd_ = static_cast<uint8_t>((op_rd_ + 1) % kOpQueueSize);
+			return;
+		}
 		op_rd_ = static_cast<uint8_t>((op_rd_ + 1) % kOpQueueSize);
+		auto retry_op = [&](SdErrorCode code, int32_t fs_result) -> bool
+		{
+			if (!IsRetryable(code) || op.attempt >= kSdRetryMaxAttempts)
+			{
+				sd_status_.last_error = {code, fs_result, op.op_id, op.attempt};
+				sd_status_.last_error_time_ms = daisy::System::GetNow();
+				return false;
+			}
+			Op retry = op;
+			retry.attempt = static_cast<uint8_t>(op.attempt + 1);
+			retry.next_attempt_ms = slice_start_ms + BackoffMs(retry.attempt - 1);
+			if (!Enqueue(retry))
+			{
+				sd_status_.last_error = {code, fs_result, op.op_id, op.attempt};
+				sd_status_.last_error_time_ms = daisy::System::GetNow();
+				return false;
+			}
+			sd_status_.last_error = {code, fs_result, op.op_id, retry.attempt};
+			sd_status_.last_error_time_ms = daisy::System::GetNow();
+			return true;
+		};
 
 		switch (op.kind)
 		{
 			case OpKind::Mount:
 			{
+				++sd_counters_.mount_attempts;
 				mount_state_ = MountState::Mounting;
 				if (!sd_hw_inited_)
 				{
@@ -361,18 +523,11 @@ void StorageService::RunSlice(uint32_t budget_us)
 					(void)BSP_SD_Init();
 					sd_hw_inited_ = true;
 				}
-				if (!BSP_SD_IsDetected())
-				{
-					mount_state_ = MountState::NoCard;
-					Event ev = {};
-					ev.kind = EventKind::MountFail;
-					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
-					break;
-				}
 				const FRESULT res = f_mount(&fsi.GetSDFileSystem(), fsi.GetSDPath(), 1);
 				if (res == FR_OK)
 				{
 					mount_state_ = MountState::Mounted;
+					sd_status_.mounted = true;
 					Event ev = {};
 					ev.kind = EventKind::MountOk;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
@@ -380,6 +535,11 @@ void StorageService::RunSlice(uint32_t budget_us)
 				else
 				{
 					mount_state_ = MountState::Error;
+					sd_status_.mounted = false;
+					sd_status_.last_error = {SdErrorCode::MountFailed, res, op.op_id, op.attempt};
+					sd_status_.last_error_time_ms = daisy::System::GetNow();
+					++sd_counters_.mount_failures;
+					CancelAllOps(SdErrorCode::MountFailed);
 					Event ev = {};
 					ev.kind = EventKind::MountFail;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
@@ -398,6 +558,12 @@ void StorageService::RunSlice(uint32_t budget_us)
 				{
 					const FRESULT res = f_unlink(op.path);
 					ev.kind = (res == FR_OK) ? EventKind::DeleteOk : EventKind::DeleteFail;
+					if (res != FR_OK)
+					{
+						sd_status_.last_error = {SdErrorCode::WriteFailed, res, op.op_id, op.attempt};
+						sd_status_.last_error_time_ms = daisy::System::GetNow();
+						++sd_counters_.write_failures;
+					}
 				}
 				PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 				break;
@@ -428,6 +594,10 @@ void StorageService::RunSlice(uint32_t budget_us)
 				const FRESULT res = f_opendir(&g_scan_dir, scan_path_);
 				if (res != FR_OK)
 				{
+					if (retry_op(SdErrorCode::OpenFailed, res))
+					{
+						break;
+					}
 					Event ev = {};
 					ev.kind = EventKind::ScanDone;
 					ev.cookie = scan_cookie_;
@@ -446,9 +616,14 @@ void StorageService::RunSlice(uint32_t budget_us)
 					g_preview_open = false;
 				}
 				g_preview_cookie = op.cookie;
+				g_preview_deadline_ms = op.deadline_ms;
 				const FRESULT open_res = f_open(&g_preview_file, op.path, FA_READ);
 				if (open_res != FR_OK)
 				{
+					if (retry_op(SdErrorCode::OpenFailed, open_res))
+					{
+						break;
+					}
 					Event ev = {};
 					ev.kind = EventKind::PreviewOpenFail;
 					ev.cookie = g_preview_cookie;
@@ -463,6 +638,11 @@ void StorageService::RunSlice(uint32_t budget_us)
 				{
 					f_close(&g_preview_file);
 					g_preview_open = false;
+					if (retry_op(SdErrorCode::ReadFailed, -1))
+					{
+						break;
+					}
+					++sd_counters_.read_failures;
 					Event ev = {};
 					ev.kind = EventKind::PreviewOpenFail;
 					ev.cookie = g_preview_cookie;
@@ -540,6 +720,8 @@ void StorageService::RunSlice(uint32_t budget_us)
 				save_.sample_rate = (op.sample_rate == 0) ? 48000 : op.sample_rate;
 				save_.data_bytes = static_cast<uint32_t>(
 					save_.frames_total * save_.channels * sizeof(int16_t));
+				save_.start_ms = daisy::System::GetNow();
+				save_.deadline_ms = op.deadline_ms;
 				char save_name[32] = {};
 				if (!BuildNextSavePath(save_name,
 									   sizeof(save_name),
@@ -547,6 +729,8 @@ void StorageService::RunSlice(uint32_t budget_us)
 									   sizeof(save_.path),
 									   fsi.GetSDPath()))
 				{
+					sd_status_.last_error = {SdErrorCode::OpenFailed, -1, op.op_id, op.attempt};
+					sd_status_.last_error_time_ms = daisy::System::GetNow();
 					Event ev = {};
 					ev.kind = EventKind::SaveError;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
@@ -556,6 +740,12 @@ void StorageService::RunSlice(uint32_t budget_us)
 				const FRESULT open_res = f_open(&save_.file, save_.path, FA_WRITE | FA_CREATE_NEW);
 				if (open_res != FR_OK)
 				{
+					if (retry_op(SdErrorCode::OpenFailed, open_res))
+					{
+						break;
+					}
+					sd_status_.last_error = {SdErrorCode::OpenFailed, open_res, op.op_id, op.attempt};
+					sd_status_.last_error_time_ms = daisy::System::GetNow();
 					Event ev = {};
 					ev.kind = EventKind::SaveError;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
@@ -582,6 +772,13 @@ void StorageService::RunSlice(uint32_t budget_us)
 				if (wr != FR_OK || written != sizeof(header))
 				{
 					f_close(&save_.file);
+					if (retry_op(SdErrorCode::WriteFailed, wr))
+					{
+						break;
+					}
+					sd_status_.last_error = {SdErrorCode::WriteFailed, wr, op.op_id, op.attempt};
+					sd_status_.last_error_time_ms = daisy::System::GetNow();
+					++sd_counters_.write_failures;
 					Event ev = {};
 					ev.kind = EventKind::SaveError;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
@@ -611,6 +808,8 @@ void StorageService::RunSlice(uint32_t budget_us)
 				load_.dst_r = op.dst_r;
 				load_.max_frames = op.max_frames;
 				load_.cookie = op.cookie;
+				load_.start_ms = daisy::System::GetNow();
+				load_.deadline_ms = op.deadline_ms;
 				if (!op.path[0] || load_.dst_l == nullptr || load_.dst_r == nullptr)
 				{
 					Event ev = {};
@@ -622,6 +821,12 @@ void StorageService::RunSlice(uint32_t budget_us)
 				FRESULT res = f_open(&load_.file, op.path, FA_READ);
 				if (res != FR_OK)
 				{
+					if (retry_op(SdErrorCode::OpenFailed, res))
+					{
+						break;
+					}
+					sd_status_.last_error = {SdErrorCode::OpenFailed, res, op.op_id, op.attempt};
+					sd_status_.last_error_time_ms = daisy::System::GetNow();
 					Event ev = {};
 					ev.kind = EventKind::LoadError;
 					ev.cookie = load_.cookie;
@@ -635,6 +840,13 @@ void StorageService::RunSlice(uint32_t budget_us)
 					|| wav.num_channels > 2)
 				{
 					f_close(&load_.file);
+					if (retry_op(SdErrorCode::ReadFailed, -1))
+					{
+						break;
+					}
+					sd_status_.last_error = {SdErrorCode::ReadFailed, -1, op.op_id, op.attempt};
+					sd_status_.last_error_time_ms = daisy::System::GetNow();
+					++sd_counters_.read_failures;
 					Event ev = {};
 					ev.kind = EventKind::LoadError;
 					ev.cookie = load_.cookie;
@@ -700,7 +912,22 @@ void StorageService::RunSlice(uint32_t budget_us)
 	}
 	else
 	{
+		step_guard();
 		const uint32_t start_ms = daisy::System::GetNow();
+		if (g_preview_deadline_ms != 0 && start_ms > g_preview_deadline_ms)
+		{
+			f_close(&g_preview_file);
+			g_preview_open = false;
+			preview_preload_active_ = false;
+			sd_status_.last_error = {SdErrorCode::Timeout, -1, 0, 0};
+			sd_status_.last_error_time_ms = daisy::System::GetNow();
+			++sd_counters_.op_timeouts;
+			Event ev = {};
+			ev.kind = EventKind::PreviewReadError;
+			ev.cookie = g_preview_cookie;
+			PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
+			return;
+		}
 		const uint32_t budget_ms = (budget_us + 999) / 1000;
 		const size_t max_frames_per_slice = 2048;
 
@@ -748,6 +975,9 @@ void StorageService::RunSlice(uint32_t budget_us)
 					f_close(&g_preview_file);
 					g_preview_open = false;
 					preview_preload_active_ = false;
+					sd_status_.last_error = {SdErrorCode::ReadFailed, res, 0, 0};
+					sd_status_.last_error_time_ms = daisy::System::GetNow();
+					++sd_counters_.read_failures;
 					Event ev = {};
 					ev.kind = EventKind::PreviewReadError;
 					ev.cookie = g_preview_cookie;
@@ -761,6 +991,9 @@ void StorageService::RunSlice(uint32_t budget_us)
 						f_close(&g_preview_file);
 						g_preview_open = false;
 						preview_preload_active_ = false;
+						sd_status_.last_error = {SdErrorCode::ReadFailed, -1, 0, 0};
+						sd_status_.last_error_time_ms = daisy::System::GetNow();
+						++sd_counters_.read_failures;
 						Event ev = {};
 						ev.kind = EventKind::PreviewReadError;
 						ev.cookie = g_preview_cookie;
@@ -957,7 +1190,20 @@ void StorageService::RunSlice(uint32_t budget_us)
 	// Save write slice.
 	if (save_.active && save_.header_written)
 	{
+		step_guard();
 		const uint32_t start_ms = daisy::System::GetNow();
+		if (save_.deadline_ms != 0 && start_ms > save_.deadline_ms)
+		{
+			f_close(&save_.file);
+			save_.active = false;
+			sd_status_.last_error = {SdErrorCode::Timeout, -1, 0, 0};
+			sd_status_.last_error_time_ms = daisy::System::GetNow();
+			++sd_counters_.op_timeouts;
+			Event ev = {};
+			ev.kind = EventKind::SaveError;
+			PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
+			return;
+		}
 		const uint32_t budget_ms = (budget_us + 999) / 1000;
 		const size_t max_frames_per_slice = 8192;
 
@@ -1074,7 +1320,21 @@ void StorageService::RunSlice(uint32_t budget_us)
 	// Load read slice.
 	if (load_.active)
 	{
+		step_guard();
 		const uint32_t start_ms = daisy::System::GetNow();
+		if (load_.deadline_ms != 0 && start_ms > load_.deadline_ms)
+		{
+			f_close(&load_.file);
+			load_.active = false;
+			sd_status_.last_error = {SdErrorCode::Timeout, -1, 0, 0};
+			sd_status_.last_error_time_ms = daisy::System::GetNow();
+			++sd_counters_.op_timeouts;
+			Event ev = {};
+			ev.kind = EventKind::LoadError;
+			ev.cookie = load_.cookie;
+			PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
+			return;
+		}
 		const uint32_t budget_ms = (budget_us + 999) / 1000;
 		const size_t max_frames_per_slice = 1024;
 
