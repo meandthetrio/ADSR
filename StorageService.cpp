@@ -536,10 +536,12 @@ void StorageService::RunSlice(uint32_t budget_us)
 				{
 					mount_state_ = MountState::Error;
 					sd_status_.mounted = false;
-					sd_status_.last_error = {SdErrorCode::MountFailed, res, op.op_id, op.attempt};
+					const SdErrorCode code =
+						(res == FR_NO_FILESYSTEM) ? SdErrorCode::FsCorrupt : SdErrorCode::MountFailed;
+					sd_status_.last_error = {code, res, op.op_id, op.attempt};
 					sd_status_.last_error_time_ms = daisy::System::GetNow();
 					++sd_counters_.mount_failures;
-					CancelAllOps(SdErrorCode::MountFailed);
+					CancelAllOps(code);
 					Event ev = {};
 					ev.kind = EventKind::MountFail;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);

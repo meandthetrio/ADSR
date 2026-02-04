@@ -1386,6 +1386,10 @@ enum AudioEventBits : uint32_t
 };
 
 constexpr int kWaveCols = 128;
+constexpr size_t kLiveWaveWindowFrames = kSampleRateHz / 2;
+constexpr size_t kLiveWaveStride = (kLiveWaveWindowFrames / kWaveCols) > 0
+	? (kLiveWaveWindowFrames / kWaveCols)
+	: 1;
 
 struct WaveformUi
 {
@@ -1427,8 +1431,10 @@ volatile RecordState record_state = RecordState::Armed;
 volatile int32_t record_source_index = 0;
 volatile int32_t record_target_index = kRecordTargetSave;
 volatile uint32_t record_countdown_start_ms = 0;
+static uint32_t record_draw_next_ms = 0;
 volatile size_t record_pos = 0;
 static volatile size_t g_recorded_length_audio = 0;
+static volatile uint32_t g_record_start_ms = 0;
 volatile bool record_waveform_pending = false;
 volatile int32_t encoder_r_accum = 0;
 volatile bool encoder_r_button_press = false;
@@ -1988,17 +1994,22 @@ static void WaveformJobCancel()
 	g_wf_job.active = false;
 }
 
+static void ClearWaveformCache()
+{
+	for (int32_t i = 0; i < 128; ++i)
+	{
+		perform_waveform_cache.Min()[i] = 0;
+		perform_waveform_cache.Max()[i] = 0;
+	}
+}
+
 static void WaveformJobStart(SampleContext ctx)
 {
 	WaveformJobCancel();
 	g_wf_job.ctx = ctx;
 	if (!sample_loaded || sample_length == 0)
 	{
-		for (int32_t i = 0; i < 128; ++i)
-		{
-			perform_waveform_cache.Min()[i] = 0;
-			perform_waveform_cache.Max()[i] = 0;
-		}
+		ClearWaveformCache();
 		waveform_ready = true;
 		waveform_dirty = true;
 		return;
@@ -2366,7 +2377,7 @@ static void JobTick()
 		}
 		return;
 	}
-	constexpr uint32_t kWaveformBudget = 2048;
+	constexpr uint32_t kWaveformBudget = 8192;
 	constexpr uint32_t kListBudget = 6;
 	if (g_job.type == JobType::WaveformBuild)
 	{
@@ -2819,6 +2830,12 @@ static bool LoadSampleAtIndex(int32_t index)
 	char path[64];
 	BuildFilePath(wav_files[index], path, sizeof(path));
 	CopyString(loaded_sample_name, wav_files[index], kMaxWavNameLen);
+	if (load_context == LoadContext::Edt)
+	{
+		ClearWaveformCache();
+		waveform_ready = false;
+		waveform_dirty = true;
+	}
 	return LoadSampleFromPath(path);
 }
 
@@ -3732,7 +3749,7 @@ static void DrawLoadMenu(int32_t top_index, int32_t selected)
 
 	if (sd_fault && sd_fault_text)
 	{
-		DrawLoadMessage(sd_fault_text, "FAILED TO LOAD FILES");
+		DrawLoadMessage(sd_fault_text, "FAILED TO LOAD SD");
 		return;
 	}
 	if (!sd_mounted)
@@ -4270,6 +4287,12 @@ static void PrepareRecordingUiState()
 
     CopyString(loaded_sample_name, "UNSAVED AUDIO", kMaxWavNameLen);
 
+    {
+        daisy::ScopedIrqBlocker irq;
+        AudioUiResetLiveWaveform(g_audio_ui_state_buf[0]);
+        AudioUiResetLiveWaveform(g_audio_ui_state_buf[1]);
+    }
+
     // Publish "empty" runtime so audio never sees half-cleared state
     PublishRuntimeFromUi();
 }
@@ -4283,6 +4306,7 @@ static void StartRecordingAudioRT()
     playback_active = false;
 
     // Begin recording
+    g_record_start_ms = System::GetNow();
     g_audio_recording_active = true;
 }
 
@@ -4423,23 +4447,64 @@ static void DrawRecordRecording(const AudioUiState& ui_state)
 	display.SetCursor(0, 0);
 	display.WriteString("RECORDING: 5 SEC MAX", font, true);
 
+	uint32_t start_ms = 0;
+	{
+		daisy::ScopedIrqBlocker irq;
+		start_ms = g_record_start_ms;
+	}
+	const uint32_t now = System::GetNow();
+	const uint32_t elapsed_ms = (start_ms > 0 && now >= start_ms) ? (now - start_ms) : 0;
+	const float record_ms = (static_cast<float>(kRecordMaxFrames) * 1000.0f)
+		/ static_cast<float>(kSampleRateHz);
+	const float progress = Clamp01(static_cast<float>(elapsed_ms) / record_ms);
 	const int wave_top = font.FontHeight + 2;
 	const int wave_bottom = kDisplayH - 1;
-	const int mid = wave_top + (wave_bottom - wave_top) / 2;
+	const int wave_h = wave_bottom - wave_top;
+	const float mic_boost = (waveform_record_input == RecordInput::Mic) ? 1.5f : 1.0f;
+	static float mist_level[128] = {};
+	static uint32_t mist_seed = 0xA5B35791u;
 	for (int x = 0; x < 128; ++x)
 	{
-		int top = mid + ui_state.live_wave.minv[x];
-		int bottom = mid + ui_state.live_wave.maxv[x];
-		if (top > bottom)
+		int16_t minv = ui_state.live_wave.minv[x];
+		int16_t maxv = ui_state.live_wave.maxv[x];
+		int16_t abs_max = minv < 0 ? static_cast<int16_t>(-minv) : minv;
+		const int16_t abs2 = maxv < 0 ? static_cast<int16_t>(-maxv) : maxv;
+		if (abs2 > abs_max)
 		{
-			const int tmp = top;
-			top = bottom;
-			bottom = tmp;
+			abs_max = abs2;
 		}
-		top = ClampI(top, wave_top, wave_bottom);
-		bottom = ClampI(bottom, wave_top, wave_bottom);
-		display.DrawLine(x, top, x, bottom, true);
+		const float target = Clamp01((static_cast<float>(abs_max) / static_cast<float>(wave_h)) * mic_boost);
+		float v = mist_level[x];
+		const float rise = 0.35f;
+		const float fall = 0.45f;
+		if (target > v)
+		{
+			v += (target - v) * rise;
+		}
+		else
+		{
+			v += (target - v) * fall;
+		}
+		mist_level[x] = v;
+
+		const float gain = 1.6f;
+		const int h = ClampI(static_cast<int>(v * static_cast<float>(wave_h) * gain + 0.5f), 0, wave_h);
+		const int start = wave_bottom - h;
+		const int end = wave_bottom;
+		for (int y = start; y <= end; ++y)
+		{
+			mist_seed = mist_seed * 1664525u + 1013904223u;
+			const int frac = wave_bottom - y;
+			const int dens = 1 + (frac / 3);
+			if ((mist_seed % static_cast<uint32_t>(dens)) == 0u)
+			{
+				display.DrawPixel(x, y, true);
+			}
+		}
 	}
+	const int playhead_x = static_cast<int>(
+		progress * static_cast<float>(kDisplayW - 1) + 0.5f);
+	display.DrawLine(playhead_x, wave_top, playhead_x, kDisplayH - 1, true);
 	RequestDisplayUpdate();
 }
 
@@ -4655,8 +4720,10 @@ static float FltQFromFader(float value)
 
 static void DrawWaveform()
 {
-	if(!waveform_ready || !waveform_dirty)
+	if (!waveform_dirty)
+	{
 		return;
+	}
 
 	waveform_dirty = false;
 	display.Fill(false);
@@ -4801,6 +4868,15 @@ static void DrawEdtScreen()
 	else
 	{
 		title[0] = '\0';
+	}
+	if (!waveform_ready)
+	{
+		const FontDef font = Font_6x8;
+		display.Fill(false);
+		display.SetCursor(0, 0);
+		display.WriteString(title, font, true);
+		RequestDisplayUpdate();
+		return;
 	}
 	waveform_title = title;
 	DrawWaveform();
@@ -7899,13 +7975,20 @@ static float last_chorus_wow = -1.0f;
 					uiw.live_wave.peak = abs_s;
 					ui_wave_dirty = true;
 				}
-				const float norm = (uiw.live_wave.peak > 0)
-					? (28.0f / (static_cast<float>(uiw.live_wave.peak) * kSampleScale))
-					: 1.0f;
-				const float s_scaled = static_cast<float>(samp) * kSampleScale * norm;
+				static float live_scale_audio = 28.0f;
+				static RecordInput live_scale_input = RecordInput::LineIn;
+				if (record_pos == 0 || live_scale_input != record_input_audio)
+				{
+					const bool from_mic = (record_input_audio == RecordInput::Mic);
+					const float max_scale = from_mic ? kRecordWaveformScaleMaxMic : kRecordWaveformScaleMaxLine;
+					const float scale = max_scale;
+					live_scale_audio = 28.0f * scale * 1.1f;
+					live_scale_input = record_input_audio;
+				}
+				const float s_scaled = static_cast<float>(samp) * kSampleScale * live_scale_audio;
 				int16_t s_pix = static_cast<int16_t>(s_scaled);
 				const int32_t col = static_cast<int32_t>(
-					(static_cast<uint64_t>(record_pos) * 128U) / kRecordMaxFrames);
+					(record_pos / kLiveWaveStride) % kWaveCols);
 				if (col >= 0 && col < 128)
 				{
 					if (col != uiw.live_wave.last_col)
@@ -8677,7 +8760,6 @@ int main(void)
 	bool last_sd_mounted = false;
 	RecordState last_record_state = RecordState::Armed;
 	bool last_playback_active = false;
-	uint8_t last_wave_ui_idx = 0;
 	uint8_t last_audio_ui_idx = 0xFF;
 	uint32_t last_edt_playhead_ms = 0;
 	bool last_edt_playhead_active = false;
@@ -8858,7 +8940,6 @@ int main(void)
 					if (load_target_is_edt)
 					{
 						ui_mode = UiMode::Edt;
-						waveform_ready = true;
 						waveform_dirty = true;
 						request_length_redraw = true;
 					}
@@ -9527,7 +9608,6 @@ int main(void)
 					uint8_t ui_idx = 0;
 					const AudioUiState& uir = GetAudioUiStateSnapshot(ui_idx);
 					DrawRecordRecording(uir);
-					last_wave_ui_idx = ui_idx;
 				}
 				else
 				{
@@ -9799,7 +9879,7 @@ int main(void)
 					uint8_t ui_idx = 0;
 					const AudioUiState& uir = GetAudioUiStateSnapshot(ui_idx);
 					DrawRecordRecording(uir);
-					last_wave_ui_idx = ui_idx;
+					record_draw_next_ms = 0;
 				}
 				else if (current_state == RecordState::TargetSelect)
 				{
@@ -9816,10 +9896,11 @@ int main(void)
 		{
 			uint8_t ui_idx = 0;
 			const AudioUiState& uir = GetAudioUiStateSnapshot(ui_idx);
-			if (ui_idx != last_wave_ui_idx)
+			const uint32_t now = System::GetNow();
+			if (record_draw_next_ms == 0 || now >= record_draw_next_ms)
 			{
 				DrawRecordRecording(uir);
-				last_wave_ui_idx = ui_idx;
+				record_draw_next_ms = now + 33;
 			}
 		}
 		else if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::SourceSelect)
@@ -9890,12 +9971,20 @@ int main(void)
 		{
 			request_playback_stop_log = false;
 		}
-		if ((ui_mode == UiMode::Record && record_state == RecordState::Review)
-			|| (IsPerformUiMode(ui_mode) && sample_loaded)
-			|| (ui_mode == UiMode::FxDetail && sample_loaded)
-			|| (ui_mode == UiMode::Edt && sample_loaded)
-			|| (ui_mode == UiMode::Load && load_context == LoadContext::Edt)
-			|| (ui_mode == UiMode::Load && delete_mode))
+		uint8_t led_ui_idx = 0;
+		const AudioUiState& led_ui = GetAudioUiStateSnapshot(led_ui_idx);
+		const bool audio_playing = (led_ui.preview_active
+			|| led_ui.playback_active
+			|| led_ui.perform_voices_active);
+		const bool in_delete_menu = (ui_mode == UiMode::Load && delete_mode);
+		const bool in_wav_editor_list = (ui_mode == UiMode::Load && load_context == LoadContext::Edt);
+		const bool in_wav_editor_view = (ui_mode == UiMode::Edt);
+		const bool previewable = (wav_file_count > 0);
+		const bool solid_green = (in_delete_menu && previewable)
+			|| (in_wav_editor_list && previewable)
+			|| (in_wav_editor_view && sample_loaded)
+			|| (IsPerformUiMode(ui_mode) && sample_loaded);
+		if (audio_playing)
 		{
 			led1_phase_ms += 10.0f;
 			if (led1_phase_ms >= kLedBlinkPeriodMs)
@@ -9908,7 +9997,7 @@ int main(void)
 		else
 		{
 			led1_phase_ms = 0.0f;
-			led1_level = 0.0f;
+			led1_level = solid_green ? 1.0f : 0.0f;
 		}
 		hw.led1.Set(0.0f, led1_level, 0.0f);
 		{
