@@ -3863,19 +3863,6 @@ static void DrawPerformScreen(int32_t selected,
 		const bool cpu_on = (selected != kPerformAmpIndex);
 		display.SetCursor(x, 0);
 		display.WriteString(cpu_label, font, cpu_on);
-
-		char blk_label[12];
-		const float block_ms = 1000.0f * static_cast<float>(kAudioBlockSize)
-			/ static_cast<float>(kSampleRateHz);
-		snprintf(blk_label, sizeof(blk_label), "BLK %.2f", block_ms);
-		const int blk_w = static_cast<int>(StrLen(blk_label)) * font.FontWidth;
-		int bx = kDisplayW - blk_w - 1;
-		if (bx < 0)
-		{
-			bx = 0;
-		}
-		display.SetCursor(bx, font.FontHeight + 1);
-		display.WriteString(blk_label, font, cpu_on);
 	}
 #endif
 	RequestDisplayUpdate();

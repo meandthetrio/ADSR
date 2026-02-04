@@ -16,6 +16,10 @@ APP_TYPE = BOOT_QSPI
 # Includes FatFS source files within project.
 USE_FATFS = 1
 
+# Configurable audio block size (override via `make AUDIO_BLOCK_SIZE=96`)
+AUDIO_BLOCK_SIZE ?= 48
+CXXFLAGS += -DAUDIO_BLOCK_SIZE=$(AUDIO_BLOCK_SIZE)
+
 # Core location, and generic Makefile.
 SYSTEM_FILES_DIR = $(LIBDAISY_DIR)/core
 include $(SYSTEM_FILES_DIR)/Makefile
