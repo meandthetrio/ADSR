@@ -446,6 +446,15 @@ private:
 class BiquadLp
 {
 public:
+	struct Coeffs
+	{
+		float a0 = 0.0f;
+		float a1 = 0.0f;
+		float a2 = 0.0f;
+		float b1 = 0.0f;
+		float b2 = 0.0f;
+	};
+
 	void Reset()
 	{
 		z1_ = 0.0f;
@@ -487,6 +496,15 @@ public:
 		b2_ = a2 / a0;
 	}
 
+	void SetCoeffs(const Coeffs& c)
+	{
+		a0_ = c.a0;
+		a1_ = c.a1;
+		a2_ = c.a2;
+		b1_ = c.b1;
+		b2_ = c.b2;
+	}
+
 	float Process(float x)
 	{
 		const float y = (a0_ * x) + z1_;
@@ -504,6 +522,42 @@ private:
 	float z1_ = 0.0f;
 	float z2_ = 0.0f;
 };
+
+static BiquadLp::Coeffs ComputeBiquadLpCoeffs(float sample_rate, float freq, float q)
+{
+	if (freq < 20.0f)
+	{
+		freq = 20.0f;
+	}
+	const float nyq = sample_rate * 0.49f;
+	if (freq > nyq)
+	{
+		freq = nyq;
+	}
+	if (q < 0.001f)
+	{
+		q = 0.001f;
+	}
+	const float w0 = (2.0f * kPi * freq) / sample_rate;
+	const float cos_w0 = cosf(w0);
+	const float sin_w0 = sinf(w0);
+	const float alpha = sin_w0 / (2.0f * q);
+
+	const float b0 = (1.0f - cos_w0) * 0.5f;
+	const float b1 = 1.0f - cos_w0;
+	const float b2 = (1.0f - cos_w0) * 0.5f;
+	const float a0 = 1.0f + alpha;
+	const float a1 = -2.0f * cos_w0;
+	const float a2 = 1.0f - alpha;
+
+	BiquadLp::Coeffs c;
+	c.a0 = b0 / a0;
+	c.a1 = b1 / a0;
+	c.a2 = b2 / a0;
+	c.b1 = a1 / a0;
+	c.b2 = a2 / a0;
+	return c;
+}
 
 class OnePoleHp
 {
@@ -1237,6 +1291,7 @@ struct AudioParamsAudio
 	float amp_release_samples = 0.0f;
 	float flt_cutoff_hz = 0.0f;
 	float flt_q = 0.0f;
+	BiquadLp::Coeffs flt_coeffs = {};
 };
 
 static FxParamsAudio g_fx_params_buf[2];
@@ -1407,6 +1462,7 @@ static void BuildAndPublishAudioParamsAudio(const AudioParams &p, float out_sr)
 	ap.amp_release_samples = amp_release_ms * 0.001f * out_sr;
 	ap.flt_cutoff_hz = FltCutoffFromFader(p.flt_cutoff, out_sr);
 	ap.flt_q = FltQFromFader(p.flt_res);
+	ap.flt_coeffs = ComputeBiquadLpCoeffs(out_sr, ap.flt_cutoff_hz, ap.flt_q);
 
 	const uint8_t next = g_audio_params_audio_idx ^ 1;
 	g_audio_params_audio_buf[next] = ap;
@@ -7760,21 +7816,24 @@ static float last_chorus_wow = -1.0f;
 	const float amp_release_samples = ap.amp_release_samples;
 	const bool use_poly = (!record_active) && (perform_mode && rt.loaded);
 	const bool sample_stereo = (rt.channels == 2);
-	const float flt_cutoff_hz = ap.flt_cutoff_hz;
-	const float flt_q = ap.flt_q;
-	static float last_flt_cutoff = -1.0f;
-	static float last_flt_q = -1.0f;
-	if (flt_cutoff_hz != last_flt_cutoff || flt_q != last_flt_q)
+	static BiquadLp::Coeffs last_flt_coeffs = {};
+	static bool has_flt_coeffs = false;
+	if (!has_flt_coeffs
+		|| ap.flt_coeffs.a0 != last_flt_coeffs.a0
+		|| ap.flt_coeffs.a1 != last_flt_coeffs.a1
+		|| ap.flt_coeffs.a2 != last_flt_coeffs.a2
+		|| ap.flt_coeffs.b1 != last_flt_coeffs.b1
+		|| ap.flt_coeffs.b2 != last_flt_coeffs.b2)
 	{
 		for (int v = 0; v < kPerformVoiceCount; ++v)
 		{
-			perform_lpf_l1[v].Set(out_sr, flt_cutoff_hz, flt_q);
-			perform_lpf_l2[v].Set(out_sr, flt_cutoff_hz, flt_q);
-			perform_lpf_r1[v].Set(out_sr, flt_cutoff_hz, flt_q);
-			perform_lpf_r2[v].Set(out_sr, flt_cutoff_hz, flt_q);
+			perform_lpf_l1[v].SetCoeffs(ap.flt_coeffs);
+			perform_lpf_l2[v].SetCoeffs(ap.flt_coeffs);
+			perform_lpf_r1[v].SetCoeffs(ap.flt_coeffs);
+			perform_lpf_r2[v].SetCoeffs(ap.flt_coeffs);
 		}
-		last_flt_cutoff = flt_cutoff_hz;
-		last_flt_q = flt_q;
+		last_flt_coeffs = ap.flt_coeffs;
+		has_flt_coeffs = true;
 	}
 	int32_t fx_order[kPerformFaderCount];
 	for (int i = 0; i < kPerformFaderCount; ++i)
