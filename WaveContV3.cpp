@@ -68,7 +68,6 @@ constexpr int32_t kPerformFltIndex = 2;
 constexpr int32_t kPerformFxIndex = 3;
 constexpr uint32_t kFxChainIdleMs = 300;
 constexpr float kFxChainFadeMs = 20.0f;
-constexpr size_t kAudioBlockSize = 48;
 constexpr uint32_t kFxMapIntervalMs = 10;
 constexpr uint32_t kSdInitMinMs = 800;
 constexpr uint32_t kSdInitRetryMs = 300;
@@ -1553,6 +1552,9 @@ struct AudioUiState
 #if PERF_DIAGNOSTICS
 	float cpu_load_pct = 0.0f;
 	float cpu_load_peak_pct = 0.0f;
+	uint32_t callback_cycles_last = 0;
+	uint32_t callback_cycles_max = 0;
+	uint32_t callback_overruns = 0;
 #endif
 };
 
@@ -1588,6 +1590,9 @@ volatile bool request_length_redraw = false;
 static float cpu_load_ema = 0.0f;
 static volatile float cpu_load_pct = 0.0f;
 static volatile float cpu_load_peak_pct = 0.0f;
+static volatile uint32_t callback_cycles_last = 0;
+static volatile uint32_t callback_cycles_max = 0;
+static volatile uint32_t callback_overruns = 0;
 #endif
 volatile bool request_playhead_redraw = false;
 volatile bool button1_press = false;
@@ -3858,6 +3863,19 @@ static void DrawPerformScreen(int32_t selected,
 		const bool cpu_on = (selected != kPerformAmpIndex);
 		display.SetCursor(x, 0);
 		display.WriteString(cpu_label, font, cpu_on);
+
+		char blk_label[12];
+		const float block_ms = 1000.0f * static_cast<float>(kAudioBlockSize)
+			/ static_cast<float>(kSampleRateHz);
+		snprintf(blk_label, sizeof(blk_label), "BLK %.2f", block_ms);
+		const int blk_w = static_cast<int>(StrLen(blk_label)) * font.FontWidth;
+		int bx = kDisplayW - blk_w - 1;
+		if (bx < 0)
+		{
+			bx = 0;
+		}
+		display.SetCursor(bx, font.FontHeight + 1);
+		display.WriteString(blk_label, font, cpu_on);
 	}
 #endif
 	RequestDisplayUpdate();
@@ -7515,6 +7533,9 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	#if PERF_DIAGNOSTICS
 	uiw.cpu_load_pct = cpu_load_pct;
 	uiw.cpu_load_peak_pct = cpu_load_peak_pct;
+	uiw.callback_cycles_last = callback_cycles_last;
+	uiw.callback_cycles_max = callback_cycles_max;
+	uiw.callback_overruns = callback_overruns;
 	#endif
 	{
 		static uint8_t ui_phase_tick = 0;
@@ -8724,6 +8745,11 @@ audio_done:
 	#if PERF_DIAGNOSTICS
 	PERF_CYCLES_END(cyc_end);
 	const uint32_t cyc_used = cyc_end - cyc_start;
+	callback_cycles_last = cyc_used;
+	if (cyc_used > callback_cycles_max)
+	{
+		callback_cycles_max = cyc_used;
+	}
 	static uint32_t sys_clk_hz = 0;
 	if (sys_clk_hz == 0)
 	{
@@ -8738,6 +8764,10 @@ audio_done:
 	}
 	cpu_load_ema = (cpu_load_ema * 0.95f) + (load_pct * 0.05f);
 	cpu_load_pct = cpu_load_ema;
+	if (cyc_used > static_cast<uint32_t>(cycles_per_block))
+	{
+		callback_overruns++;
+	}
 	if (load_pct > cpu_load_peak_pct)
 	{
 		cpu_load_peak_pct = load_pct;
@@ -10224,7 +10254,7 @@ int main(void)
 		sample_mem_used_bytes = sample_mem_mgr.BytesUsed();
 		sample_mem_free_bytes = sample_mem_mgr.BytesFree();
 		waveform_cache_bytes = perform_waveform_cache.BytesUsed();
-		hw.UpdateLeds();
+ 		hw.UpdateLeds();
 		hw.DelayMs(1);
 	}
 }

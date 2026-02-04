@@ -14,6 +14,10 @@ constexpr SampleIOPolicy kPolicy = SampleIOPolicy::PreloadToRam;
 constexpr bool kPreviewMayStreamFromSd = (PREVIEW_STREAM_FROM_SD != 0);
 
 constexpr uint32_t kSampleRateHz = 48000;
+#ifndef AUDIO_BLOCK_SIZE
+#define AUDIO_BLOCK_SIZE 48
+#endif
+constexpr size_t kAudioBlockSize = static_cast<size_t>(AUDIO_BLOCK_SIZE);
 constexpr uint32_t kMaxSampleSeconds = 5;
 constexpr size_t kMaxSampleFrames =
 	static_cast<size_t>(kSampleRateHz) * static_cast<size_t>(kMaxSampleSeconds);
