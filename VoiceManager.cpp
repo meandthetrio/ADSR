@@ -16,14 +16,6 @@ int VoiceManager::SelectVoiceIndex(int32_t note)
 	{
 		return -1;
 	}
-	// Prefer same-note voice.
-	for (int i = 0; i < count_; ++i)
-	{
-		if (voices_[i].active && voices_[i].note == note)
-		{
-			return i;
-		}
-	}
 	// Prefer free voice.
 	for (int i = 0; i < count_; ++i)
 	{

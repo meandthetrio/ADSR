@@ -632,6 +632,15 @@ static void InitNoteRatioTable()
 	}
 }
 
+static void EnableFtz()
+{
+#if defined(__FPU_PRESENT) && (__FPU_PRESENT == 1)
+	uint32_t fpscr = __get_FPSCR();
+	fpscr |= (1u << 24);
+	__set_FPSCR(fpscr);
+#endif
+}
+
 DaisyPod    hw;
 PodDisplay  display;
 static bool g_display_update_pending = false;
@@ -1517,6 +1526,8 @@ enum AudioEventBits : uint32_t
 };
 
 constexpr int kWaveCols = 128;
+constexpr float kSilentAmp = 1.0e-4f;
+constexpr uint16_t kSilentSamplesToKill = 64;
 constexpr size_t kLiveWaveWindowFrames = kSampleRateHz / 2;
 constexpr size_t kLiveWaveStride = (kLiveWaveWindowFrames / kWaveCols) > 0
 	? (kLiveWaveWindowFrames / kWaveCols)
@@ -1553,6 +1564,9 @@ static AudioUiState g_audio_ui_state_buf[2];
 static volatile uint8_t g_audio_ui_state_idx = 0;
 static volatile bool g_audio_recording_active = false;
 static bool g_reset_voices_pending = false;
+static volatile int32_t g_active_voice_count = 0;
+static uint32_t g_voice_skip_count = 0;
+static uint32_t g_voice_kill_count = 0;
 static volatile float g_delay_time_alpha = 1.0f;
 static volatile float g_delay_param_alpha = 1.0f;
 static FxChainRuntime g_fx_chain_audio = {};
@@ -2634,14 +2648,7 @@ static bool IsPerformUiMode(UiMode mode)
 
 static bool AnyPerformVoiceActive()
 {
-	for (int v = 0; v < kPerformVoiceCount; ++v)
-	{
-		if (perform_voices[v].active)
-		{
-			return true;
-		}
-	}
-	return false;
+	return g_active_voice_count > 0;
 }
 
 static inline void ReleaseVoiceSample(PerformVoice& voice)
@@ -2651,6 +2658,32 @@ static inline void ReleaseVoiceSample(PerformVoice& voice)
 		sample_mem_mgr.Release(kPerformSampleId);
 		voice.sample_acquired = false;
 	}
+}
+
+static inline void DeactivateVoice(PerformVoice& voice)
+{
+	if (voice.active)
+	{
+		ReleaseVoiceSample(voice);
+		voice.active = false;
+		if (g_active_voice_count > 0)
+		{
+			--g_active_voice_count;
+		}
+	}
+	voice.releasing = false;
+	voice.sample_acquired = false;
+	voice.phase = 0.0f;
+	voice.rate = 1.0f;
+	voice.amp = 1.0f;
+	voice.env = 0.0f;
+	voice.release_start = 0.0f;
+	voice.release_pos = 0.0f;
+	voice.note = -1;
+	voice.offset = 0;
+	voice.length = 0;
+	voice.env_samples = 0;
+	voice.silent_samples = 0;
 }
 
 static void PublishRuntimeFromUi()
@@ -2859,21 +2892,9 @@ static void ResetPerformVoices()
 {
 	for (auto &voice : perform_voices)
 	{
-		ReleaseVoiceSample(voice);
-		voice.active = false;
-		voice.releasing = false;
-		voice.sample_acquired = false;
-		voice.phase = 0.0f;
-		voice.rate = 1.0f;
-		voice.amp = 1.0f;
-		voice.env = 0.0f;
-		voice.release_start = 0.0f;
-		voice.release_pos = 0.0f;
-		voice.note = -1;
-		voice.offset = 0;
-		voice.length = 0;
-		voice.env_samples = 0;
+		DeactivateVoice(voice);
 	}
+	g_active_voice_count = 0;
 	for (int i = 0; i < kPerformVoiceCount; ++i)
 	{
 		perform_lpf_l1[i].Reset();
@@ -6084,8 +6105,9 @@ static void StartPerformVoice(int32_t note)
 	}
 
 	PerformVoice& voice = perform_voices[voice_index];
-	ReleaseVoiceSample(voice);
+	DeactivateVoice(voice);
 	voice.active = true;
+	++g_active_voice_count;
 	voice.releasing = false;
 	if (sample_mem_mgr.Acquire(kPerformSampleId))
 	{
@@ -6103,6 +6125,7 @@ static void StartPerformVoice(int32_t note)
 	voice.release_start = 0.0f;
 	voice.release_pos = 0.0f;
 	voice.env_samples = 0;
+	voice.silent_samples = 0;
 	voice.start_tick = static_cast<uint32_t>(System::GetNow());
 	perform_lpf_l1[voice_index].Reset();
 	perform_lpf_l2[voice_index].Reset();
@@ -7814,6 +7837,12 @@ static float last_chorus_wow = -1.0f;
 	const bool amp_env_active = perform_mode;
 	const float amp_attack_samples = ap.amp_attack_samples;
 	const float amp_release_samples = ap.amp_release_samples;
+	const float inv_attack = (amp_attack_samples > 1.0f)
+		? (1.0f / amp_attack_samples)
+		: 0.0f;
+	const float inv_release = (amp_release_samples > 1.0f)
+		? (1.0f / amp_release_samples)
+		: 0.0f;
 	const bool use_poly = (!record_active) && (perform_mode && rt.loaded);
 	const bool sample_stereo = (rt.channels == 2);
 	static BiquadLp::Coeffs last_flt_coeffs = {};
@@ -8192,11 +8221,8 @@ static float last_chorus_wow = -1.0f;
 				float attack_env = 1.0f;
 				if (amp_attack_samples > 1.0f)
 				{
-					attack_env = static_cast<float>(playback_env_samples) / amp_attack_samples;
-					if (attack_env > 1.0f)
-					{
-						attack_env = 1.0f;
-					}
+					attack_env = static_cast<float>(playback_env_samples) * inv_attack;
+					if (attack_env > 1.0f) attack_env = 1.0f;
 				}
 				float release_env = 1.0f;
 				if (amp_release_samples > 1.0f && playback_rate > 0.0f)
@@ -8210,21 +8236,12 @@ static float last_chorus_wow = -1.0f;
 					{
 						remaining = (static_cast<float>(window_end) - playback_phase) / playback_rate;
 					}
-					if (remaining < 0.0f)
-					{
-						remaining = 0.0f;
-					}
-					release_env = remaining / amp_release_samples;
-					if (release_env > 1.0f)
-					{
-						release_env = 1.0f;
-					}
+					if (remaining < 0.0f) remaining = 0.0f;
+					release_env = remaining * inv_release;
+					if (release_env > 1.0f) release_env = 1.0f;
 				}
 				amp_env = (attack_env < release_env) ? attack_env : release_env;
-				if (amp_env < 0.0f)
-				{
-					amp_env = 0.0f;
-				}
+				if (amp_env < 0.0f) amp_env = 0.0f;
 			}
 			if (playback_release_active)
 			{
@@ -8350,6 +8367,7 @@ static float last_chorus_wow = -1.0f;
 				auto &voice = perform_voices[v];
 				if (!voice.active || voice.length == 0)
 				{
+					++g_voice_skip_count;
 					continue;
 				}
 				float env = 1.0f;
@@ -8357,7 +8375,7 @@ static float last_chorus_wow = -1.0f;
 				{
 					if (amp_attack_samples > 1.0f)
 					{
-						env = static_cast<float>(voice.env_samples) / amp_attack_samples;
+						env = static_cast<float>(voice.env_samples) * inv_attack;
 					}
 				}
 				if (env > 1.0f)
@@ -8369,7 +8387,7 @@ static float last_chorus_wow = -1.0f;
 					float noteoff_env = voice.release_start;
 					if (amp_release_samples > 1.0f)
 					{
-						noteoff_env *= (1.0f - (voice.release_pos / amp_release_samples));
+						noteoff_env *= (1.0f - (voice.release_pos * inv_release));
 					}
 					if (noteoff_env < 0.0f)
 					{
@@ -8385,6 +8403,20 @@ static float last_chorus_wow = -1.0f;
 					env = 0.0f;
 				}
 				voice.env = env;
+				if (env < kSilentAmp && voice.releasing)
+				{
+					voice.silent_samples++;
+					if (voice.silent_samples >= kSilentSamplesToKill)
+					{
+						DeactivateVoice(voice);
+						++g_voice_kill_count;
+						continue;
+					}
+				}
+				else
+				{
+					voice.silent_samples = 0;
+				}
 				if (voice.length == 1)
 				{
 					const size_t idx = voice.offset;
@@ -8402,21 +8434,13 @@ static float last_chorus_wow = -1.0f;
 						samp_r = perform_lpf_r2[v].Process(perform_lpf_r1[v].Process(samp_r));
 					}
 					add_voice(samp_l, samp_r);
-					ReleaseVoiceSample(voice);
-					voice.active = false;
-					voice.releasing = false;
-					voice.release_pos = 0.0f;
-					voice.env_samples = 0;
+					DeactivateVoice(voice);
 					continue;
 				}
 				const size_t idx_rel = static_cast<size_t>(voice.phase);
 				if (idx_rel + 1 >= voice.length)
 				{
-					ReleaseVoiceSample(voice);
-					voice.active = false;
-					voice.releasing = false;
-					voice.release_pos = 0.0f;
-					voice.env_samples = 0;
+					DeactivateVoice(voice);
 					continue;
 				}
 				const float frac = voice.phase - static_cast<float>(idx_rel);
@@ -8484,20 +8508,12 @@ static float last_chorus_wow = -1.0f;
 					voice.release_pos += 1.0f;
 					if (amp_release_samples > 1.0f && voice.release_pos >= amp_release_samples)
 					{
-						ReleaseVoiceSample(voice);
-						voice.active = false;
-						voice.releasing = false;
-						voice.release_pos = 0.0f;
-						voice.env_samples = 0;
+						DeactivateVoice(voice);
 					}
 				}
 				if (voice.phase >= static_cast<float>(voice.length - 1))
 				{
-					ReleaseVoiceSample(voice);
-					voice.active = false;
-					voice.releasing = false;
-					voice.release_pos = 0.0f;
-					voice.env_samples = 0;
+					DeactivateVoice(voice);
 				}
 			}
 		}
@@ -8755,6 +8771,7 @@ audio_done:
 int main(void)
 {
 	hw.Init();
+	EnableFtz();
 	InitSineTable();
 	InitNoteRatioTable();
 	#if PERF_DIAGNOSTICS

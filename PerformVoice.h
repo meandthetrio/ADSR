@@ -20,4 +20,5 @@ struct PerformVoice
 	size_t length = 0;
 	uint32_t env_samples = 0;
 	uint32_t start_tick = 0;
+	uint16_t silent_samples = 0;
 };
