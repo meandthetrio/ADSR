@@ -548,6 +548,7 @@ struct BitCrushState
 };
 
 static float g_sine_table[kSineTableSize + 1];
+static float g_note_ratio[128];
 
 static inline float SineTableLookup(float phase01)
 {
@@ -565,6 +566,15 @@ static void InitSineTable()
 	{
 		const float phase = static_cast<float>(i) / static_cast<float>(kSineTableSize);
 		g_sine_table[i] = sinf(kTwoPi * phase);
+	}
+}
+
+static void InitNoteRatioTable()
+{
+	for (int i = 0; i < 128; ++i)
+	{
+		const float semis = static_cast<float>(i - kBaseMidiNote);
+		g_note_ratio[i] = powf(2.0f, semis / 12.0f);
 	}
 }
 
@@ -1221,10 +1231,23 @@ struct FxParamsAudio
 	float reverb_gain = 1.0f;
 };
 
+struct AudioParamsAudio
+{
+	float amp_attack_samples = 0.0f;
+	float amp_release_samples = 0.0f;
+	float flt_cutoff_hz = 0.0f;
+	float flt_q = 0.0f;
+};
+
 static FxParamsAudio g_fx_params_buf[2];
 static volatile uint8_t g_fx_params_idx = 0;
+static AudioParamsAudio g_audio_params_audio_buf[2];
+static volatile uint8_t g_audio_params_audio_idx = 0;
 
 static int BitResoIndexFromValue(float value);
+static float AmpEnvMsFromFader(float value);
+static float FltCutoffFromFader(float value, float sample_rate);
+static float FltQFromFader(float value);
 extern volatile int32_t sat_mode;
 extern volatile int32_t chorus_mode;
 
@@ -1236,59 +1259,87 @@ static inline float Clamp01(float v)
 }
 
 // Build and publish g_fx_params_buf (heavy mapping; call at <=50-100Hz).
-static void BuildAndPublishFxParamsAudio(const AudioParams &p, float out_sr)
+struct FxParamsUi
+{
+	float sat_drive;
+	float sat_mix;
+	float sat_bump;
+	float bit_reso;
+	float chorus_depth;
+	float chorus_mix;
+	float chorus_rate;
+	float chorus_wow;
+	float tape_rate;
+	float delay_wet;
+	float delay_time;
+	float delay_feedback;
+	float delay_spread;
+	float delay_freeze;
+	float reverb_wet;
+	float reverb_pre;
+	float reverb_damp;
+	float reverb_decay;
+};
+
+static FxParamsUi BuildFxParamsUi(const AudioParams &p)
+{
+	FxParamsUi ui = {};
+	ui.sat_drive = Clamp01(p.sat_drive);
+	ui.sat_mix = Clamp01(p.fx_s_wet);
+	ui.sat_bump = Clamp01(p.sat_tape_bump);
+	ui.bit_reso = Clamp01(p.sat_bit_reso);
+	ui.chorus_depth = Clamp01(p.mod_depth);
+	ui.chorus_mix = Clamp01(p.fx_c_wet);
+	ui.chorus_rate = Clamp01(p.chorus_rate);
+	ui.chorus_wow = Clamp01(p.chorus_wow);
+	ui.tape_rate = Clamp01(p.tape_rate);
+	ui.delay_wet = Clamp01(p.delay_wet);
+	ui.delay_time = Clamp01(p.delay_time);
+	ui.delay_feedback = Clamp01(p.delay_feedback);
+	ui.delay_spread = Clamp01(p.delay_spread);
+	ui.delay_freeze = Clamp01(p.delay_freeze);
+	ui.reverb_wet = Clamp01(p.reverb_wet);
+	ui.reverb_pre = Clamp01(p.reverb_pre);
+	ui.reverb_damp = Clamp01(p.reverb_damp);
+	ui.reverb_decay = Clamp01(p.reverb_decay);
+	return ui;
+}
+
+static FxParamsAudio MapFxParamsUiToAudio(const FxParamsUi &ui, float out_sr)
 {
 	FxParamsAudio fx = {};
-	const float sat_drive = Clamp01(p.sat_drive);
-	const float sat_mix = Clamp01(p.fx_s_wet);
-	const float sat_bump = Clamp01(p.sat_tape_bump);
-	const float bit_reso = Clamp01(p.sat_bit_reso);
-	const float chorus_depth = Clamp01(p.mod_depth);
-	const float chorus_mix = Clamp01(p.fx_c_wet);
-	const float chorus_rate = Clamp01(p.chorus_rate);
-	const float chorus_wow = Clamp01(p.chorus_wow);
-	const float tape_rate = Clamp01(p.tape_rate);
-	const float delay_wet = Clamp01(p.delay_wet);
-	const float delay_time = Clamp01(p.delay_time);
-	const float delay_feedback = Clamp01(p.delay_feedback);
-	const float delay_spread = Clamp01(p.delay_spread);
-	const float delay_freeze = Clamp01(p.delay_freeze);
-	const float reverb_wet = Clamp01(p.reverb_wet);
-	const float reverb_pre = Clamp01(p.reverb_pre);
-	const float reverb_damp = Clamp01(p.reverb_damp);
-	const float reverb_decay = Clamp01(p.reverb_decay);
 
 	// Saturation / bitcrush
 	fx.sat_mode = sat_mode;
-	fx.sat_mix = sat_mix;
-	fx.sat_bump = sat_bump;
-	fx.sat_drive_amt = powf(sat_drive, 0.7f);
+	fx.sat_mix = ui.sat_mix;
+	fx.sat_bump = ui.sat_bump;
+	fx.sat_drive_amt = powf(ui.sat_drive, 0.7f);
 	{
-		const int bits_idx = BitResoIndexFromValue(bit_reso);
+		const int bits_idx = BitResoIndexFromValue(ui.bit_reso);
 		const int bits = kBitResoSteps[bits_idx];
 		fx.bit_step = 1.0f / powf(2.0f, static_cast<float>(bits - 1));
 	}
 
 	// Chorus / tape
 	fx.chorus_mode = chorus_mode;
-	fx.chorus_mix = chorus_mix;
+	fx.chorus_mix = ui.chorus_mix;
 	{
-		const float depth_curve = chorus_depth * chorus_depth;
+		const float depth_curve = ui.chorus_depth * ui.chorus_depth;
 		const float depth_scale = kChorusMaxDepth * 1.2f;
 		fx.chorus_depth_mapped = depth_curve * depth_scale;
 	}
 	{
-		const float rate_curve = chorus_rate * chorus_rate;
+		const float rate_curve = ui.chorus_rate * ui.chorus_rate;
 		fx.chorus_rate_hz = kChorusRateMinHz + rate_curve * (kChorusRateMaxHz - kChorusRateMinHz);
 	}
-	fx.chorus_wow = chorus_wow;
-	fx.tape_rate = tape_rate;
-	fx.tape_drop_amt_mapped = (chorus_wow > 0.0f) ? powf(chorus_wow, 0.6f) : 0.0f;
+	fx.chorus_wow = ui.chorus_wow;
+	fx.tape_rate = ui.tape_rate;
+	fx.tape_drop_amt_mapped = (ui.chorus_wow > 0.0f) ? powf(ui.chorus_wow, 0.6f) : 0.0f;
 
 	// Delay mapping
-	fx.delay_wet = delay_wet;
+	fx.delay_wet = ui.delay_wet;
 	{
-		const float curve = delay_time * delay_time;
+		const float curve = ui.delay_time * ui.delay_time;
 		float time_ms = kDelayTimeMinMs + curve * (kDelayTimeMaxMs - kDelayTimeMinMs);
 		float samples = time_ms * 0.001f * out_sr;
 		const float max_samp = static_cast<float>(kDelayMaxSamples - 1);
@@ -1296,28 +1347,28 @@ static void BuildAndPublishFxParamsAudio(const AudioParams &p, float out_sr)
 		if (samples < 1.0f) samples = 1.0f;
 		fx.delay_time_samples = samples;
 	}
-	fx.delay_feedback = delay_feedback;
+	fx.delay_feedback = ui.delay_feedback;
 	if (fx.delay_feedback > kDelayFeedbackMax)
 	{
 		fx.delay_feedback = kDelayFeedbackMax;
 	}
-	fx.delay_spread = delay_spread;
-	fx.delay_freeze = delay_freeze;
+	fx.delay_spread = ui.delay_spread;
+	fx.delay_freeze = ui.delay_freeze;
 
 	// Reverb mapping
-	fx.reverb_wet = reverb_wet;
+	fx.reverb_wet = ui.reverb_wet;
 	fx.reverb_gain = 1.0f;
 	{
 		const float decay_ms = kReverbDecayMinMs
-			+ reverb_decay * reverb_decay * (kReverbDecayMaxMs - kReverbDecayMinMs);
+			+ ui.reverb_decay * ui.reverb_decay * (kReverbDecayMaxMs - kReverbDecayMinMs);
 		const float decay_samples = decay_ms * 0.001f * out_sr;
-		if (reverb_decay >= 0.999f) fx.reverb_release = 1.0f;
+		if (ui.reverb_decay >= 0.999f) fx.reverb_release = 1.0f;
 		else if (decay_samples > 1.0f) fx.reverb_release = expf(-1.0f / decay_samples);
 		else fx.reverb_release = 0.0f;
 	}
-	fx.reverb_feedback = (reverb_decay >= 0.999f) ? 0.99f : kReverbFeedback;
+	fx.reverb_feedback = (ui.reverb_decay >= 0.999f) ? 0.99f : kReverbFeedback;
 	{
-		const float damp_curve = reverb_damp * 1.6f;
+		const float damp_curve = ui.reverb_damp * 1.6f;
 		float rev_lp = kReverbDampMaxHz * powf(kReverbDampMinHz / kReverbDampMaxHz, damp_curve);
 		const float rev_lp_max = out_sr * 0.49f;
 		if (rev_lp > rev_lp_max) rev_lp = rev_lp_max;
@@ -1325,19 +1376,43 @@ static void BuildAndPublishFxParamsAudio(const AudioParams &p, float out_sr)
 		fx.reverb_lp_hz = rev_lp;
 	}
 	{
-		const float pre_curve = powf(reverb_pre, 3.0f);
+		const float pre_curve = powf(ui.reverb_pre, 3.0f);
 		float samples = pre_curve * (kReverbPreDelayMaxMs * 0.001f * out_sr);
 		const float max_samp = static_cast<float>(kReverbPreDelayMaxSamples - 1);
 		if (samples > max_samp) samples = max_samp;
 		if (samples < 0.0f) samples = 0.0f;
 		fx.reverb_predelay_samples = samples;
 	}
+	return fx;
+}
 
+static void BuildAndPublishFxParamsAudio(const AudioParams &p, float out_sr)
+{
+	const FxParamsUi ui = BuildFxParamsUi(p);
+	const FxParamsAudio fx = MapFxParamsUiToAudio(ui, out_sr);
 	const uint8_t next = g_fx_params_idx ^ 1;
 	g_fx_params_buf[next] = fx;
 	{
 		daisy::ScopedIrqBlocker irq;
 		g_fx_params_idx = next;
+	}
+}
+
+static void BuildAndPublishAudioParamsAudio(const AudioParams &p, float out_sr)
+{
+	AudioParamsAudio ap = {};
+	const float amp_attack_ms = AmpEnvMsFromFader(p.amp_attack);
+	const float amp_release_ms = AmpEnvMsFromFader(p.amp_release);
+	ap.amp_attack_samples = amp_attack_ms * 0.001f * out_sr;
+	ap.amp_release_samples = amp_release_ms * 0.001f * out_sr;
+	ap.flt_cutoff_hz = FltCutoffFromFader(p.flt_cutoff, out_sr);
+	ap.flt_q = FltQFromFader(p.flt_res);
+
+	const uint8_t next = g_audio_params_audio_idx ^ 1;
+	g_audio_params_audio_buf[next] = ap;
+	{
+		daisy::ScopedIrqBlocker irq;
+		g_audio_params_audio_idx = next;
 	}
 }
 
@@ -1470,6 +1545,7 @@ volatile int32_t chorus_mode = 0;
 volatile float chorus_wow = 0.5f;
 volatile float tape_rate = 0.5f;
 volatile bool fx_params_dirty = true;
+volatile bool audio_params_dirty = true;
 static bool sat_params_initialized = false;
 static bool reverb_params_initialized = false;
 static bool delay_params_initialized = false;
@@ -2247,12 +2323,19 @@ static void UpdateSmoothedParamsPerTick()
 	PublishAudioParamsFromUi(p);
 	{
 		static uint32_t next_fx_map_ms = 0;
+		static uint32_t next_audio_map_ms = 0;
 		const uint32_t now = System::GetNow();
 		if (fx_params_dirty && (int32_t)(now - next_fx_map_ms) >= 0)
 		{
 			BuildAndPublishFxParamsAudio(p, hw.AudioSampleRate());
 			fx_params_dirty = false;
 			next_fx_map_ms = now + kFxMapIntervalMs;
+		}
+		if (audio_params_dirty && (int32_t)(now - next_audio_map_ms) >= 0)
+		{
+			BuildAndPublishAudioParamsAudio(p, hw.AudioSampleRate());
+			audio_params_dirty = false;
+			next_audio_map_ms = now + kFxMapIntervalMs;
 		}
 	}
 
@@ -2277,6 +2360,13 @@ static void UpdateSmoothedParamsPerTick()
 		|| !sm_reverb_decay.IsNearTarget())
 	{
 		fx_params_dirty = true;
+	}
+	if (!sm_amp_attack.IsNearTarget()
+		|| !sm_amp_release.IsNearTarget()
+		|| !sm_flt_cutoff.IsNearTarget()
+		|| !sm_flt_res.IsNearTarget())
+	{
+		audio_params_dirty = true;
 	}
 }
 
@@ -5820,6 +5910,21 @@ static void ApplyPlaybackReverseAudio(bool reverse)
 	}
 }
 
+// Audio hot guard: forbid heavy math in audio callback path.
+#define AUDIO_HOT_GUARD 1
+#if AUDIO_HOT_GUARD
+#define powf(...) AUDIO_HOT_DO_NOT_USE_powf
+#define expf(...) AUDIO_HOT_DO_NOT_USE_expf
+#define logf(...) AUDIO_HOT_DO_NOT_USE_logf
+#define sinf(...) AUDIO_HOT_DO_NOT_USE_sinf
+#define cosf(...) AUDIO_HOT_DO_NOT_USE_cosf
+#define sqrtf(...) AUDIO_HOT_DO_NOT_USE_sqrtf
+#define tanf(...) AUDIO_HOT_DO_NOT_USE_tanf
+#define atanf(...) AUDIO_HOT_DO_NOT_USE_atanf
+#define asinf(...) AUDIO_HOT_DO_NOT_USE_asinf
+#define acosf(...) AUDIO_HOT_DO_NOT_USE_acosf
+#endif
+
 static void StartPlaybackAudio(uint8_t note, bool apply_pitch, bool reverse_playback)
 {
 	const SampleRuntime rt = g_rt_buf[g_rt_active_idx];
@@ -5848,8 +5953,8 @@ static void StartPlaybackAudio(uint8_t note, bool apply_pitch, bool reverse_play
 	playback_release_active = false;
 	playback_release_pos = 0.0f;
 	playback_release_start = 0.0f;
-	const float semis = apply_pitch ? static_cast<float>(note - kBaseMidiNote) : 0.0f;
-	const float pitch = powf(2.0f, semis / 12.0f);
+	const uint8_t idx = (note < 128) ? note : 127;
+	const float pitch = apply_pitch ? g_note_ratio[idx] : 1.0f;
 	const float sr = (rt.rate == 0) ? 48000.0f : static_cast<float>(rt.rate);
 	playback_rate = pitch * (sr / hw.AudioSampleRate());
 	playback_phase = static_cast<float>(reverse_playback ? (window_end - 1) : window_start);
@@ -5948,8 +6053,8 @@ static void StartPerformVoice(int32_t note)
 	perform_lpf_r1[voice_index].Reset();
 	perform_lpf_r2[voice_index].Reset();
 	const float sr = (rt.rate == 0) ? 48000.0f : static_cast<float>(rt.rate);
-	const float semis = static_cast<float>(note - kBaseMidiNote);
-	const float pitch = powf(2.0f, semis / 12.0f);
+	const uint8_t idx = (note >= 0 && note < 128) ? static_cast<uint8_t>(note) : 127;
+	const float pitch = g_note_ratio[idx];
 	voice.rate = pitch * (sr / hw.AudioSampleRate());
 	voice.offset = window_start;
 	voice.length = window_end - window_start;
@@ -7642,18 +7747,21 @@ static float last_chorus_wow = -1.0f;
 		delay_line_r.SetDelay(delay_time_smoothed);
 		last_delay_time = delay_time_smoothed;
 	}
+	AudioParamsAudio ap;
+	{
+		daisy::ScopedIrqBlocker irq;
+		ap = g_audio_params_audio_buf[g_audio_params_audio_idx];
+	}
 	const bool perform_mode = (flags_bits & kFlagInPerformMode) != 0;
 	const bool main_mode = (flags_bits & kFlagInMainMode) != 0;
 	const bool fx_allowed = (flags_bits & kFlagFxAllowed) != 0;
 	const bool amp_env_active = perform_mode;
-	const float amp_attack_ms = AmpEnvMsFromFader(params.amp_attack);
-	const float amp_release_ms = AmpEnvMsFromFader(params.amp_release);
-	const float amp_attack_samples = amp_attack_ms * 0.001f * out_sr;
-	const float amp_release_samples = amp_release_ms * 0.001f * out_sr;
+	const float amp_attack_samples = ap.amp_attack_samples;
+	const float amp_release_samples = ap.amp_release_samples;
 	const bool use_poly = (!record_active) && (perform_mode && rt.loaded);
 	const bool sample_stereo = (rt.channels == 2);
-	const float flt_cutoff_hz = FltCutoffFromFader(params.flt_cutoff, out_sr);
-	const float flt_q = FltQFromFader(params.flt_res);
+	const float flt_cutoff_hz = ap.flt_cutoff_hz;
+	const float flt_q = ap.flt_q;
 	static float last_flt_cutoff = -1.0f;
 	static float last_flt_q = -1.0f;
 	if (flt_cutoff_hz != last_flt_cutoff || flt_q != last_flt_q)
@@ -8571,10 +8679,25 @@ audio_done:
 	request_playhead_redraw = true;
 }
 
+#if AUDIO_HOT_GUARD
+#undef powf
+#undef expf
+#undef logf
+#undef sinf
+#undef cosf
+#undef sqrtf
+#undef tanf
+#undef atanf
+#undef asinf
+#undef acosf
+#undef AUDIO_HOT_GUARD
+#endif
+
 int main(void)
 {
 	hw.Init();
 	InitSineTable();
+	InitNoteRatioTable();
 	#if PERF_DIAGNOSTICS
 	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
 	DWT->CYCCNT = 0;
