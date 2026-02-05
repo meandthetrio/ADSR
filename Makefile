@@ -4,7 +4,7 @@ TARGET = WaveContV3
 USE_DAISYSP_LGPL = 1
 
 # Sources
-CPP_SOURCES = WaveContV3.cpp StorageService.cpp SampleMemoryManager.cpp VoiceManager.cpp WaveformCache.cpp
+CPP_SOURCES = WaveContV3.cpp StorageService.cpp SampleMemoryManager.cpp VoiceManager.cpp WaveformCache.cpp audio_engine.cpp ui.cpp
 
 # Library Locations
 LIBDAISY_DIR = ../../libDaisy/
