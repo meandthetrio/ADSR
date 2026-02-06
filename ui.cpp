@@ -374,7 +374,7 @@ extern BiquadLp perform_lpf_l1[];
 extern BiquadLp perform_lpf_l2[];
 extern BiquadLp perform_lpf_r1[];
 extern BiquadLp perform_lpf_r2[];
-extern WaveformCache perform_waveform_cache;
+WaveformCache perform_waveform_cache;
 extern bool g_reset_voices_pending;
 extern WaveformJob g_wf_job;
 extern FileListJob g_list_job;

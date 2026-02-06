@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include "ff.h"
 
 class StorageService
 {
@@ -164,6 +163,8 @@ public:
 private:
 	static constexpr size_t kNameMaxLen = 32;
 	static constexpr size_t kPathMaxLen = 64;
+	struct SaveState;
+	struct LoadState;
 
 	Op op_queue_[kOpQueueSize];
 	Event event_queue_[kEventQueueSize];
@@ -195,44 +196,8 @@ private:
 	size_t preview_preload_target_frames_ = 0;
 	bool preview_preload_active_ = false;
 
-	struct SaveState
-	{
-		bool active = false;
-		bool header_written = false;
-		bool done = false;
-		FIL file = {};
-		const int16_t* src_l = nullptr;
-		const int16_t* src_r = nullptr;
-		size_t frames_total = 0;
-		size_t frames_written = 0;
-		uint16_t channels = 0;
-		uint32_t sample_rate = 0;
-		uint32_t data_bytes = 0;
-		uint32_t start_ms = 0;
-		uint32_t deadline_ms = 0;
-		char path[kPathMaxLen] = {};
-	};
-
-	SaveState save_;
-
-	struct LoadState
-	{
-		bool active = false;
-		FIL file = {};
-		int16_t* dst_l = nullptr;
-		int16_t* dst_r = nullptr;
-		size_t max_frames = 0;
-		size_t frames_total = 0;
-		size_t frames_loaded = 0;
-		uint16_t channels = 0;
-		uint32_t sample_rate = 0;
-		uint32_t data_offset = 0;
-		uint16_t cookie = 0;
-		uint32_t start_ms = 0;
-		uint32_t deadline_ms = 0;
-	};
-
-	LoadState load_;
+	SaveState* save_ = nullptr;
+	LoadState* load_ = nullptr;
 
 	int16_t* preview_pp_a_ = nullptr;
 	int16_t* preview_pp_b_ = nullptr;

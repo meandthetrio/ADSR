@@ -99,45 +99,53 @@ extern AudioParamsAudio g_audio_params_audio_buf[2];
 extern volatile uint8_t g_audio_params_audio_idx;
 extern volatile float g_delay_time_alpha;
 extern volatile float g_delay_param_alpha;
-extern int16_t* sample_buffer_l;
-extern int16_t* sample_buffer_r;
-extern SampleMemoryManager sample_mem_mgr;
-extern PerformVoice perform_voices[];
-extern BiquadLp perform_lpf_l1[];
-extern BiquadLp perform_lpf_l2[];
-extern BiquadLp perform_lpf_r1[];
-extern BiquadLp perform_lpf_r2[];
-extern ReverbSc reverb;
-extern DelayLine<float, kDelayMaxSamples> delay_line_l;
-extern DelayLine<float, kDelayMaxSamples> delay_line_r;
-extern DelayLine<float, kReverbPreDelayMaxSamples> reverb_predelay_l;
-extern DelayLine<float, kReverbPreDelayMaxSamples> reverb_predelay_r;
-extern ChorusEngine chorus_l;
-extern ChorusEngine chorus_r;
-extern TapeSaturator sat_l;
-extern TapeSaturator sat_r;
-extern BitCrushState g_sat_bit_state;
+DSY_SDRAM_BSS int16_t perform_sample_buffer_l[kMaxSampleFrames];
+DSY_SDRAM_BSS int16_t perform_sample_buffer_r[kMaxSampleFrames];
+int16_t* sample_buffer_l = perform_sample_buffer_l;
+int16_t* sample_buffer_r = perform_sample_buffer_r;
+SampleMemoryManager sample_mem_mgr(perform_sample_buffer_l, kPerformSampleRamBudgetBytes);
+VoiceManager voice_mgr;
+
+DTCM_MEM_SECTION PerformVoice perform_voices[kPerformVoiceCount];
+DTCM_MEM_SECTION BiquadLp perform_lpf_l1[kPerformVoiceCount];
+DTCM_MEM_SECTION BiquadLp perform_lpf_l2[kPerformVoiceCount];
+DTCM_MEM_SECTION BiquadLp perform_lpf_r1[kPerformVoiceCount];
+DTCM_MEM_SECTION BiquadLp perform_lpf_r2[kPerformVoiceCount];
+
+ReverbSc reverb;
+DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_l;
+DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_r;
+DelayLine<float, kReverbPreDelayMaxSamples> DSY_SDRAM_BSS reverb_predelay_l;
+DelayLine<float, kReverbPreDelayMaxSamples> DSY_SDRAM_BSS reverb_predelay_r;
+DTCM_MEM_SECTION ChorusEngine chorus_l;
+DTCM_MEM_SECTION ChorusEngine chorus_r;
+DTCM_MEM_SECTION TapeSaturator sat_l;
+DTCM_MEM_SECTION TapeSaturator sat_r;
+DTCM_MEM_SECTION BitCrushState g_sat_bit_state;
+
+alignas(32) int16_t preview_buffer[kPreviewBufferFrames];
+#if !STORAGE_SERVICE_PREVIEW_STREAM
+alignas(32) __attribute__((unused)) static int16_t preview_read_buf[kPreviewReadFrames * 2];
+#endif
+#if STORAGE_SERVICE_PREVIEW_STREAM
+alignas(32) int16_t preview_pp_buf[2][kPreviewPpFrames];
+DSY_SDRAM_BSS int16_t preview_preload_buf[kPreviewPreloadFrames];
+#endif
 #if STORAGE_SERVICE_PREVIEW_STREAM
 extern volatile bool preview_preload_active;
 extern volatile size_t preview_preload_frames;
-extern int16_t preview_preload_buf[];
-extern int16_t preview_pp_buf[2][kPreviewPpFrames];
 extern volatile uint8_t preview_pp_ready[2];
 extern volatile uint8_t preview_pp_active;
 extern volatile uint32_t preview_pp_pos;
 extern volatile uint32_t preview_underrun_count;
 extern volatile uint32_t preview_rb_min_level;
 #endif
-extern int16_t preview_buffer[];
 extern void PushAudioEvent(uint32_t bits);
 extern void ResetPerformVoices();
 extern void StartRecordingAudioRT();
-extern void ApplyPlaybackReverseAudio(bool reverse);
 extern void StartPlaybackAudio(uint8_t note, bool apply_pitch, bool reverse_playback);
 extern void StopPlaybackAudio(uint8_t note, bool apply_release);
 extern void StopPlaybackAllAudio();
-extern void StartPerformVoice(int32_t note);
-extern void StopPerformVoice(int32_t note);
 extern void DeactivateVoice(PerformVoice& voice);
 extern void AudioUiResetLiveWaveform(AudioUiState& uiw);
 extern size_t PreviewAvailableFrames(size_t read_idx, size_t write_idx);
@@ -222,6 +230,154 @@ void ResetPerformVoices()
 		perform_lpf_l2[i].Reset();
 		perform_lpf_r1[i].Reset();
 		perform_lpf_r2[i].Reset();
+	}
+}
+
+void ApplyPlaybackReverseAudio(bool reverse)
+{
+	if (reverse == playback_reverse_audio)
+	{
+		return;
+	}
+	playback_reverse_audio = reverse;
+
+	const SampleRuntime rt = g_rt_buf[g_rt_active_idx];
+	if (!rt.loaded || rt.length == 0 || rt.l == nullptr)
+	{
+		return;
+	}
+	size_t window_start = rt.play_start;
+	size_t window_end = rt.play_end;
+	if (window_end > rt.length || window_end == 0)
+	{
+		window_end = rt.length;
+	}
+	if (window_end <= window_start)
+	{
+		window_start = 0;
+		window_end = rt.length;
+	}
+	if (window_end <= window_start + 1)
+	{
+		return;
+	}
+	const float window_len = static_cast<float>(window_end - window_start - 1);
+	const float rel = playback_phase - static_cast<float>(window_start);
+	playback_phase = static_cast<float>(window_start) + (window_len - rel);
+	if (playback_phase < static_cast<float>(window_start))
+	{
+		playback_phase = static_cast<float>(window_start);
+	}
+	if (playback_phase > static_cast<float>(window_end - 1))
+	{
+		playback_phase = static_cast<float>(window_end - 1);
+	}
+	for (auto &voice : perform_voices)
+	{
+		if (!voice.active || voice.length <= 1)
+		{
+			continue;
+		}
+		const float vlen = static_cast<float>(voice.length - 1);
+		voice.phase = vlen - voice.phase;
+		if (voice.phase < 0.0f)
+		{
+			voice.phase = 0.0f;
+		}
+		if (voice.phase > vlen)
+		{
+			voice.phase = vlen;
+		}
+	}
+}
+
+void StartPerformVoice(int32_t note)
+{
+	const SampleRuntime rt = g_rt_buf[g_rt_active_idx];
+	size_t window_start = 0;
+	size_t window_end = 0;
+	if (!rt.loaded || rt.length == 0 || rt.l == nullptr)
+	{
+		return;
+	}
+	window_start = rt.play_start;
+	window_end = rt.play_end;
+	if (window_end > rt.length || window_end == 0)
+	{
+		window_end = rt.length;
+	}
+	if (window_end <= window_start)
+	{
+		window_start = 0;
+		window_end = rt.length;
+	}
+	if (window_end <= window_start)
+	{
+		return;
+	}
+
+	const int voice_index = voice_mgr.SelectVoiceIndex(note);
+	if (voice_index < 0)
+	{
+		return;
+	}
+
+	PerformVoice& voice = perform_voices[voice_index];
+	DeactivateVoice(voice);
+	voice.active = true;
+	++g_active_voice_count;
+	voice.releasing = false;
+	if (sample_mem_mgr.Acquire(kPerformSampleId))
+	{
+		voice.sample_acquired = true;
+	}
+	else
+	{
+		voice.sample_acquired = false;
+	}
+	voice.note = note;
+	voice.track = -1;
+	voice.phase = 0.0f;
+	voice.amp = 1.0f;
+	voice.env = 0.0f;
+	voice.release_start = 0.0f;
+	voice.release_pos = 0.0f;
+	voice.env_samples = 0;
+	voice.silent_samples = 0;
+	voice.start_tick = static_cast<uint32_t>(System::GetNow());
+	perform_lpf_l1[voice_index].Reset();
+	perform_lpf_l2[voice_index].Reset();
+	perform_lpf_r1[voice_index].Reset();
+	perform_lpf_r2[voice_index].Reset();
+	const float sr = (rt.rate == 0) ? 48000.0f : static_cast<float>(rt.rate);
+	const uint8_t idx = (note >= 0 && note < 128) ? static_cast<uint8_t>(note) : 127;
+	const float pitch = g_note_ratio[idx];
+	voice.rate = pitch * (sr / hw.AudioSampleRate());
+	voice.offset = window_start;
+	voice.length = window_end - window_start;
+}
+
+void StopPerformVoice(int32_t note)
+{
+	for (auto &voice : perform_voices)
+	{
+		if (voice.active && voice.note == note)
+		{
+			if (!voice.releasing)
+			{
+				voice.releasing = true;
+				voice.release_pos = 0.0f;
+				voice.release_start = voice.env;
+				if (voice.release_start < 0.0f)
+				{
+					voice.release_start = 0.0f;
+				}
+				else if (voice.release_start > 1.0f)
+				{
+					voice.release_start = 1.0f;
+				}
+			}
+		}
 	}
 }
 static inline uint8_t MidiCmdPopBatchAudio(MidiCmd* out, uint8_t max_n)

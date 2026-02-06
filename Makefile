@@ -23,8 +23,9 @@ CXXFLAGS += -DAUDIO_BLOCK_SIZE=$(AUDIO_BLOCK_SIZE)
 # Guardrails: module include boundaries.
 .PHONY: check_modules
 check_modules:
-	@powershell -Command "if (Get-Command rg -ErrorAction SilentlyContinue) { if (rg -n '#include\\s+\"(StorageService.h|ff\\.h|ui.h)\"' audio_engine.cpp audio_engine.h) { Write-Host 'ERROR: audio_engine includes forbidden headers'; exit 1 } }"
-	@powershell -Command "if (Get-Command rg -ErrorAction SilentlyContinue) { if (rg -n '#include\\s+\"(PerformVoice.h|SampleMemoryManager.h|ff\\.h)\"' ui.cpp ui.h) { Write-Host 'ERROR: ui includes forbidden headers'; exit 1 } }"
+	@powershell -Command "if (Get-Command rg -ErrorAction SilentlyContinue) { if (rg -n '#include\\s+[<\"](StorageService.h|ff\\.h|ui.h)[>\"]' audio_engine.cpp audio_engine.h) { Write-Host 'ERROR: audio_engine includes forbidden headers'; exit 1 } }"
+	@powershell -Command "if (Get-Command rg -ErrorAction SilentlyContinue) { if (rg -n '#include\\s+[<\"](PerformVoice.h|SampleMemoryManager.h|ff\\.h)[>\"]' ui.cpp ui.h) { Write-Host 'ERROR: ui includes forbidden headers'; exit 1 } }"
+	@powershell -Command "if (Get-Command rg -ErrorAction SilentlyContinue) { if (rg -n '#include\\s+[<\"]ff\\.h[>\"]' StorageService.h ui.cpp ui.h) { Write-Host 'ERROR: ff.h leaked into headers'; exit 1 } }"
 	@powershell -Command "if (Get-Command rg -ErrorAction SilentlyContinue) { if (rg -n '#include\\s+\".*daisy.*\"' shared_messages.h) { Write-Host 'ERROR: shared_messages.h should not include Daisy headers'; exit 1 } }"
 
 # Core location, and generic Makefile.

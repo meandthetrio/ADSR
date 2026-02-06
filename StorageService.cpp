@@ -1,6 +1,7 @@
 #include "StorageService.h"
 
 #include "daisy_pod.h"
+#include "ff.h"
 #include "sys/fatfs.h"
 #include "sys/system.h"
 #include "util/bsp_sd_diskio.h"
@@ -18,6 +19,44 @@ static bool g_scan_dir_open = false;
 
 static FIL g_preview_file;
 static bool g_preview_open = false;
+
+struct StorageService::SaveState
+{
+	bool active = false;
+	bool header_written = false;
+	bool done = false;
+	FIL file = {};
+	const int16_t* src_l = nullptr;
+	const int16_t* src_r = nullptr;
+	size_t frames_total = 0;
+	size_t frames_written = 0;
+	uint16_t channels = 0;
+	uint32_t sample_rate = 0;
+	uint32_t data_bytes = 0;
+	uint32_t start_ms = 0;
+	uint32_t deadline_ms = 0;
+	char path[kPathMaxLen] = {};
+};
+
+struct StorageService::LoadState
+{
+	bool active = false;
+	FIL file = {};
+	int16_t* dst_l = nullptr;
+	int16_t* dst_r = nullptr;
+	size_t max_frames = 0;
+	size_t frames_total = 0;
+	size_t frames_loaded = 0;
+	uint16_t channels = 0;
+	uint32_t sample_rate = 0;
+	uint32_t data_offset = 0;
+	uint16_t cookie = 0;
+	uint32_t start_ms = 0;
+	uint32_t deadline_ms = 0;
+};
+
+static StorageService::SaveState g_save_state = {};
+static StorageService::LoadState g_load_state = {};
 static uint32_t g_preview_data_offset = 0;
 static uint32_t g_preview_sample_rate = 0;
 static uint16_t g_preview_channels = 0;
@@ -325,8 +364,10 @@ void StorageService::Init()
 	preview_pp_ready_a_ = nullptr;
 	preview_pp_ready_b_ = nullptr;
 	preview_pp_active_ = nullptr;
-	save_ = {};
-	load_ = {};
+	save_ = &g_save_state;
+	load_ = &g_load_state;
+	*save_ = {};
+	*load_ = {};
 	g_preview_open = false;
 	g_preview_data_offset = 0;
 	g_preview_sample_rate = 0;
@@ -379,8 +420,8 @@ void StorageService::CancelAllOps(SdErrorCode reason)
 		f_close(&g_preview_file);
 		g_preview_open = false;
 	}
-	save_.active = false;
-	load_.active = false;
+	save_->active = false;
+	load_->active = false;
 	preview_preload_active_ = false;
 	preview_preload_filled_ = 0;
 	preview_preload_target_frames_ = 0;
@@ -710,25 +751,25 @@ void StorageService::RunSlice(uint32_t budget_us)
 			}
 			case OpKind::SaveStart:
 			{
-				if (save_.active)
+				if (save_->active)
 				{
 					break;
 				}
-				save_ = {};
-				save_.src_l = op.src_l;
-				save_.src_r = op.src_r;
-				save_.frames_total = op.frames;
-				save_.channels = (op.channels == 0) ? 1 : op.channels;
-				save_.sample_rate = (op.sample_rate == 0) ? 48000 : op.sample_rate;
-				save_.data_bytes = static_cast<uint32_t>(
-					save_.frames_total * save_.channels * sizeof(int16_t));
-				save_.start_ms = daisy::System::GetNow();
-				save_.deadline_ms = op.deadline_ms;
+				*save_ = {};
+				save_->src_l = op.src_l;
+				save_->src_r = op.src_r;
+				save_->frames_total = op.frames;
+				save_->channels = (op.channels == 0) ? 1 : op.channels;
+				save_->sample_rate = (op.sample_rate == 0) ? 48000 : op.sample_rate;
+				save_->data_bytes = static_cast<uint32_t>(
+					save_->frames_total * save_->channels * sizeof(int16_t));
+				save_->start_ms = daisy::System::GetNow();
+				save_->deadline_ms = op.deadline_ms;
 				char save_name[32] = {};
 				if (!BuildNextSavePath(save_name,
 									   sizeof(save_name),
-									   save_.path,
-									   sizeof(save_.path),
+									   save_->path,
+									   sizeof(save_->path),
 									   fsi.GetSDPath()))
 				{
 					sd_status_.last_error = {SdErrorCode::OpenFailed, -1, op.op_id, op.attempt};
@@ -739,7 +780,7 @@ void StorageService::RunSlice(uint32_t budget_us)
 					break;
 				}
 
-				const FRESULT open_res = f_open(&save_.file, save_.path, FA_WRITE | FA_CREATE_NEW);
+				const FRESULT open_res = f_open(&save_->file, save_->path, FA_WRITE | FA_CREATE_NEW);
 				if (open_res != FR_OK)
 				{
 					if (retry_op(SdErrorCode::OpenFailed, open_res))
@@ -761,19 +802,19 @@ void StorageService::RunSlice(uint32_t budget_us)
 				header.SubChunk1ID = daisy::kWavFileSubChunk1Id;
 				header.SubChunk1Size = 16;
 				header.AudioFormat = daisy::WAVE_FORMAT_PCM;
-				header.NbrChannels = save_.channels;
-				header.SampleRate = save_.sample_rate;
-				header.BlockAlign = static_cast<uint16_t>(save_.channels * sizeof(int16_t));
-				header.ByteRate = save_.sample_rate * header.BlockAlign;
+				header.NbrChannels = save_->channels;
+				header.SampleRate = save_->sample_rate;
+				header.BlockAlign = static_cast<uint16_t>(save_->channels * sizeof(int16_t));
+				header.ByteRate = save_->sample_rate * header.BlockAlign;
 				header.BitPerSample = 16;
 				header.SubChunk2ID = daisy::kWavFileSubChunk2Id;
 				header.SubCHunk2Size = 0;
 
 				UINT written = 0;
-				const FRESULT wr = f_write(&save_.file, &header, sizeof(header), &written);
+				const FRESULT wr = f_write(&save_->file, &header, sizeof(header), &written);
 				if (wr != FR_OK || written != sizeof(header))
 				{
-					f_close(&save_.file);
+					f_close(&save_->file);
 					if (retry_op(SdErrorCode::WriteFailed, wr))
 					{
 						break;
@@ -787,40 +828,40 @@ void StorageService::RunSlice(uint32_t budget_us)
 					break;
 				}
 
-				save_.header_written = true;
-				save_.active = true;
+				save_->header_written = true;
+				save_->active = true;
 				{
 					Event ev = {};
 					ev.kind = EventKind::SaveProgress;
 					CopyString(ev.name, kNameMaxLen, save_name);
 					ev.value = 0;
-					ev.value2 = static_cast<uint32_t>(save_.frames_total);
+					ev.value2 = static_cast<uint32_t>(save_->frames_total);
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 				}
 				break;
 			}
 			case OpKind::LoadStart:
 			{
-				if (load_.active)
+				if (load_->active)
 				{
 					break;
 				}
-				load_ = {};
-				load_.dst_l = op.dst_l;
-				load_.dst_r = op.dst_r;
-				load_.max_frames = op.max_frames;
-				load_.cookie = op.cookie;
-				load_.start_ms = daisy::System::GetNow();
-				load_.deadline_ms = op.deadline_ms;
-				if (!op.path[0] || load_.dst_l == nullptr || load_.dst_r == nullptr)
+				*load_ = {};
+				load_->dst_l = op.dst_l;
+				load_->dst_r = op.dst_r;
+				load_->max_frames = op.max_frames;
+				load_->cookie = op.cookie;
+				load_->start_ms = daisy::System::GetNow();
+				load_->deadline_ms = op.deadline_ms;
+				if (!op.path[0] || load_->dst_l == nullptr || load_->dst_r == nullptr)
 				{
 					Event ev = {};
 					ev.kind = EventKind::LoadError;
-					ev.cookie = load_.cookie;
+					ev.cookie = load_->cookie;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 					break;
 				}
-				FRESULT res = f_open(&load_.file, op.path, FA_READ);
+				FRESULT res = f_open(&load_->file, op.path, FA_READ);
 				if (res != FR_OK)
 				{
 					if (retry_op(SdErrorCode::OpenFailed, res))
@@ -831,17 +872,17 @@ void StorageService::RunSlice(uint32_t budget_us)
 					sd_status_.last_error_time_ms = daisy::System::GetNow();
 					Event ev = {};
 					ev.kind = EventKind::LoadError;
-					ev.cookie = load_.cookie;
+					ev.cookie = load_->cookie;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 					break;
 				}
 				WavInfo wav;
-				if (!ParseWavHeader(&load_.file, wav)
+				if (!ParseWavHeader(&load_->file, wav)
 					|| wav.bits_per_sample != 16
 					|| wav.num_channels < 1
 					|| wav.num_channels > 2)
 				{
-					f_close(&load_.file);
+					f_close(&load_->file);
 					if (retry_op(SdErrorCode::ReadFailed, -1))
 					{
 						break;
@@ -851,46 +892,46 @@ void StorageService::RunSlice(uint32_t budget_us)
 					++sd_counters_.read_failures;
 					Event ev = {};
 					ev.kind = EventKind::LoadError;
-					ev.cookie = load_.cookie;
+					ev.cookie = load_->cookie;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 					break;
 				}
-				load_.channels = wav.num_channels;
-				load_.sample_rate = wav.sample_rate;
+				load_->channels = wav.num_channels;
+				load_->sample_rate = wav.sample_rate;
 				const size_t bytes_per_sample = wav.bits_per_sample / 8;
 				const size_t frame_bytes = bytes_per_sample * wav.num_channels;
 				size_t total_frames = (frame_bytes == 0) ? 0 : (wav.data_size / frame_bytes);
 				if (total_frames == 0)
 				{
-					f_close(&load_.file);
+					f_close(&load_->file);
 					Event ev = {};
 					ev.kind = EventKind::LoadError;
-					ev.cookie = load_.cookie;
+					ev.cookie = load_->cookie;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 					break;
 				}
-				if (total_frames > load_.max_frames)
+				if (total_frames > load_->max_frames)
 				{
-					total_frames = load_.max_frames;
+					total_frames = load_->max_frames;
 				}
-				load_.frames_total = total_frames;
-				load_.data_offset = wav.data_offset;
-				if (f_lseek(&load_.file, load_.data_offset) != FR_OK)
+				load_->frames_total = total_frames;
+				load_->data_offset = wav.data_offset;
+				if (f_lseek(&load_->file, load_->data_offset) != FR_OK)
 				{
-					f_close(&load_.file);
+					f_close(&load_->file);
 					Event ev = {};
 					ev.kind = EventKind::LoadError;
-					ev.cookie = load_.cookie;
+					ev.cookie = load_->cookie;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 					break;
 				}
-				load_.active = true;
+				load_->active = true;
 				{
 					Event ev = {};
 					ev.kind = EventKind::LoadProgress;
-					ev.cookie = load_.cookie;
+					ev.cookie = load_->cookie;
 					ev.value = 0;
-					ev.value2 = static_cast<uint32_t>(load_.frames_total);
+					ev.value2 = static_cast<uint32_t>(load_->frames_total);
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 				}
 				break;
@@ -1190,14 +1231,14 @@ void StorageService::RunSlice(uint32_t budget_us)
 	}
 
 	// Save write slice.
-	if (save_.active && save_.header_written)
+	if (save_->active && save_->header_written)
 	{
 		step_guard();
 		const uint32_t start_ms = daisy::System::GetNow();
-		if (save_.deadline_ms != 0 && start_ms > save_.deadline_ms)
+		if (save_->deadline_ms != 0 && start_ms > save_->deadline_ms)
 		{
-			f_close(&save_.file);
-			save_.active = false;
+			f_close(&save_->file);
+			save_->active = false;
 			sd_status_.last_error = {SdErrorCode::Timeout, -1, 0, 0};
 			sd_status_.last_error_time_ms = daisy::System::GetNow();
 			++sd_counters_.op_timeouts;
@@ -1209,17 +1250,17 @@ void StorageService::RunSlice(uint32_t budget_us)
 		const uint32_t budget_ms = (budget_us + 999) / 1000;
 		const size_t max_frames_per_slice = 8192;
 
-		while (save_.frames_written < save_.frames_total)
+		while (save_->frames_written < save_->frames_total)
 		{
-			const size_t frames_left = save_.frames_total - save_.frames_written;
+			const size_t frames_left = save_->frames_total - save_->frames_written;
 			size_t frames_this = (frames_left > max_frames_per_slice) ? max_frames_per_slice : frames_left;
 			UINT written = 0;
 			FRESULT res = FR_OK;
 
-			if (save_.channels == 1)
+			if (save_->channels == 1)
 			{
-				const int16_t* src = save_.src_l + save_.frames_written;
-				res = f_write(&save_.file,
+				const int16_t* src = save_->src_l + save_->frames_written;
+				res = f_write(&save_->file,
 							  src,
 							  static_cast<UINT>(frames_this * sizeof(int16_t)),
 							  &written);
@@ -1232,15 +1273,15 @@ void StorageService::RunSlice(uint32_t budget_us)
 			{
 				for (size_t i = 0; i < frames_this; ++i)
 				{
-					g_save_write_buf[i * 2] = save_.src_l[save_.frames_written + i];
-					g_save_write_buf[i * 2 + 1] = save_.src_r[save_.frames_written + i];
+					g_save_write_buf[i * 2] = save_->src_l[save_->frames_written + i];
+					g_save_write_buf[i * 2 + 1] = save_->src_r[save_->frames_written + i];
 				}
-				res = f_write(&save_.file,
+				res = f_write(&save_->file,
 							  g_save_write_buf,
-							  static_cast<UINT>(frames_this * save_.channels * sizeof(int16_t)),
+							  static_cast<UINT>(frames_this * save_->channels * sizeof(int16_t)),
 							  &written);
 				if (res == FR_OK
-					&& written != (frames_this * save_.channels * sizeof(int16_t)))
+					&& written != (frames_this * save_->channels * sizeof(int16_t)))
 				{
 					res = FR_DISK_ERR;
 				}
@@ -1248,19 +1289,19 @@ void StorageService::RunSlice(uint32_t budget_us)
 
 			if (res != FR_OK)
 			{
-				f_close(&save_.file);
-				save_.active = false;
+				f_close(&save_->file);
+				save_->active = false;
 				Event ev = {};
 				ev.kind = EventKind::SaveError;
 				PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 				break;
 			}
 
-			save_.frames_written += frames_this;
+			save_->frames_written += frames_this;
 			Event pev = {};
 			pev.kind = EventKind::SaveProgress;
-			pev.value = static_cast<uint32_t>(save_.frames_written);
-			pev.value2 = static_cast<uint32_t>(save_.frames_total);
+			pev.value = static_cast<uint32_t>(save_->frames_written);
+			pev.value2 = static_cast<uint32_t>(save_->frames_total);
 			PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, pev);
 
 			if (budget_ms > 0 && (daisy::System::GetNow() - start_ms) >= budget_ms)
@@ -1269,27 +1310,27 @@ void StorageService::RunSlice(uint32_t budget_us)
 			}
 		}
 
-		if (save_.active && save_.frames_written >= save_.frames_total)
+		if (save_->active && save_->frames_written >= save_->frames_total)
 		{
 			daisy::WAV_FormatTypeDef header = {};
 			header.ChunkId = daisy::kWavFileChunkId;
-			header.FileSize = 36 + save_.data_bytes;
+			header.FileSize = 36 + save_->data_bytes;
 			header.FileFormat = daisy::kWavFileWaveId;
 			header.SubChunk1ID = daisy::kWavFileSubChunk1Id;
 			header.SubChunk1Size = 16;
 			header.AudioFormat = daisy::WAVE_FORMAT_PCM;
-			header.NbrChannels = save_.channels;
-			header.SampleRate = save_.sample_rate;
-			header.BlockAlign = static_cast<uint16_t>(save_.channels * sizeof(int16_t));
-			header.ByteRate = save_.sample_rate * header.BlockAlign;
+			header.NbrChannels = save_->channels;
+			header.SampleRate = save_->sample_rate;
+			header.BlockAlign = static_cast<uint16_t>(save_->channels * sizeof(int16_t));
+			header.ByteRate = save_->sample_rate * header.BlockAlign;
 			header.BitPerSample = 16;
 			header.SubChunk2ID = daisy::kWavFileSubChunk2Id;
-			header.SubCHunk2Size = save_.data_bytes;
+			header.SubCHunk2Size = save_->data_bytes;
 
-			if (f_lseek(&save_.file, 0) != FR_OK)
+			if (f_lseek(&save_->file, 0) != FR_OK)
 			{
-				f_close(&save_.file);
-				save_.active = false;
+				f_close(&save_->file);
+				save_->active = false;
 				Event ev = {};
 				ev.kind = EventKind::SaveError;
 				PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
@@ -1297,20 +1338,20 @@ void StorageService::RunSlice(uint32_t budget_us)
 			else
 			{
 				UINT written = 0;
-				FRESULT wr = f_write(&save_.file, &header, sizeof(header), &written);
+				FRESULT wr = f_write(&save_->file, &header, sizeof(header), &written);
 				if (wr != FR_OK || written != sizeof(header))
 				{
-					f_close(&save_.file);
-					save_.active = false;
+					f_close(&save_->file);
+					save_->active = false;
 					Event ev = {};
 					ev.kind = EventKind::SaveError;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 				}
 				else
 				{
-					FRESULT sync_res = f_sync(&save_.file);
-					f_close(&save_.file);
-					save_.active = false;
+					FRESULT sync_res = f_sync(&save_->file);
+					f_close(&save_->file);
+					save_->active = false;
 					Event ev = {};
 					ev.kind = (sync_res == FR_OK) ? EventKind::SaveDone : EventKind::SaveError;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
@@ -1320,60 +1361,60 @@ void StorageService::RunSlice(uint32_t budget_us)
 	}
 
 	// Load read slice.
-	if (load_.active)
+	if (load_->active)
 	{
 		step_guard();
 		const uint32_t start_ms = daisy::System::GetNow();
-		if (load_.deadline_ms != 0 && start_ms > load_.deadline_ms)
+		if (load_->deadline_ms != 0 && start_ms > load_->deadline_ms)
 		{
-			f_close(&load_.file);
-			load_.active = false;
+			f_close(&load_->file);
+			load_->active = false;
 			sd_status_.last_error = {SdErrorCode::Timeout, -1, 0, 0};
 			sd_status_.last_error_time_ms = daisy::System::GetNow();
 			++sd_counters_.op_timeouts;
 			Event ev = {};
 			ev.kind = EventKind::LoadError;
-			ev.cookie = load_.cookie;
+			ev.cookie = load_->cookie;
 			PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 			return;
 		}
 		const uint32_t budget_ms = (budget_us + 999) / 1000;
 		const size_t max_frames_per_slice = 1024;
 
-		while (load_.frames_loaded < load_.frames_total)
+		while (load_->frames_loaded < load_->frames_total)
 		{
-			size_t frames_left = load_.frames_total - load_.frames_loaded;
+			size_t frames_left = load_->frames_total - load_->frames_loaded;
 			size_t frames_this = (frames_left > max_frames_per_slice) ? max_frames_per_slice : frames_left;
-			const size_t bytes_to_read = frames_this * load_.channels * sizeof(int16_t);
+			const size_t bytes_to_read = frames_this * load_->channels * sizeof(int16_t);
 			UINT bytes_read = 0;
-			FRESULT res = f_read(&load_.file, g_load_read_buf, bytes_to_read, &bytes_read);
+			FRESULT res = f_read(&load_->file, g_load_read_buf, bytes_to_read, &bytes_read);
 			if (res != FR_OK || bytes_read == 0)
 			{
-				f_close(&load_.file);
-				load_.active = false;
+				f_close(&load_->file);
+				load_->active = false;
 				Event ev = {};
 				ev.kind = EventKind::LoadError;
-				ev.cookie = load_.cookie;
+				ev.cookie = load_->cookie;
 				PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 				break;
 			}
-			const size_t frames_read = bytes_read / (load_.channels * sizeof(int16_t));
+			const size_t frames_read = bytes_read / (load_->channels * sizeof(int16_t));
 			for (size_t i = 0; i < frames_read; ++i)
 			{
-				if (load_.channels == 1)
+				if (load_->channels == 1)
 				{
 					const int16_t samp = g_load_read_buf[i];
-					load_.dst_l[load_.frames_loaded] = samp;
-					load_.dst_r[load_.frames_loaded] = samp;
-					load_.frames_loaded++;
+					load_->dst_l[load_->frames_loaded] = samp;
+					load_->dst_r[load_->frames_loaded] = samp;
+					load_->frames_loaded++;
 				}
 				else
 				{
-					load_.dst_l[load_.frames_loaded] = g_load_read_buf[i * 2];
-					load_.dst_r[load_.frames_loaded] = g_load_read_buf[i * 2 + 1];
-					load_.frames_loaded++;
+					load_->dst_l[load_->frames_loaded] = g_load_read_buf[i * 2];
+					load_->dst_r[load_->frames_loaded] = g_load_read_buf[i * 2 + 1];
+					load_->frames_loaded++;
 				}
-				if (load_.frames_loaded >= load_.frames_total)
+				if (load_->frames_loaded >= load_->frames_total)
 				{
 					break;
 				}
@@ -1381,9 +1422,9 @@ void StorageService::RunSlice(uint32_t budget_us)
 			{
 				Event ev = {};
 				ev.kind = EventKind::LoadProgress;
-				ev.cookie = load_.cookie;
-				ev.value = static_cast<uint32_t>(load_.frames_loaded);
-				ev.value2 = static_cast<uint32_t>(load_.frames_total);
+				ev.cookie = load_->cookie;
+				ev.value = static_cast<uint32_t>(load_->frames_loaded);
+				ev.value2 = static_cast<uint32_t>(load_->frames_total);
 				PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 			}
 			if (budget_ms > 0 && (daisy::System::GetNow() - start_ms) >= budget_ms)
@@ -1392,18 +1433,18 @@ void StorageService::RunSlice(uint32_t budget_us)
 			}
 		}
 
-		if (load_.active && load_.frames_loaded >= load_.frames_total)
+		if (load_->active && load_->frames_loaded >= load_->frames_total)
 		{
-			f_close(&load_.file);
+			f_close(&load_->file);
 			Event ev = {};
 			ev.kind = EventKind::LoadDone;
-			ev.cookie = load_.cookie;
-			ev.value = static_cast<uint32_t>(load_.frames_loaded);
-			ev.value2 = static_cast<uint32_t>(load_.frames_total);
-			ev.sample_rate = load_.sample_rate;
-			ev.channels = load_.channels;
+			ev.cookie = load_->cookie;
+			ev.value = static_cast<uint32_t>(load_->frames_loaded);
+			ev.value2 = static_cast<uint32_t>(load_->frames_total);
+			ev.sample_rate = load_->sample_rate;
+			ev.channels = load_->channels;
 			PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
-			load_.active = false;
+			load_->active = false;
 		}
 	}
 
@@ -1487,3 +1528,4 @@ void StorageService::RunSlice(uint32_t budget_us)
 		g_storage_slice_max_us = slice_elapsed_us;
 	}
 }
+

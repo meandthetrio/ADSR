@@ -1,5 +1,4 @@
 #include "daisy_pod.h"
-#include "daisysp.h"
 #include "dev/oled_ssd130x.h"
 #include "per/tim.h"
 #include "util/scopedirqblocker.h"
@@ -8,12 +7,6 @@
 #include "audio_engine.h"
 #include "ui.h"
 #include "app_controller.h"
-#include "audio_dsp.h"
-#include "PerformVoice.h"
-#include "SampleMemoryManager.h"
-#include "VoiceManager.h"
-#include "WaveformCache.h"
-#include "StorageService.h"
 #include <cmath>
 #include <initializer_list>
 //#include <math.h>
@@ -21,7 +14,6 @@
 #include <cstdio>
 
 using namespace daisy;
-using namespace daisysp;
 
 #ifndef STORAGE_SERVICE_PREVIEW_STREAM
 #define STORAGE_SERVICE_PREVIEW_STREAM PREVIEW_STREAM_FROM_SD
@@ -298,23 +290,8 @@ static daisy::TimerHandle g_ctrl_timer;
 static volatile bool g_ctrl_timer_running = false;
 
 
-StorageService storage;
 Encoder      encoder_r;
 Switch       shift_button;
-DSY_SDRAM_BSS ReverbSc reverb;
-DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_l;
-DelayLine<float, kDelayMaxSamples> DSY_SDRAM_BSS delay_line_r;
-DelayLine<float, kReverbPreDelayMaxSamples> DSY_SDRAM_BSS reverb_predelay_l;
-DelayLine<float, kReverbPreDelayMaxSamples> DSY_SDRAM_BSS reverb_predelay_r;
-DTCM_MEM_SECTION ChorusEngine chorus_l;
-DTCM_MEM_SECTION ChorusEngine chorus_r;
-DTCM_MEM_SECTION TapeSaturator sat_l;
-DTCM_MEM_SECTION TapeSaturator sat_r;
-DTCM_MEM_SECTION BitCrushState g_sat_bit_state;
-DTCM_MEM_SECTION BiquadLp perform_lpf_l1[kPerformVoiceCount];
-DTCM_MEM_SECTION BiquadLp perform_lpf_l2[kPerformVoiceCount];
-DTCM_MEM_SECTION BiquadLp perform_lpf_r1[kPerformVoiceCount];
-DTCM_MEM_SECTION BiquadLp perform_lpf_r2[kPerformVoiceCount];
 
 volatile UiMode ui_mode = UiMode::Main;
 volatile int32_t menu_index = 0;
@@ -352,7 +329,6 @@ volatile int32_t wav_file_count = 0;
 bool sd_mounted = false;
 bool sd_present = false;
 bool sd_fault = false;
-StorageService::SdErrorCode sd_fault_code = StorageService::SdErrorCode::None;
 const char* sd_fault_text = nullptr;
 uint32_t sd_retries_remaining = 0;
 bool sd_init_in_progress = false;
@@ -436,12 +412,6 @@ static constexpr uint32_t kPerformSampleId = 1;
 // - record_*_mask buffers (RAM_D3, 128x64 bytes each) for record UI overlay.
 // - perform_voices (DTCM) and filter state (DTCM) for audio processing.
 
-DSY_SDRAM_BSS int16_t perform_sample_buffer_l[kMaxSampleFrames];
-DSY_SDRAM_BSS int16_t perform_sample_buffer_r[kMaxSampleFrames];
-int16_t* sample_buffer_l = perform_sample_buffer_l;
-int16_t* sample_buffer_r = perform_sample_buffer_r;
-SampleMemoryManager sample_mem_mgr(perform_sample_buffer_l, kPerformSampleRamBudgetBytes);
-static VoiceManager voice_mgr;
 volatile size_t sample_length = 0;
 volatile size_t sample_play_start = 0;
 volatile size_t sample_play_end = 0;
@@ -472,7 +442,10 @@ PreviewControl g_preview_ctl_buf[2];
 volatile uint8_t g_preview_pub_idx = 0;
 volatile uint8_t g_preview_active_idx = 0;
 
-DTCM_MEM_SECTION PerformVoice perform_voices[kPerformVoiceCount];
+extern int16_t* sample_buffer_l;
+extern int16_t* sample_buffer_r;
+extern int16_t preview_buffer[kPreviewBufferFrames];
+
 
 PerformState main_perform_state;
 UiMode edt_prev_mode = UiMode::Perform;
@@ -499,7 +472,6 @@ bool waveform_dirty = false;
 volatile bool waveform_compute_pending = false;
 volatile SampleContext waveform_compute_ctx = SampleContext::Perform;
 
-WaveformCache perform_waveform_cache;
 bool waveform_from_recording = false;
 RecordInput waveform_record_input = RecordInput::LineIn;
 volatile float perform_attack_norm = 0.0f;
@@ -717,16 +689,10 @@ uint16_t preview_stream_cookie_active = 0;
 #endif
 bool preview_pending_start = false;
 __attribute__((unused)) uint32_t preview_pending_start_ms = 0;
-alignas(32) int16_t preview_buffer[kPreviewBufferFrames];
-#if !STORAGE_SERVICE_PREVIEW_STREAM
-alignas(32) __attribute__((unused)) static int16_t preview_read_buf[kPreviewReadFrames * 2];
-#endif
 #if STORAGE_SERVICE_PREVIEW_STREAM
-alignas(32) int16_t preview_pp_buf[2][kPreviewPpFrames];
 volatile uint8_t preview_pp_ready[2] = {0, 0};
 volatile uint8_t preview_pp_active = 0;
 volatile uint32_t preview_pp_pos = 0;
-DSY_SDRAM_BSS int16_t preview_preload_buf[kPreviewPreloadFrames];
 volatile size_t preview_preload_frames = 0;
 volatile bool preview_preload_active = false;
 #endif
@@ -754,10 +720,7 @@ static int32_t last_perform_flt_selected = -1;
 uint32_t delay_snow_next_ms = 0;
 uint32_t midi_ignore_until_ms = 0;
 
-const char* SdFaultText(StorageService::SdErrorCode code);
 extern Job g_job;
-void DeactivateVoice(PerformVoice& voice);
-void ResetPerformVoices();
 
 double NowMs()
 {
@@ -779,63 +742,6 @@ void ApplyPlaybackReverse(bool reverse)
 	RequestAudioCmd(kCmdPlaybackReverse);
 }
 
-void ApplyPlaybackReverseAudio(bool reverse)
-{
-	if (reverse == playback_reverse_audio)
-	{
-		return;
-	}
-	playback_reverse_audio = reverse;
-
-	const SampleRuntime rt = g_rt_buf[g_rt_active_idx];
-	if (!rt.loaded || rt.length == 0 || rt.l == nullptr)
-	{
-		return;
-	}
-	size_t window_start = rt.play_start;
-	size_t window_end = rt.play_end;
-	if (window_end > rt.length || window_end == 0)
-	{
-		window_end = rt.length;
-	}
-	if (window_end <= window_start)
-	{
-		window_start = 0;
-		window_end = rt.length;
-	}
-	if (window_end <= window_start + 1)
-	{
-		return;
-	}
-	const float window_len = static_cast<float>(window_end - window_start - 1);
-	const float rel = playback_phase - static_cast<float>(window_start);
-	playback_phase = static_cast<float>(window_start) + (window_len - rel);
-	if (playback_phase < static_cast<float>(window_start))
-	{
-		playback_phase = static_cast<float>(window_start);
-	}
-	if (playback_phase > static_cast<float>(window_end - 1))
-	{
-		playback_phase = static_cast<float>(window_end - 1);
-	}
-	for (auto &voice : perform_voices)
-	{
-		if (!voice.active || voice.length <= 1)
-		{
-			continue;
-		}
-		const float vlen = static_cast<float>(voice.length - 1);
-		voice.phase = vlen - voice.phase;
-		if (voice.phase < 0.0f)
-		{
-			voice.phase = 0.0f;
-		}
-		if (voice.phase > vlen)
-		{
-			voice.phase = vlen;
-		}
-	}
-}
 
 void StartPlaybackAudio(uint8_t note, bool apply_pitch, bool reverse_playback)
 {
@@ -908,95 +814,6 @@ void StopPlaybackAllAudio()
 	}
 }
 
-void StartPerformVoice(int32_t note)
-{
-	const SampleRuntime rt = g_rt_buf[g_rt_active_idx];
-	size_t window_start = 0;
-	size_t window_end = 0;
-	if (!rt.loaded || rt.length == 0 || rt.l == nullptr)
-	{
-		return;
-	}
-	window_start = rt.play_start;
-	window_end = rt.play_end;
-	if (window_end > rt.length || window_end == 0)
-	{
-		window_end = rt.length;
-	}
-	if (window_end <= window_start)
-	{
-		window_start = 0;
-		window_end = rt.length;
-	}
-	if (window_end <= window_start)
-	{
-		return;
-	}
-
-	const int voice_index = voice_mgr.SelectVoiceIndex(note);
-	if (voice_index < 0)
-	{
-		return;
-	}
-
-	PerformVoice& voice = perform_voices[voice_index];
-	DeactivateVoice(voice);
-	voice.active = true;
-	++g_active_voice_count;
-	voice.releasing = false;
-	if (sample_mem_mgr.Acquire(kPerformSampleId))
-	{
-		voice.sample_acquired = true;
-	}
-	else
-	{
-		voice.sample_acquired = false;
-	}
-	voice.note = note;
-	voice.track = -1;
-	voice.phase = 0.0f;
-	voice.amp = 1.0f;
-	voice.env = 0.0f;
-	voice.release_start = 0.0f;
-	voice.release_pos = 0.0f;
-	voice.env_samples = 0;
-	voice.silent_samples = 0;
-	voice.start_tick = static_cast<uint32_t>(System::GetNow());
-	perform_lpf_l1[voice_index].Reset();
-	perform_lpf_l2[voice_index].Reset();
-	perform_lpf_r1[voice_index].Reset();
-	perform_lpf_r2[voice_index].Reset();
-	const float sr = (rt.rate == 0) ? 48000.0f : static_cast<float>(rt.rate);
-	const uint8_t idx = (note >= 0 && note < 128) ? static_cast<uint8_t>(note) : 127;
-	const float pitch = g_note_ratio[idx];
-	voice.rate = pitch * (sr / hw.AudioSampleRate());
-	voice.offset = window_start;
-	voice.length = window_end - window_start;
-}
-
-void StopPerformVoice(int32_t note)
-{
-	for (auto &voice : perform_voices)
-	{
-		if (voice.active && voice.note == note)
-		{
-			if (!voice.releasing)
-			{
-				voice.releasing = true;
-				voice.release_pos = 0.0f;
-				voice.release_start = voice.env;
-				if (voice.release_start < 0.0f)
-				{
-					voice.release_start = 0.0f;
-				}
-				else if (voice.release_start > 1.0f)
-				{
-					voice.release_start = 1.0f;
-				}
-			}
-		}
-	}
-}
 
 static void __attribute__((unused)) HandleMidiMessage(MidiEvent msg)
 {
@@ -1296,31 +1113,6 @@ int main(void)
 	g_preview_pub_idx = 0;
 	g_preview_active_idx = 0;
 
-	storage.Init();
-	voice_mgr.Init(perform_voices, kPerformVoiceCount);
-	ValidateConfig();
-	{
-		StorageService::PreviewStreamConfig cfg = {};
-		cfg.buffer = preview_buffer;
-		cfg.frames = kPreviewBufferFrames;
-		cfg.write_index = &preview_write_index;
-		cfg.read_index = &preview_read_index;
-#if STORAGE_SERVICE_PREVIEW_STREAM
-		cfg.preload_buf = preview_preload_buf;
-		cfg.preload_frames = kPreviewPreloadFrames;
-		cfg.pp_buf_a = &preview_pp_buf[0][0];
-		cfg.pp_buf_b = &preview_pp_buf[1][0];
-		cfg.pp_frames = kPreviewPpFrames;
-		cfg.pp_ready_a = &preview_pp_ready[0];
-		cfg.pp_ready_b = &preview_pp_ready[1];
-		cfg.pp_active = &preview_pp_active;
-#endif
-		storage.SetPreviewStreamConfig(cfg);
-	}
-	MountSd();
-
-	DrawMenu(menu_index);
-	g_last_draw_ms = System::GetNow();
 	{
 		uint32_t bits = 0;
 		const bool in_perform_mode = IsPerformUiMode(ui_mode);

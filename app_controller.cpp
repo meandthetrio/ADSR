@@ -7,6 +7,8 @@
 #include "shared_messages.h"
 #include "WaveformCache.h"
 #include "SampleMemoryManager.h"
+#include "VoiceManager.h"
+#include "PerformVoice.h"
 
 using namespace daisy;
 
@@ -47,10 +49,14 @@ constexpr int32_t kBaseMidiNote = 60;
 constexpr uint32_t kPerformSampleId = 1;
 
 extern DaisyPod hw;
-extern StorageService storage;
+StorageService storage;
+StorageService::SdErrorCode sd_fault_code = StorageService::SdErrorCode::None;
 extern Ui g_ui;
 extern SampleMemoryManager sample_mem_mgr;
 extern WaveformCache perform_waveform_cache;
+extern VoiceManager voice_mgr;
+extern PerformVoice perform_voices[kPerformVoiceCount];
+extern uint32_t g_last_draw_ms;
 
 extern volatile UiMode ui_mode;
 extern volatile int32_t menu_index;
@@ -279,7 +285,31 @@ void FreePerformSample()
 
 void AppController::Init()
 {
+	storage.Init();
+	voice_mgr.Init(perform_voices, kPerformVoiceCount);
+	ValidateConfig();
+	{
+		StorageService::PreviewStreamConfig cfg = {};
+		cfg.buffer = preview_buffer;
+		cfg.frames = kPreviewBufferFrames;
+		cfg.write_index = &preview_write_index;
+		cfg.read_index = &preview_read_index;
+#if STORAGE_SERVICE_PREVIEW_STREAM
+		cfg.preload_buf = preview_preload_buf;
+		cfg.preload_frames = kPreviewPreloadFrames;
+		cfg.pp_buf_a = &preview_pp_buf[0][0];
+		cfg.pp_buf_b = &preview_pp_buf[1][0];
+		cfg.pp_frames = kPreviewPpFrames;
+		cfg.pp_ready_a = &preview_pp_ready[0];
+		cfg.pp_ready_b = &preview_pp_ready[1];
+		cfg.pp_active = &preview_pp_active;
+#endif
+		storage.SetPreviewStreamConfig(cfg);
+	}
 	g_ui.Init();
+	MountSd();
+	DrawMenu(menu_index);
+	g_last_draw_ms = System::GetNow();
 }
 
 void AppController::Tick(uint32_t /*now_ms*/)
