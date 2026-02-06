@@ -4,6 +4,7 @@
 #include "shared_messages.h"
 #include "PerformVoice.h"
 #include "VoiceManager.h"
+#include "SampleMemoryManager.h"
 #include "util/scopedirqblocker.h"
 #include "daisy_pod.h"
 #include "daisysp.h"
@@ -45,6 +46,7 @@ constexpr size_t kDelayMaxSamples = 96000;
 constexpr float kDelayFeedbackMax = 0.98f;
 constexpr size_t kReverbPreDelayMaxSamples = 48000;
 constexpr size_t kPreviewPpFrames = 2048;
+constexpr uint32_t kPerformSampleId = 1;
 constexpr float kSilentAmp = 1.0e-4f;
 constexpr uint16_t kSilentSamplesToKill = 64;
 constexpr size_t kRecordMaxFrames = kMaxSampleFrames;
@@ -99,6 +101,7 @@ extern volatile float g_delay_time_alpha;
 extern volatile float g_delay_param_alpha;
 extern int16_t* sample_buffer_l;
 extern int16_t* sample_buffer_r;
+extern SampleMemoryManager sample_mem_mgr;
 extern PerformVoice perform_voices[];
 extern BiquadLp perform_lpf_l1[];
 extern BiquadLp perform_lpf_l2[];
@@ -169,6 +172,57 @@ extern volatile uint8_t g_playback_cmd_rd;
 static inline bool AnyPerformVoiceActive()
 {
 	return g_active_voice_count > 0;
+}
+
+static inline void ReleaseVoiceSample(PerformVoice& voice)
+{
+	if (voice.sample_acquired)
+	{
+		sample_mem_mgr.Release(kPerformSampleId);
+		voice.sample_acquired = false;
+	}
+}
+
+void DeactivateVoice(PerformVoice& voice)
+{
+	if (voice.active)
+	{
+		ReleaseVoiceSample(voice);
+		voice.active = false;
+		if (g_active_voice_count > 0)
+		{
+			--g_active_voice_count;
+		}
+	}
+	voice.releasing = false;
+	voice.sample_acquired = false;
+	voice.phase = 0.0f;
+	voice.rate = 1.0f;
+	voice.amp = 1.0f;
+	voice.env = 0.0f;
+	voice.release_start = 0.0f;
+	voice.release_pos = 0.0f;
+	voice.note = -1;
+	voice.offset = 0;
+	voice.length = 0;
+	voice.env_samples = 0;
+	voice.silent_samples = 0;
+}
+
+void ResetPerformVoices()
+{
+	for (int i = 0; i < kPerformVoiceCount; ++i)
+	{
+		DeactivateVoice(perform_voices[i]);
+	}
+	g_active_voice_count = 0;
+	for (int i = 0; i < kPerformVoiceCount; ++i)
+	{
+		perform_lpf_l1[i].Reset();
+		perform_lpf_l2[i].Reset();
+		perform_lpf_r1[i].Reset();
+		perform_lpf_r2[i].Reset();
+	}
 }
 static inline uint8_t MidiCmdPopBatchAudio(MidiCmd* out, uint8_t max_n)
 {

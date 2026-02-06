@@ -5,7 +5,6 @@
 #include "shared_messages.h"
 
 struct AudioUiState;
-struct PerformVoice;
 
 class Ui
 {
@@ -64,7 +63,6 @@ void UpdateTrimFrames();
 void PublishRuntimeFromUi();
 void PublishAudioParamsFromUi(const AudioParams& p);
 float FxWetValue(int32_t fx_index);
-void DeactivateVoice(PerformVoice& voice);
 void JobCancel();
 void SetFxContext(FxContext ctx, int32_t track = 0);
 void JobStartFileList(const char* path, bool wav_only, bool foreground = true);

@@ -6,8 +6,7 @@
 #include "SamplerConfig.h"
 #include "StorageService.h"
 #include "WaveformCache.h"
-#include "SampleMemoryManager.h"
-#include "PerformVoice.h"
+#include "app_controller.h"
 #include "audio_dsp.h"
 #include <cstdint>
 #include <cstddef>
@@ -369,8 +368,8 @@ extern float trim_end;
 extern uint32_t snap_start_frame;
 extern uint32_t snap_end_frame;
 extern volatile bool playback_active;
-extern SampleMemoryManager sample_mem_mgr;
-extern PerformVoice perform_voices[kPerformVoiceCount];
+extern bool AllocatePerformSample(size_t bytes, void** out_ptr);
+extern void FreePerformSample();
 extern BiquadLp perform_lpf_l1[];
 extern BiquadLp perform_lpf_l2[];
 extern BiquadLp perform_lpf_r1[];
@@ -2679,40 +2678,6 @@ bool IsPerformUiMode(UiMode mode)
 }
 
 
-static inline void ReleaseVoiceSample(PerformVoice& voice)
-{
-	if (voice.sample_acquired)
-	{
-		sample_mem_mgr.Release(kPerformSampleId);
-		voice.sample_acquired = false;
-	}
-}
-
-void DeactivateVoice(PerformVoice& voice)
-{
-	if (voice.active)
-	{
-		ReleaseVoiceSample(voice);
-		voice.active = false;
-		if (g_active_voice_count > 0)
-		{
-			--g_active_voice_count;
-		}
-	}
-	voice.releasing = false;
-	voice.sample_acquired = false;
-	voice.phase = 0.0f;
-	voice.rate = 1.0f;
-	voice.amp = 1.0f;
-	voice.env = 0.0f;
-	voice.release_start = 0.0f;
-	voice.release_pos = 0.0f;
-	voice.note = -1;
-	voice.offset = 0;
-	voice.length = 0;
-	voice.env_samples = 0;
-	voice.silent_samples = 0;
-}
 
 void PublishRuntimeFromUi()
 {
@@ -2911,21 +2876,6 @@ void SetFxContext(FxContext ctx, int32_t track)
 	ApplyPerformState(main_perform_state);
 }
 
-void ResetPerformVoices()
-{
-	for (auto &voice : perform_voices)
-	{
-		DeactivateVoice(voice);
-	}
-	g_active_voice_count = 0;
-	for (int i = 0; i < kPerformVoiceCount; ++i)
-	{
-		perform_lpf_l1[i].Reset();
-		perform_lpf_l2[i].Reset();
-		perform_lpf_r1[i].Reset();
-		perform_lpf_r2[i].Reset();
-	}
-}
 
 void ApplyLoadedSampleFade(size_t length, uint32_t rate)
 {
@@ -2981,7 +2931,7 @@ static bool LoadSampleFromPath(const char* path)
 		return false;
 	}
 	void* sample_ptr = nullptr;
-	if (!sample_mem_mgr.Allocate(kPerformSampleId, kPerformSampleRamBudgetBytes, &sample_ptr))
+	if (!AllocatePerformSample(kPerformSampleRamBudgetBytes, &sample_ptr))
 	{
 		load_fail_budget_count++;
 		return false;
@@ -2998,7 +2948,7 @@ static bool LoadSampleFromPath(const char* path)
 	{
 		loader_state = LoaderState::Failed;
 		load_fail_io_count++;
-		sample_mem_mgr.Free(kPerformSampleId);
+		FreePerformSample();
 		return false;
 	}
 	load_in_progress = true;
