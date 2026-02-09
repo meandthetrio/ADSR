@@ -50,7 +50,6 @@ constexpr uint32_t kPerformSampleId = 1;
 
 extern DaisyPod hw;
 StorageService storage;
-StorageService::SdErrorCode sd_fault_code = StorageService::SdErrorCode::None;
 extern Ui g_ui;
 extern SampleMemoryManager sample_mem_mgr;
 extern WaveformCache perform_waveform_cache;
@@ -90,7 +89,6 @@ extern volatile int32_t wav_file_count;
 extern bool sd_mounted;
 extern bool sd_present;
 extern bool sd_fault;
-extern StorageService::SdErrorCode sd_fault_code;
 extern const char* sd_fault_text;
 extern uint32_t sd_retries_remaining;
 extern bool sd_init_in_progress;
@@ -273,6 +271,43 @@ extern void ApplyLoadedSampleFade(size_t length, uint32_t rate);
 extern double NowMs();
 extern const char* SdFaultText(StorageService::SdErrorCode code);
 
+// OWNER: UI/main loop.
+// WRITES: AppController only.
+// READS: AppController only.
+struct AppState
+{
+	StorageService::SdErrorCode sd_fault_code = StorageService::SdErrorCode::None;
+	UiMode last_mode = UiMode::Main;
+	int32_t last_menu = 0;
+	int32_t last_scroll = 0;
+	int32_t last_selected = 0;
+	int32_t last_file_count = 0;
+	bool last_sd_mounted = false;
+	int32_t last_perform_index = -1;
+	int32_t last_shift_menu = 0;
+	int32_t last_fx_detail_index = -1;
+	int32_t last_fx_detail_param_index = -1;
+	uint32_t perform_redraw_next_ms = 0;
+	float last_perform_amp_vals[kPerformFaderCount] = {-1.0f, -1.0f, -1.0f, -1.0f};
+	float last_perform_flt_vals[kPerformFltFaderCount] = {-1.0f, -1.0f};
+	float last_perform_fx_vals[kPerformFaderCount] = {-1.0f, -1.0f, -1.0f, -1.0f};
+	int32_t last_perform_fx_order[kPerformFaderCount] = {-1, -1, -1, -1};
+	bool last_perform_fx_select_active = false;
+	bool last_perform_amp_select_active = false;
+	bool last_perform_flt_select_active = false;
+	int32_t last_perform_fx_selected = -1;
+	int32_t last_perform_amp_selected = -1;
+	int32_t last_perform_flt_selected = -1;
+	uint32_t rev_anim_next_ms = 0;
+	uint32_t record_draw_next_ms = 0;
+	uint32_t last_edt_playhead_ms = 0;
+	bool last_edt_playhead_active = false;
+	bool last_playback_active = false;
+	RecordState last_record_state = RecordState::Armed;
+	uint8_t last_audio_ui_idx = 0;
+};
+static AppState g_app;
+
 bool AllocatePerformSample(size_t bytes, void** out_ptr)
 {
 	return sample_mem_mgr.Allocate(kPerformSampleId, bytes, out_ptr);
@@ -314,34 +349,7 @@ void AppController::Init()
 
 void AppController::Tick(uint32_t /*now_ms*/)
 {
-	static UiMode last_mode = UiMode::Main;
-	static int32_t last_menu = 0;
-	static int32_t last_scroll = 0;
-	static int32_t last_selected = 0;
-	static int32_t last_file_count = 0;
-	static bool last_sd_mounted = false;
-	static RecordState last_record_state = RecordState::Armed;
-	static int32_t last_perform_index = -1;
-	static int32_t last_shift_menu = 0;
-	static int32_t last_fx_detail_index = -1;
-	static int32_t last_fx_detail_param_index = -1;
-	static uint32_t perform_redraw_next_ms = 0;
-	static float last_perform_amp_vals[kPerformFaderCount] = {-1.0f, -1.0f, -1.0f, -1.0f};
-	static float last_perform_flt_vals[kPerformFltFaderCount] = {-1.0f, -1.0f};
-	static float last_perform_fx_vals[kPerformFaderCount] = {-1.0f, -1.0f, -1.0f, -1.0f};
-	static int32_t last_perform_fx_order[kPerformFaderCount] = {-1, -1, -1, -1};
-	static bool last_perform_fx_select_active = false;
-	static bool last_perform_amp_select_active = false;
-	static bool last_perform_flt_select_active = false;
-	static int32_t last_perform_fx_selected = -1;
-	static int32_t last_perform_amp_selected = -1;
-	static int32_t last_perform_flt_selected = -1;
-	static uint32_t rev_anim_next_ms = 0;
-	static uint32_t record_draw_next_ms = 0;
-	static uint32_t last_edt_playhead_ms = 0;
-	static bool last_edt_playhead_active = false;
-	static bool last_playback_active = false;
-	static uint8_t last_audio_ui_idx = 0;
+	// remaining state lives in g_app
 
 		const uint32_t storage_budget = (preview_pending_start || preview_hold)
 			? kStoragePreviewBudgetUs
@@ -669,9 +677,9 @@ void AppController::Tick(uint32_t /*now_ms*/)
 			const StorageService::SdStatus& st = storage.GetSdStatus();
 			sd_present = st.present;
 			sd_mounted = st.mounted;
-			sd_fault_code = st.last_error.code;
-			sd_fault = (sd_fault_code != StorageService::SdErrorCode::None);
-			sd_fault_text = sd_fault ? SdFaultText(sd_fault_code) : nullptr;
+			g_app.sd_fault_code = st.last_error.code;
+			sd_fault = (g_app.sd_fault_code != StorageService::SdErrorCode::None);
+			sd_fault_text = sd_fault ? SdFaultText(g_app.sd_fault_code) : nullptr;
 			const uint32_t max_retry = StorageService::kSdRetryMaxAttempts;
 			sd_retries_remaining = (sd_fault && max_retry > st.last_error.retries)
 				? (max_retry - st.last_error.retries)
@@ -879,12 +887,12 @@ void AppController::Tick(uint32_t /*now_ms*/)
 					{
 						ui_mode = UiMode::Load;
 						request_load_scan = true;
-						last_mode = UiMode::Shift;
+						g_app.last_mode = UiMode::Shift;
 					}
 					else
 					{
 						ui_mode = sd_init_prev_mode;
-						last_mode = UiMode::Shift;
+						g_app.last_mode = UiMode::Shift;
 					}
 					request_shift_redraw = true;
 				}
@@ -969,7 +977,7 @@ void AppController::Tick(uint32_t /*now_ms*/)
 			{
 				save_in_progress = false;
 				ui_mode = save_prev_mode;
-				last_mode = UiMode::Shift;
+				g_app.last_mode = UiMode::Shift;
 			}
 		}
 
@@ -984,7 +992,7 @@ void AppController::Tick(uint32_t /*now_ms*/)
 				if (ui_mode == UiMode::Record && record_state == RecordState::Review)
 				{
 					DrawRecordReview();
-					last_record_state = record_state;
+					g_app.last_record_state = record_state;
 				}
 			}
 		}
@@ -1004,13 +1012,13 @@ void AppController::Tick(uint32_t /*now_ms*/)
 		{
 			request_shift_redraw = false;
 			DrawShiftMenu(shift_menu_index);
-			last_shift_menu = shift_menu_index;
+			g_app.last_shift_menu = shift_menu_index;
 		}
 
 		const UiMode mode = ui_mode;
-		if (mode != last_mode)
+		if (mode != g_app.last_mode)
 		{
-			if (last_mode == UiMode::Load && mode != UiMode::Load && g_job.type == JobType::FileListScan)
+			if (g_app.last_mode == UiMode::Load && mode != UiMode::Load && g_job.type == JobType::FileListScan)
 			{
 				JobCancel();
 			}
@@ -1026,7 +1034,7 @@ void AppController::Tick(uint32_t /*now_ms*/)
 			{
 				SetFxContext(FxContext::Perform);
 			}
-			if (IsPerformUiMode(last_mode) && !IsPerformUiMode(mode))
+			if (IsPerformUiMode(g_app.last_mode) && !IsPerformUiMode(mode))
 			{
 				RequestAudioCmd(kCmdAllNotesOff);
 			}
@@ -1034,7 +1042,7 @@ void AppController::Tick(uint32_t /*now_ms*/)
 			{
 				record_anim_start_ms = NowMs();
 			}
-			else if (last_mode == UiMode::Record)
+			else if (g_app.last_mode == UiMode::Record)
 			{
 				record_anim_start_ms = -1.0;
 			}
@@ -1080,8 +1088,8 @@ void AppController::Tick(uint32_t /*now_ms*/)
 			else if (mode == UiMode::FxDetail)
 			{
 				DrawFxDetailScreen(fx_detail_index);
-				last_fx_detail_index = fx_detail_index;
-				last_fx_detail_param_index = fx_detail_param_index;
+				g_app.last_fx_detail_index = fx_detail_index;
+				g_app.last_fx_detail_param_index = fx_detail_param_index;
 			}
 			else if (mode == UiMode::Perform)
 			{
@@ -1103,27 +1111,27 @@ void AppController::Tick(uint32_t /*now_ms*/)
 				const float flt_vals[kPerformFltFaderCount] = {flt_cutoff, flt_res};
 				for (int i = 0; i < kPerformFaderCount; ++i)
 				{
-					last_perform_amp_vals[i] = amp_vals[i];
-					last_perform_fx_order[i] = fx_chain_order[i];
-					last_perform_fx_vals[i] = FxWetValue(fx_chain_order[i]);
+					g_app.last_perform_amp_vals[i] = amp_vals[i];
+					g_app.last_perform_fx_order[i] = fx_chain_order[i];
+					g_app.last_perform_fx_vals[i] = FxWetValue(fx_chain_order[i]);
 				}
 				for (int i = 0; i < kPerformFltFaderCount; ++i)
 				{
-					last_perform_flt_vals[i] = flt_vals[i];
+					g_app.last_perform_flt_vals[i] = flt_vals[i];
 				}
-				last_perform_fx_select_active = fx_select_active;
-				last_perform_amp_select_active = amp_select_active;
-				last_perform_flt_select_active = flt_select_active;
-				last_perform_fx_selected = fx_fader_index;
-				last_perform_amp_selected = amp_fader_index;
-				last_perform_flt_selected = flt_fader_index;
-				last_perform_index = perform_index;
-				perform_redraw_next_ms = System::GetNow() + kPerformPlayheadIntervalMs;
+				g_app.last_perform_fx_select_active = fx_select_active;
+				g_app.last_perform_amp_select_active = amp_select_active;
+				g_app.last_perform_flt_select_active = flt_select_active;
+				g_app.last_perform_fx_selected = fx_fader_index;
+				g_app.last_perform_amp_selected = amp_fader_index;
+				g_app.last_perform_flt_selected = flt_fader_index;
+				g_app.last_perform_index = perform_index;
+				g_app.perform_redraw_next_ms = System::GetNow() + kPerformPlayheadIntervalMs;
 			}
 			else if (mode == UiMode::Shift)
 			{
 				DrawShiftMenu(shift_menu_index);
-				last_shift_menu = shift_menu_index;
+				g_app.last_shift_menu = shift_menu_index;
 			}
 			else if (mode == UiMode::PresetSaveStub)
 			{
@@ -1164,22 +1172,22 @@ void AppController::Tick(uint32_t /*now_ms*/)
 					DrawRecordReview();
 				}
 			}
-			last_mode = mode;
-			last_menu = menu_index;
-			last_scroll = load_scroll;
-			last_selected = load_selected;
-			last_file_count = wav_file_count;
-			last_sd_mounted = sd_mounted;
-			last_record_state = record_state;
-			last_perform_index = perform_index;
+			g_app.last_mode = mode;
+			g_app.last_menu = menu_index;
+			g_app.last_scroll = load_scroll;
+			g_app.last_selected = load_selected;
+			g_app.last_file_count = wav_file_count;
+			g_app.last_sd_mounted = sd_mounted;
+			g_app.last_record_state = record_state;
+			g_app.last_perform_index = perform_index;
 		}
 		else if (mode == UiMode::Main)
 		{
 			const int32_t current = menu_index;
-			if (current != last_menu)
+			if (current != g_app.last_menu)
 			{
 				DrawMenu(current);
-				last_menu = current;
+				g_app.last_menu = current;
 			}
 		}
 		else if (mode == UiMode::Perform)
@@ -1197,7 +1205,7 @@ void AppController::Tick(uint32_t /*now_ms*/)
 				= {amp_attack, amp_decay, amp_sustain, amp_release};
 			for (int i = 0; i < kPerformFaderCount; ++i)
 			{
-				if (amp_vals[i] != last_perform_amp_vals[i])
+				if (amp_vals[i] != g_app.last_perform_amp_vals[i])
 				{
 					amp_changed = true;
 					break;
@@ -1207,7 +1215,7 @@ void AppController::Tick(uint32_t /*now_ms*/)
 			const float flt_vals[kPerformFltFaderCount] = {flt_cutoff, flt_res};
 			for (int i = 0; i < kPerformFltFaderCount; ++i)
 			{
-				if (flt_vals[i] != last_perform_flt_vals[i])
+				if (flt_vals[i] != g_app.last_perform_flt_vals[i])
 				{
 					flt_changed = true;
 					break;
@@ -1220,31 +1228,31 @@ void AppController::Tick(uint32_t /*now_ms*/)
 			{
 				fx_order[i] = fx_chain_order[i];
 				fx_vals[i] = FxWetValue(fx_order[i]);
-				if (fx_order[i] != last_perform_fx_order[i]
-					|| fx_vals[i] != last_perform_fx_vals[i])
+				if (fx_order[i] != g_app.last_perform_fx_order[i]
+					|| fx_vals[i] != g_app.last_perform_fx_vals[i])
 				{
 					fx_changed = true;
 				}
 			}
 
-			const bool selection_changed = (current != last_perform_index);
+			const bool selection_changed = (current != g_app.last_perform_index);
 			const bool fx_select_changed
-				= (fx_select_active != last_perform_fx_select_active)
-				|| (fx_fader_index != last_perform_fx_selected);
+				= (fx_select_active != g_app.last_perform_fx_select_active)
+				|| (fx_fader_index != g_app.last_perform_fx_selected);
 			const bool amp_select_changed
-				= (amp_select_active != last_perform_amp_select_active)
-				|| (amp_fader_index != last_perform_amp_selected);
+				= (amp_select_active != g_app.last_perform_amp_select_active)
+				|| (amp_fader_index != g_app.last_perform_amp_selected);
 			const bool flt_select_changed
-				= (flt_select_active != last_perform_flt_select_active)
-				|| (flt_fader_index != last_perform_flt_selected);
+				= (flt_select_active != g_app.last_perform_flt_select_active)
+				|| (flt_fader_index != g_app.last_perform_flt_selected);
 
 			uint8_t redraw_mask = 0;
 			if (selection_changed)
 			{
 				redraw_mask |= (1u << current);
-				if (last_perform_index >= 0)
+				if (g_app.last_perform_index >= 0)
 				{
-					redraw_mask |= (1u << last_perform_index);
+					redraw_mask |= (1u << g_app.last_perform_index);
 				}
 			}
 			if (amp_changed || amp_select_changed)
@@ -1264,7 +1272,7 @@ void AppController::Tick(uint32_t /*now_ms*/)
 				redraw_mask |= (1u << kPerformEdtIndex);
 			}
 			if (!selection_changed && current == kPerformEdtIndex
-				&& last_perform_index == kPerformEdtIndex)
+				&& g_app.last_perform_index == kPerformEdtIndex)
 			{
 				// Keep EDT highlight accurate if select state flips.
 				redraw_mask |= (1u << kPerformEdtIndex);
@@ -1278,7 +1286,7 @@ void AppController::Tick(uint32_t /*now_ms*/)
 			if (redraw_mask != 0)
 			{
 				const uint32_t now = System::GetNow();
-				if (now >= perform_redraw_next_ms)
+				if (now >= g_app.perform_redraw_next_ms)
 				{
 					DrawPerformScreen(current,
 									  fx_select_active,
@@ -1288,24 +1296,24 @@ void AppController::Tick(uint32_t /*now_ms*/)
 									  flt_select_active,
 									  flt_fader_index,
 									  redraw_mask);
-					perform_redraw_next_ms = now + kPerformPlayheadIntervalMs;
+					g_app.perform_redraw_next_ms = now + kPerformPlayheadIntervalMs;
 					for (int i = 0; i < kPerformFaderCount; ++i)
 					{
-						last_perform_amp_vals[i] = amp_vals[i];
-						last_perform_fx_order[i] = fx_order[i];
-						last_perform_fx_vals[i] = fx_vals[i];
+						g_app.last_perform_amp_vals[i] = amp_vals[i];
+						g_app.last_perform_fx_order[i] = fx_order[i];
+						g_app.last_perform_fx_vals[i] = fx_vals[i];
 					}
 					for (int i = 0; i < kPerformFltFaderCount; ++i)
 					{
-						last_perform_flt_vals[i] = flt_vals[i];
+						g_app.last_perform_flt_vals[i] = flt_vals[i];
 					}
-					last_perform_fx_select_active = fx_select_active;
-					last_perform_amp_select_active = amp_select_active;
-					last_perform_flt_select_active = flt_select_active;
-					last_perform_fx_selected = fx_fader_index;
-					last_perform_amp_selected = amp_fader_index;
-					last_perform_flt_selected = flt_fader_index;
-					last_perform_index = current;
+					g_app.last_perform_fx_select_active = fx_select_active;
+					g_app.last_perform_amp_select_active = amp_select_active;
+					g_app.last_perform_flt_select_active = flt_select_active;
+					g_app.last_perform_fx_selected = fx_fader_index;
+					g_app.last_perform_amp_selected = amp_fader_index;
+					g_app.last_perform_flt_selected = flt_fader_index;
+					g_app.last_perform_index = current;
 					request_perform_redraw = false;
 				}
 			}
@@ -1319,24 +1327,24 @@ void AppController::Tick(uint32_t /*now_ms*/)
 			if (fx_detail_index == kFxReverbIndex && playback_reverse >= 0.5f)
 			{
 				const uint32_t now = System::GetNow();
-				if (now >= rev_anim_next_ms)
+				if (now >= g_app.rev_anim_next_ms)
 				{
 					request_fx_detail_redraw = true;
-					rev_anim_next_ms = now + 120;
+					g_app.rev_anim_next_ms = now + 120;
 				}
 			}
 			else
 			{
-				rev_anim_next_ms = 0;
+				g_app.rev_anim_next_ms = 0;
 			}
 			if (request_fx_detail_redraw
-				|| fx_detail_index != last_fx_detail_index
-				|| fx_detail_param_index != last_fx_detail_param_index)
+				|| fx_detail_index != g_app.last_fx_detail_index
+				|| fx_detail_param_index != g_app.last_fx_detail_param_index)
 			{
 				request_fx_detail_redraw = false;
 				DrawFxDetailScreen(fx_detail_index);
-				last_fx_detail_index = fx_detail_index;
-				last_fx_detail_param_index = fx_detail_param_index;
+				g_app.last_fx_detail_index = fx_detail_index;
+				g_app.last_fx_detail_param_index = fx_detail_param_index;
 			}
 		}
 		else if (mode == UiMode::Shift)
@@ -1344,10 +1352,10 @@ void AppController::Tick(uint32_t /*now_ms*/)
 			if (!ui_blocked)
 			{
 				const int32_t current = shift_menu_index;
-				if (current != last_shift_menu)
+				if (current != g_app.last_shift_menu)
 				{
 					DrawShiftMenu(current);
-					last_shift_menu = current;
+					g_app.last_shift_menu = current;
 				}
 			}
 		}
@@ -1371,20 +1379,20 @@ void AppController::Tick(uint32_t /*now_ms*/)
 				const int32_t current_count = wav_file_count;
 				const int32_t current_selected = load_selected;
 				if (request_delete_redraw
-					|| current_scroll != last_scroll
-					|| current_selected != last_selected
-					|| current_count != last_file_count
-					|| sd_mounted != last_sd_mounted)
+					|| current_scroll != g_app.last_scroll
+					|| current_selected != g_app.last_selected
+					|| current_count != g_app.last_file_count
+					|| sd_mounted != g_app.last_sd_mounted)
 				{
 					request_delete_redraw = false;
 					DrawLoadMenu(current_scroll, current_selected);
-					if (current_selected != last_selected || current_count != last_file_count)
+					if (current_selected != g_app.last_selected || current_count != g_app.last_file_count)
 					{
 					}
-					last_scroll = current_scroll;
-					last_selected = current_selected;
-					last_file_count = current_count;
-					last_sd_mounted = sd_mounted;
+					g_app.last_scroll = current_scroll;
+					g_app.last_selected = current_selected;
+					g_app.last_file_count = current_count;
+					g_app.last_sd_mounted = sd_mounted;
 				}
 			}
 		}
@@ -1399,7 +1407,7 @@ void AppController::Tick(uint32_t /*now_ms*/)
 		else if (mode == UiMode::Record)
 		{
 			const RecordState current_state = record_state;
-			if (current_state != last_record_state)
+			if (current_state != g_app.last_record_state)
 			{
 				if (current_state == RecordState::BackConfirm)
 				{
@@ -1423,7 +1431,7 @@ void AppController::Tick(uint32_t /*now_ms*/)
 					uint8_t ui_idx = 0;
 					const AudioUiState& uir = GetAudioUiStateSnapshot(ui_idx);
 					DrawRecordRecording(uir);
-					record_draw_next_ms = 0;
+					g_app.record_draw_next_ms = 0;
 				}
 				else if (current_state == RecordState::TargetSelect)
 				{
@@ -1433,7 +1441,7 @@ void AppController::Tick(uint32_t /*now_ms*/)
 				{
 					DrawRecordReview();
 				}
-				last_record_state = current_state;
+				g_app.last_record_state = current_state;
 			}
 		}
 		if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::Recording)
@@ -1441,10 +1449,10 @@ void AppController::Tick(uint32_t /*now_ms*/)
 			uint8_t ui_idx = 0;
 			const AudioUiState& uir = GetAudioUiStateSnapshot(ui_idx);
 			const uint32_t now = System::GetNow();
-			if (record_draw_next_ms == 0 || now >= record_draw_next_ms)
+			if (g_app.record_draw_next_ms == 0 || now >= g_app.record_draw_next_ms)
 			{
 				DrawRecordRecording(uir);
-				record_draw_next_ms = now + 33;
+				g_app.record_draw_next_ms = now + 33;
 			}
 		}
 		else if (!ui_blocked && mode == UiMode::Record && record_state == RecordState::SourceSelect)
@@ -1475,26 +1483,26 @@ void AppController::Tick(uint32_t /*now_ms*/)
 		if (edt_playhead_active)
 		{
 			const uint32_t now = System::GetNow();
-			if (!last_edt_playhead_active)
+			if (!g_app.last_edt_playhead_active)
 			{
-				last_edt_playhead_ms = now;
+				g_app.last_edt_playhead_ms = now;
 				waveform_dirty = true;
 				request_playhead_redraw = true;
 			}
-			else if ((now - last_edt_playhead_ms) >= kPerformPlayheadIntervalMs)
+			else if ((now - g_app.last_edt_playhead_ms) >= kPerformPlayheadIntervalMs)
 			{
-				last_edt_playhead_ms = now;
+				g_app.last_edt_playhead_ms = now;
 				waveform_dirty = true;
 				request_playhead_redraw = true;
 			}
 		}
 		else
 		{
-			last_edt_playhead_ms = 0;
+			g_app.last_edt_playhead_ms = 0;
 		}
-		last_edt_playhead_active = edt_playhead_active;
+		g_app.last_edt_playhead_active = edt_playhead_active;
 		const bool playback_active_now = play_uir.playback_active;
-		if (!ui_blocked && (request_playhead_redraw || (playback_active_now != last_playback_active)))
+		if (!ui_blocked && (request_playhead_redraw || (playback_active_now != g_app.last_playback_active)))
 		{
 			request_playhead_redraw = false;
 			if (mode == UiMode::Edt
@@ -1510,7 +1518,7 @@ void AppController::Tick(uint32_t /*now_ms*/)
 				}
 			}
 		}
-		last_playback_active = playback_active_now;
+		g_app.last_playback_active = playback_active_now;
 		if (request_playback_stop_log)
 		{
 			request_playback_stop_log = false;
@@ -1547,9 +1555,9 @@ void AppController::Tick(uint32_t /*now_ms*/)
 		{
 			uint8_t audio_ui_idx = 0;
 			GetAudioUiStateSnapshot(audio_ui_idx);
-			if (audio_ui_idx != last_audio_ui_idx)
+			if (audio_ui_idx != g_app.last_audio_ui_idx)
 			{
-				last_audio_ui_idx = audio_ui_idx;
+				g_app.last_audio_ui_idx = audio_ui_idx;
 				RequestDisplayUpdate();
 			}
 		}
@@ -1572,3 +1580,5 @@ void AppController::Tick(uint32_t /*now_ms*/)
  		hw.UpdateLeds();
 		hw.DelayMs(1);
 }
+
+

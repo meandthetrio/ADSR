@@ -10,16 +10,6 @@
 #include <cstring>
 #include <cstdio>
 
-daisy::SdmmcHandler sdcard;
-daisy::FatFSInterface fsi;
-
-static DIR g_scan_dir;
-static FILINFO g_scan_fno;
-static bool g_scan_dir_open = false;
-
-static FIL g_preview_file;
-static bool g_preview_open = false;
-
 struct StorageService::SaveState
 {
 	bool active = false;
@@ -55,18 +45,42 @@ struct StorageService::LoadState
 	uint32_t deadline_ms = 0;
 };
 
-static StorageService::SaveState g_save_state = {};
-static StorageService::LoadState g_load_state = {};
-static uint32_t g_preview_data_offset = 0;
-static uint32_t g_preview_sample_rate = 0;
-static uint16_t g_preview_channels = 0;
-static uint16_t g_preview_cookie = 0;
-static uint32_t g_preview_deadline_ms = 0;
+// OWNER: UI/main loop via StorageService::RunSlice().
+// WRITES: StorageService only.
+// READS: StorageService only.
+struct StorageState
+{
+	daisy::SdmmcHandler sdcard;
+	daisy::FatFSInterface fsi;
 
-static volatile uint32_t g_storage_slice_max_us = 0;
-static volatile uint32_t g_storage_readchunk_max_us = 0;
-static volatile uint32_t g_storage_readchunk_bytes = 0;
-static volatile uint32_t g_storage_readchunk_calls = 0;
+	DIR scan_dir = {};
+	FILINFO scan_fno = {};
+	bool scan_dir_open = false;
+
+	FIL preview_file = {};
+	bool preview_open = false;
+
+	StorageService::SaveState save_state = {};
+	StorageService::LoadState load_state = {};
+	uint32_t preview_data_offset = 0;
+	uint32_t preview_sample_rate = 0;
+	uint16_t preview_channels = 0;
+	uint16_t preview_cookie = 0;
+	uint32_t preview_deadline_ms = 0;
+
+	volatile uint32_t storage_slice_max_us = 0;
+	volatile uint32_t storage_readchunk_max_us = 0;
+	volatile uint32_t storage_readchunk_bytes = 0;
+	volatile uint32_t storage_readchunk_calls = 0;
+
+	alignas(32) uint8_t wav_riff_hdr[12] = {};
+	alignas(32) uint8_t wav_chunk_hdr[8] = {};
+	alignas(32) uint8_t wav_fmt_buf[32] = {};
+	alignas(32) int16_t preview_read_buf[2048 * 2] = {};
+	alignas(32) int16_t save_write_buf[8192 * 2] = {};
+	alignas(32) int16_t load_read_buf[256 * 2] = {};
+};
+static StorageState g_storage;
 
 static constexpr uint32_t kSdRetryBaseBackoffMs = 200;
 static constexpr uint32_t kSdRetryMaxBackoffMs = 2000;
@@ -76,13 +90,6 @@ static constexpr uint32_t kSdOpTimeoutSaveMs = 8000;
 static constexpr uint32_t kSdOpTimeoutPreviewMs = 1500;
 static constexpr uint32_t kSdOpTimeoutScanMs = 3000;
 static constexpr uint32_t kSdOpTimeoutDeleteMs = 2000;
-
-alignas(32) static uint8_t wav_riff_hdr[12];
-alignas(32) static uint8_t wav_chunk_hdr[8];
-alignas(32) static uint8_t wav_fmt_buf[32];
-alignas(32) static int16_t g_preview_read_buf[2048 * 2];
-alignas(32) static int16_t g_save_write_buf[8192 * 2];
-alignas(32) static int16_t g_load_read_buf[256 * 2];
 
 struct WavInfo
 {
@@ -108,14 +115,14 @@ static bool ParseWavHeader(FIL* file, WavInfo& info)
 		return false;
 	}
 
-	fres = f_read(file, wav_riff_hdr, sizeof(wav_riff_hdr), &bytes_read);
-	if (fres != FR_OK || bytes_read != sizeof(wav_riff_hdr))
+	fres = f_read(file, g_storage.wav_riff_hdr, sizeof(g_storage.wav_riff_hdr), &bytes_read);
+	if (fres != FR_OK || bytes_read != sizeof(g_storage.wav_riff_hdr))
 	{
 		return false;
 	}
 
-	if (std::memcmp(wav_riff_hdr, "RIFF", 4) != 0
-		|| std::memcmp(wav_riff_hdr + 8, "WAVE", 4) != 0)
+	if (std::memcmp(g_storage.wav_riff_hdr, "RIFF", 4) != 0
+		|| std::memcmp(g_storage.wav_riff_hdr + 8, "WAVE", 4) != 0)
 	{
 		return false;
 	}
@@ -126,39 +133,39 @@ static bool ParseWavHeader(FIL* file, WavInfo& info)
 
 	while (!data_found)
 	{
-		fres = f_read(file, wav_chunk_hdr, sizeof(wav_chunk_hdr), &bytes_read);
-		if (fres != FR_OK || bytes_read != sizeof(wav_chunk_hdr))
+		fres = f_read(file, g_storage.wav_chunk_hdr, sizeof(g_storage.wav_chunk_hdr), &bytes_read);
+		if (fres != FR_OK || bytes_read != sizeof(g_storage.wav_chunk_hdr))
 		{
 			return false;
 		}
 
 		const uint32_t chunk_size =
-			(uint32_t)wav_chunk_hdr[4]
-			| ((uint32_t)wav_chunk_hdr[5] << 8)
-			| ((uint32_t)wav_chunk_hdr[6] << 16)
-			| ((uint32_t)wav_chunk_hdr[7] << 24);
+			(uint32_t)g_storage.wav_chunk_hdr[4]
+			| ((uint32_t)g_storage.wav_chunk_hdr[5] << 8)
+			| ((uint32_t)g_storage.wav_chunk_hdr[6] << 16)
+			| ((uint32_t)g_storage.wav_chunk_hdr[7] << 24);
 
-		if (std::memcmp(wav_chunk_hdr, "fmt ", 4) == 0)
+		if (std::memcmp(g_storage.wav_chunk_hdr, "fmt ", 4) == 0)
 		{
-			const UINT to_read = (UINT)((chunk_size < sizeof(wav_fmt_buf)) ? chunk_size : sizeof(wav_fmt_buf));
+			const UINT to_read = (UINT)((chunk_size < sizeof(g_storage.wav_fmt_buf)) ? chunk_size : sizeof(g_storage.wav_fmt_buf));
 
-			fres = f_read(file, wav_fmt_buf, to_read, &bytes_read);
+			fres = f_read(file, g_storage.wav_fmt_buf, to_read, &bytes_read);
 			if (fres != FR_OK || bytes_read < 16)
 			{
 				return false;
 			}
 
 			const uint16_t audio_format =
-				(uint16_t)(wav_fmt_buf[0] | (wav_fmt_buf[1] << 8));
+				(uint16_t)(g_storage.wav_fmt_buf[0] | (g_storage.wav_fmt_buf[1] << 8));
 			info.num_channels =
-				(uint16_t)(wav_fmt_buf[2] | (wav_fmt_buf[3] << 8));
+				(uint16_t)(g_storage.wav_fmt_buf[2] | (g_storage.wav_fmt_buf[3] << 8));
 			info.sample_rate =
-				(uint32_t)(wav_fmt_buf[4]
-					| (wav_fmt_buf[5] << 8)
-					| (wav_fmt_buf[6] << 16)
-					| (wav_fmt_buf[7] << 24));
+				(uint32_t)(g_storage.wav_fmt_buf[4]
+					| (g_storage.wav_fmt_buf[5] << 8)
+					| (g_storage.wav_fmt_buf[6] << 16)
+					| (g_storage.wav_fmt_buf[7] << 24));
 			info.bits_per_sample =
-				(uint16_t)(wav_fmt_buf[14] | (wav_fmt_buf[15] << 8));
+				(uint16_t)(g_storage.wav_fmt_buf[14] | (g_storage.wav_fmt_buf[15] << 8));
 
 			if (audio_format != daisy::WAVE_FORMAT_PCM)
 			{
@@ -177,7 +184,7 @@ static bool ParseWavHeader(FIL* file, WavInfo& info)
 				}
 			}
 		}
-		else if (std::memcmp(wav_chunk_hdr, "data", 4) == 0)
+		else if (std::memcmp(g_storage.wav_chunk_hdr, "data", 4) == 0)
 		{
 			info.data_offset = (uint32_t)f_tell(file);
 			info.data_size = chunk_size;
@@ -348,7 +355,7 @@ void StorageService::Init()
 	scan_max_entries_ = 0;
 	scan_count_ = 0;
 	scan_path_[0] = '\0';
-	g_scan_dir_open = false;
+	g_storage.scan_dir_open = false;
 	preview_buffer_ = nullptr;
 	preview_frames_ = 0;
 	preview_write_index_ = nullptr;
@@ -364,16 +371,16 @@ void StorageService::Init()
 	preview_pp_ready_a_ = nullptr;
 	preview_pp_ready_b_ = nullptr;
 	preview_pp_active_ = nullptr;
-	save_ = &g_save_state;
-	load_ = &g_load_state;
+	save_ = &g_storage.save_state;
+	load_ = &g_storage.load_state;
 	*save_ = {};
 	*load_ = {};
-	g_preview_open = false;
-	g_preview_data_offset = 0;
-	g_preview_sample_rate = 0;
-	g_preview_channels = 0;
-	g_preview_cookie = 0;
-	fsi.Init(daisy::FatFSInterface::Config::MEDIA_SD);
+	g_storage.preview_open = false;
+	g_storage.preview_data_offset = 0;
+	g_storage.preview_sample_rate = 0;
+	g_storage.preview_channels = 0;
+	g_storage.preview_cookie = 0;
+	g_storage.fsi.Init(daisy::FatFSInterface::Config::MEDIA_SD);
 	sd_status_ = {};
 	next_op_id_ = 1;
 }
@@ -396,7 +403,7 @@ void StorageService::SetPreviewStreamConfig(const PreviewStreamConfig& cfg)
 
 void StorageService::UnmountSd()
 {
-	(void)f_mount(0, fsi.GetSDPath(), 0);
+	(void)f_mount(0, g_storage.fsi.GetSDPath(), 0);
 }
 
 void StorageService::ClearSdError()
@@ -410,15 +417,15 @@ void StorageService::CancelAllOps(SdErrorCode reason)
 	op_rd_ = op_wr_;
 	scan_active_ = false;
 	scan_done_pending_ = false;
-	if (g_scan_dir_open)
+	if (g_storage.scan_dir_open)
 	{
-		f_closedir(&g_scan_dir);
-		g_scan_dir_open = false;
+		f_closedir(&g_storage.scan_dir);
+		g_storage.scan_dir_open = false;
 	}
-	if (g_preview_open)
+	if (g_storage.preview_open)
 	{
-		f_close(&g_preview_file);
-		g_preview_open = false;
+		f_close(&g_storage.preview_file);
+		g_storage.preview_open = false;
 	}
 	save_->active = false;
 	load_->active = false;
@@ -432,7 +439,7 @@ void StorageService::CancelAllOps(SdErrorCode reason)
 
 const char* StorageService::GetSdPath() const
 {
-	return fsi.GetSDPath();
+	return g_storage.fsi.GetSDPath();
 }
 
 bool StorageService::Enqueue(const Op& op)
@@ -560,11 +567,11 @@ void StorageService::RunSlice(uint32_t budget_us)
 				{
 					daisy::SdmmcHandler::Config sd_cfg;
 					sd_cfg.Defaults();
-					sdcard.Init(sd_cfg);
+					g_storage.sdcard.Init(sd_cfg);
 					(void)BSP_SD_Init();
 					sd_hw_inited_ = true;
 				}
-				const FRESULT res = f_mount(&fsi.GetSDFileSystem(), fsi.GetSDPath(), 1);
+				const FRESULT res = f_mount(&g_storage.fsi.GetSDFileSystem(), g_storage.fsi.GetSDPath(), 1);
 				if (res == FR_OK)
 				{
 					mount_state_ = MountState::Mounted;
@@ -613,10 +620,10 @@ void StorageService::RunSlice(uint32_t budget_us)
 			}
 			case OpKind::ScanDir:
 			{
-				if (g_scan_dir_open)
+				if (g_storage.scan_dir_open)
 				{
-					f_closedir(&g_scan_dir);
-					g_scan_dir_open = false;
+					f_closedir(&g_storage.scan_dir);
+					g_storage.scan_dir_open = false;
 				}
 				scan_active_ = false;
 				scan_done_pending_ = false;
@@ -634,7 +641,7 @@ void StorageService::RunSlice(uint32_t budget_us)
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 					break;
 				}
-				const FRESULT res = f_opendir(&g_scan_dir, scan_path_);
+				const FRESULT res = f_opendir(&g_storage.scan_dir, scan_path_);
 				if (res != FR_OK)
 				{
 					if (retry_op(SdErrorCode::OpenFailed, res))
@@ -647,20 +654,20 @@ void StorageService::RunSlice(uint32_t budget_us)
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 					break;
 				}
-				g_scan_dir_open = true;
+				g_storage.scan_dir_open = true;
 				scan_active_ = true;
 				break;
 			}
 			case OpKind::PreviewOpen:
 			{
-				if (g_preview_open)
+				if (g_storage.preview_open)
 				{
-					f_close(&g_preview_file);
-					g_preview_open = false;
+					f_close(&g_storage.preview_file);
+					g_storage.preview_open = false;
 				}
-				g_preview_cookie = op.cookie;
-				g_preview_deadline_ms = op.deadline_ms;
-				const FRESULT open_res = f_open(&g_preview_file, op.path, FA_READ);
+				g_storage.preview_cookie = op.cookie;
+				g_storage.preview_deadline_ms = op.deadline_ms;
+				const FRESULT open_res = f_open(&g_storage.preview_file, op.path, FA_READ);
 				if (open_res != FR_OK)
 				{
 					if (retry_op(SdErrorCode::OpenFailed, open_res))
@@ -669,18 +676,18 @@ void StorageService::RunSlice(uint32_t budget_us)
 					}
 					Event ev = {};
 					ev.kind = EventKind::PreviewOpenFail;
-					ev.cookie = g_preview_cookie;
+					ev.cookie = g_storage.preview_cookie;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 					break;
 				}
 				WavInfo wav;
-				if (!ParseWavHeader(&g_preview_file, wav)
+				if (!ParseWavHeader(&g_storage.preview_file, wav)
 					|| wav.bits_per_sample != 16
 					|| wav.num_channels < 1
 					|| wav.num_channels > 2)
 				{
-					f_close(&g_preview_file);
-					g_preview_open = false;
+					f_close(&g_storage.preview_file);
+					g_storage.preview_open = false;
 					if (retry_op(SdErrorCode::ReadFailed, -1))
 					{
 						break;
@@ -688,33 +695,33 @@ void StorageService::RunSlice(uint32_t budget_us)
 					++sd_counters_.read_failures;
 					Event ev = {};
 					ev.kind = EventKind::PreviewOpenFail;
-					ev.cookie = g_preview_cookie;
+					ev.cookie = g_storage.preview_cookie;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 					break;
 				}
 
-				g_preview_data_offset = wav.data_offset;
-				g_preview_sample_rate = wav.sample_rate;
-				g_preview_channels = wav.num_channels;
-				if (f_lseek(&g_preview_file, g_preview_data_offset) != FR_OK)
+				g_storage.preview_data_offset = wav.data_offset;
+				g_storage.preview_sample_rate = wav.sample_rate;
+				g_storage.preview_channels = wav.num_channels;
+				if (f_lseek(&g_storage.preview_file, g_storage.preview_data_offset) != FR_OK)
 				{
-					f_close(&g_preview_file);
-					g_preview_open = false;
+					f_close(&g_storage.preview_file);
+					g_storage.preview_open = false;
 					Event ev = {};
 					ev.kind = EventKind::PreviewOpenFail;
-					ev.cookie = g_preview_cookie;
+					ev.cookie = g_storage.preview_cookie;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 					break;
 				}
-				g_preview_open = true;
+				g_storage.preview_open = true;
 				if (preview_preload_buf_ != nullptr && preview_preload_frames_ > 0)
 				{
 					preview_preload_active_ = true;
 					preview_preload_filled_ = 0;
-					if (g_preview_sample_rate > 0)
+					if (g_storage.preview_sample_rate > 0)
 					{
 						const uint64_t scaled = (uint64_t)preview_preload_frames_
-							* (uint64_t)g_preview_sample_rate;
+							* (uint64_t)g_storage.preview_sample_rate;
 						const size_t target = (size_t)(scaled / 48000u);
 						preview_preload_target_frames_ = (target < preview_preload_frames_)
 							? target
@@ -729,9 +736,9 @@ void StorageService::RunSlice(uint32_t budget_us)
 				{
 					Event ev = {};
 					ev.kind = EventKind::PreviewOpenOk;
-					ev.cookie = g_preview_cookie;
-					ev.sample_rate = g_preview_sample_rate;
-					ev.channels = g_preview_channels;
+					ev.cookie = g_storage.preview_cookie;
+					ev.sample_rate = g_storage.preview_sample_rate;
+					ev.channels = g_storage.preview_channels;
 					ev.bits_per_sample = 16;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 				}
@@ -739,11 +746,11 @@ void StorageService::RunSlice(uint32_t budget_us)
 			}
 			case OpKind::PreviewClose:
 			{
-				if (g_preview_open)
+				if (g_storage.preview_open)
 				{
-					f_close(&g_preview_file);
+					f_close(&g_storage.preview_file);
 				}
-				g_preview_open = false;
+				g_storage.preview_open = false;
 				preview_preload_active_ = false;
 				preview_preload_filled_ = 0;
 				preview_preload_target_frames_ = 0;
@@ -770,7 +777,7 @@ void StorageService::RunSlice(uint32_t budget_us)
 									   sizeof(save_name),
 									   save_->path,
 									   sizeof(save_->path),
-									   fsi.GetSDPath()))
+									   g_storage.fsi.GetSDPath()))
 				{
 					sd_status_.last_error = {SdErrorCode::OpenFailed, -1, op.op_id, op.attempt};
 					sd_status_.last_error_time_ms = daisy::System::GetNow();
@@ -949,7 +956,7 @@ void StorageService::RunSlice(uint32_t budget_us)
 	const bool have_rb = (preview_buffer_ != nullptr && preview_frames_ > 0
 		&& preview_write_index_ != nullptr && preview_read_index_ != nullptr);
 
-	if (!g_preview_open || (!have_pp && !have_rb))
+	if (!g_storage.preview_open || (!have_pp && !have_rb))
 	{
 		// Skip preview fill.
 	}
@@ -957,24 +964,24 @@ void StorageService::RunSlice(uint32_t budget_us)
 	{
 		step_guard();
 		const uint32_t start_ms = daisy::System::GetNow();
-		if (g_preview_deadline_ms != 0 && start_ms > g_preview_deadline_ms)
+		if (g_storage.preview_deadline_ms != 0 && start_ms > g_storage.preview_deadline_ms)
 		{
-			f_close(&g_preview_file);
-			g_preview_open = false;
+			f_close(&g_storage.preview_file);
+			g_storage.preview_open = false;
 			preview_preload_active_ = false;
 			sd_status_.last_error = {SdErrorCode::Timeout, -1, 0, 0};
 			sd_status_.last_error_time_ms = daisy::System::GetNow();
 			++sd_counters_.op_timeouts;
 			Event ev = {};
 			ev.kind = EventKind::PreviewReadError;
-			ev.cookie = g_preview_cookie;
+			ev.cookie = g_storage.preview_cookie;
 			PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 			return;
 		}
 		const uint32_t budget_ms = (budget_us + 999) / 1000;
 		const size_t max_frames_per_slice = 2048;
 
-		while (g_preview_open)
+		while (g_storage.preview_open)
 		{
 			if (preview_preload_active_)
 			{
@@ -983,14 +990,14 @@ void StorageService::RunSlice(uint32_t budget_us)
 					: preview_preload_frames_;
 				if (preview_preload_filled_ >= target_frames)
 				{
-					f_close(&g_preview_file);
-					g_preview_open = false;
+					f_close(&g_storage.preview_file);
+					g_storage.preview_open = false;
 					preview_preload_active_ = false;
 					Event ev = {};
 					ev.kind = EventKind::PreviewOpenOk;
-					ev.cookie = g_preview_cookie;
-					ev.sample_rate = g_preview_sample_rate;
-					ev.channels = g_preview_channels;
+					ev.cookie = g_storage.preview_cookie;
+					ev.sample_rate = g_storage.preview_sample_rate;
+					ev.channels = g_storage.preview_channels;
 					ev.bits_per_sample = 16;
 					ev.size = static_cast<uint32_t>(preview_preload_filled_);
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
@@ -1002,61 +1009,61 @@ void StorageService::RunSlice(uint32_t budget_us)
 				{
 					frames_to_read = max_frames_per_slice;
 				}
-				const size_t bytes_to_read = frames_to_read * g_preview_channels * sizeof(int16_t);
+				const size_t bytes_to_read = frames_to_read * g_storage.preview_channels * sizeof(int16_t);
 				const uint32_t read_start_ms = daisy::System::GetNow();
 				UINT bytes_read = 0;
-				FRESULT res = f_read(&g_preview_file, g_preview_read_buf, bytes_to_read, &bytes_read);
+				FRESULT res = f_read(&g_storage.preview_file, g_storage.preview_read_buf, bytes_to_read, &bytes_read);
 				const uint32_t read_elapsed_us = (daisy::System::GetNow() - read_start_ms) * 1000u;
-				if (read_elapsed_us > g_storage_readchunk_max_us)
+				if (read_elapsed_us > g_storage.storage_readchunk_max_us)
 				{
-					g_storage_readchunk_max_us = read_elapsed_us;
+					g_storage.storage_readchunk_max_us = read_elapsed_us;
 				}
-				g_storage_readchunk_bytes += bytes_read;
-				g_storage_readchunk_calls += 1;
+				g_storage.storage_readchunk_bytes += bytes_read;
+				g_storage.storage_readchunk_calls += 1;
 				if (res != FR_OK)
 				{
-					f_close(&g_preview_file);
-					g_preview_open = false;
+					f_close(&g_storage.preview_file);
+					g_storage.preview_open = false;
 					preview_preload_active_ = false;
 					sd_status_.last_error = {SdErrorCode::ReadFailed, res, 0, 0};
 					sd_status_.last_error_time_ms = daisy::System::GetNow();
 					++sd_counters_.read_failures;
 					Event ev = {};
 					ev.kind = EventKind::PreviewReadError;
-					ev.cookie = g_preview_cookie;
+					ev.cookie = g_storage.preview_cookie;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 					break;
 				}
 				if (bytes_read == 0)
 				{
-					if (f_lseek(&g_preview_file, g_preview_data_offset) != FR_OK)
+					if (f_lseek(&g_storage.preview_file, g_storage.preview_data_offset) != FR_OK)
 					{
-						f_close(&g_preview_file);
-						g_preview_open = false;
+						f_close(&g_storage.preview_file);
+						g_storage.preview_open = false;
 						preview_preload_active_ = false;
 						sd_status_.last_error = {SdErrorCode::ReadFailed, -1, 0, 0};
 						sd_status_.last_error_time_ms = daisy::System::GetNow();
 						++sd_counters_.read_failures;
 						Event ev = {};
 						ev.kind = EventKind::PreviewReadError;
-						ev.cookie = g_preview_cookie;
+						ev.cookie = g_storage.preview_cookie;
 						PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 						break;
 					}
 					continue;
 				}
-				const size_t frames_read = bytes_read / (g_preview_channels * sizeof(int16_t));
+				const size_t frames_read = bytes_read / (g_storage.preview_channels * sizeof(int16_t));
 				for (size_t i = 0; i < frames_read; ++i)
 				{
 					int32_t mono = 0;
-					if (g_preview_channels == 1)
+					if (g_storage.preview_channels == 1)
 					{
-						mono = g_preview_read_buf[i];
+						mono = g_storage.preview_read_buf[i];
 					}
 					else
 					{
-						const int16_t l = g_preview_read_buf[i * 2];
-						const int16_t r = g_preview_read_buf[i * 2 + 1];
+						const int16_t l = g_storage.preview_read_buf[i * 2];
+						const int16_t r = g_storage.preview_read_buf[i * 2 + 1];
 						mono = (static_cast<int32_t>(l) + static_cast<int32_t>(r)) / 2;
 					}
 					preview_preload_buf_[preview_preload_filled_ + i] = static_cast<int16_t>(mono);
@@ -1125,55 +1132,55 @@ void StorageService::RunSlice(uint32_t budget_us)
 				dst_write_idx = write_idx;
 			}
 
-			const size_t bytes_to_read = frames_to_read * g_preview_channels * sizeof(int16_t);
+			const size_t bytes_to_read = frames_to_read * g_storage.preview_channels * sizeof(int16_t);
 			const uint32_t read_start_ms = daisy::System::GetNow();
 			UINT bytes_read = 0;
-			FRESULT res = f_read(&g_preview_file, g_preview_read_buf, bytes_to_read, &bytes_read);
+			FRESULT res = f_read(&g_storage.preview_file, g_storage.preview_read_buf, bytes_to_read, &bytes_read);
 			const uint32_t read_elapsed_us = (daisy::System::GetNow() - read_start_ms) * 1000u;
-			if (read_elapsed_us > g_storage_readchunk_max_us)
+			if (read_elapsed_us > g_storage.storage_readchunk_max_us)
 			{
-				g_storage_readchunk_max_us = read_elapsed_us;
+				g_storage.storage_readchunk_max_us = read_elapsed_us;
 			}
-			g_storage_readchunk_bytes += bytes_read;
-			g_storage_readchunk_calls += 1;
+			g_storage.storage_readchunk_bytes += bytes_read;
+			g_storage.storage_readchunk_calls += 1;
 			if (res != FR_OK)
 			{
-				f_close(&g_preview_file);
-				g_preview_open = false;
+				f_close(&g_storage.preview_file);
+				g_storage.preview_open = false;
 				Event ev = {};
 				ev.kind = EventKind::PreviewReadError;
-				ev.cookie = g_preview_cookie;
+				ev.cookie = g_storage.preview_cookie;
 				PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 				break;
 			}
 			if (bytes_read == 0)
 			{
-				if (f_lseek(&g_preview_file, g_preview_data_offset) != FR_OK)
+				if (f_lseek(&g_storage.preview_file, g_storage.preview_data_offset) != FR_OK)
 				{
-					f_close(&g_preview_file);
-					g_preview_open = false;
+					f_close(&g_storage.preview_file);
+					g_storage.preview_open = false;
 					Event ev = {};
 					ev.kind = EventKind::PreviewReadError;
-					ev.cookie = g_preview_cookie;
+					ev.cookie = g_storage.preview_cookie;
 					PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 					break;
 				}
 				continue;
 			}
-			const size_t frames_read = bytes_read / (g_preview_channels * sizeof(int16_t));
+			const size_t frames_read = bytes_read / (g_storage.preview_channels * sizeof(int16_t));
 			if (have_pp)
 			{
 				for (size_t i = 0; i < frames_read; ++i)
 				{
 					int32_t mono = 0;
-					if (g_preview_channels == 1)
+					if (g_storage.preview_channels == 1)
 					{
-						mono = g_preview_read_buf[i];
+						mono = g_storage.preview_read_buf[i];
 					}
 					else
 					{
-						const int16_t l = g_preview_read_buf[i * 2];
-						const int16_t r = g_preview_read_buf[i * 2 + 1];
+						const int16_t l = g_storage.preview_read_buf[i * 2];
+						const int16_t r = g_storage.preview_read_buf[i * 2 + 1];
 						mono = (static_cast<int32_t>(l) + static_cast<int32_t>(r)) / 2;
 					}
 					dst_buf[i] = static_cast<int16_t>(mono);
@@ -1198,14 +1205,14 @@ void StorageService::RunSlice(uint32_t budget_us)
 				for (size_t i = 0; i < frames_read; ++i)
 				{
 					int32_t mono = 0;
-					if (g_preview_channels == 1)
+					if (g_storage.preview_channels == 1)
 					{
-						mono = g_preview_read_buf[i];
+						mono = g_storage.preview_read_buf[i];
 					}
 					else
 					{
-						const int16_t l = g_preview_read_buf[i * 2];
-						const int16_t r = g_preview_read_buf[i * 2 + 1];
+						const int16_t l = g_storage.preview_read_buf[i * 2];
+						const int16_t r = g_storage.preview_read_buf[i * 2 + 1];
 						mono = (static_cast<int32_t>(l) + static_cast<int32_t>(r)) / 2;
 					}
 					dst_buf[w] = static_cast<int16_t>(mono);
@@ -1225,7 +1232,7 @@ void StorageService::RunSlice(uint32_t budget_us)
 	}
 
 	// Defer scans while preview streaming to prioritize audio.
-	if (g_preview_open)
+	if (g_storage.preview_open)
 	{
 		return;
 	}
@@ -1273,11 +1280,11 @@ void StorageService::RunSlice(uint32_t budget_us)
 			{
 				for (size_t i = 0; i < frames_this; ++i)
 				{
-					g_save_write_buf[i * 2] = save_->src_l[save_->frames_written + i];
-					g_save_write_buf[i * 2 + 1] = save_->src_r[save_->frames_written + i];
+					g_storage.save_write_buf[i * 2] = save_->src_l[save_->frames_written + i];
+					g_storage.save_write_buf[i * 2 + 1] = save_->src_r[save_->frames_written + i];
 				}
 				res = f_write(&save_->file,
-							  g_save_write_buf,
+							  g_storage.save_write_buf,
 							  static_cast<UINT>(frames_this * save_->channels * sizeof(int16_t)),
 							  &written);
 				if (res == FR_OK
@@ -1387,7 +1394,7 @@ void StorageService::RunSlice(uint32_t budget_us)
 			size_t frames_this = (frames_left > max_frames_per_slice) ? max_frames_per_slice : frames_left;
 			const size_t bytes_to_read = frames_this * load_->channels * sizeof(int16_t);
 			UINT bytes_read = 0;
-			FRESULT res = f_read(&load_->file, g_load_read_buf, bytes_to_read, &bytes_read);
+			FRESULT res = f_read(&load_->file, g_storage.load_read_buf, bytes_to_read, &bytes_read);
 			if (res != FR_OK || bytes_read == 0)
 			{
 				f_close(&load_->file);
@@ -1403,15 +1410,15 @@ void StorageService::RunSlice(uint32_t budget_us)
 			{
 				if (load_->channels == 1)
 				{
-					const int16_t samp = g_load_read_buf[i];
+					const int16_t samp = g_storage.load_read_buf[i];
 					load_->dst_l[load_->frames_loaded] = samp;
 					load_->dst_r[load_->frames_loaded] = samp;
 					load_->frames_loaded++;
 				}
 				else
 				{
-					load_->dst_l[load_->frames_loaded] = g_load_read_buf[i * 2];
-					load_->dst_r[load_->frames_loaded] = g_load_read_buf[i * 2 + 1];
+					load_->dst_l[load_->frames_loaded] = g_storage.load_read_buf[i * 2];
+					load_->dst_r[load_->frames_loaded] = g_storage.load_read_buf[i * 2 + 1];
 					load_->frames_loaded++;
 				}
 				if (load_->frames_loaded >= load_->frames_total)
@@ -1476,26 +1483,26 @@ void StorageService::RunSlice(uint32_t budget_us)
 				}
 				if (scan_max_entries_ > 0 && scan_count_ >= scan_max_entries_)
 				{
-					f_closedir(&g_scan_dir);
-					g_scan_dir_open = false;
+					f_closedir(&g_storage.scan_dir);
+					g_storage.scan_dir_open = false;
 					scan_active_ = false;
 					scan_done_pending_ = true;
 					break;
 				}
-				const FRESULT res = f_readdir(&g_scan_dir, &g_scan_fno);
-				if (res != FR_OK || g_scan_fno.fname[0] == 0)
+				const FRESULT res = f_readdir(&g_storage.scan_dir, &g_storage.scan_fno);
+				if (res != FR_OK || g_storage.scan_fno.fname[0] == 0)
 				{
-					f_closedir(&g_scan_dir);
-					g_scan_dir_open = false;
+					f_closedir(&g_storage.scan_dir);
+					g_storage.scan_dir_open = false;
 					scan_active_ = false;
 					scan_done_pending_ = true;
 					break;
 				}
-				if (g_scan_fno.fattrib & (AM_DIR | AM_HID))
+				if (g_storage.scan_fno.fattrib & (AM_DIR | AM_HID))
 				{
 					continue;
 				}
-				if (scan_wav_only_ && !HasWavExtension(g_scan_fno.fname))
+				if (scan_wav_only_ && !HasWavExtension(g_storage.scan_fno.fname))
 				{
 					continue;
 				}
@@ -1504,8 +1511,8 @@ void StorageService::RunSlice(uint32_t budget_us)
 				ev.kind = EventKind::DirEntry;
 				ev.cookie = scan_cookie_;
 				ev.is_dir = false;
-				ev.size = g_scan_fno.fsize;
-				CopyString(ev.name, kNameMaxLen, g_scan_fno.fname);
+				ev.size = g_storage.scan_fno.fsize;
+				CopyString(ev.name, kNameMaxLen, g_storage.scan_fno.fname);
 				PushEvent(event_queue_, ev_wr_, ev_rd_, kEventQueueSize, ev);
 				scan_count_++;
 				entries++;
@@ -1523,9 +1530,10 @@ void StorageService::RunSlice(uint32_t budget_us)
 	}
 
 	const uint32_t slice_elapsed_us = (daisy::System::GetNow() - slice_start_ms) * 1000u;
-	if (slice_elapsed_us > g_storage_slice_max_us)
+	if (slice_elapsed_us > g_storage.storage_slice_max_us)
 	{
-		g_storage_slice_max_us = slice_elapsed_us;
+		g_storage.storage_slice_max_us = slice_elapsed_us;
 	}
 }
+
 

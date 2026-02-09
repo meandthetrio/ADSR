@@ -192,6 +192,43 @@ extern void StartRecording();
 void AdjustTrimNormalized(int32_t dl, int32_t dr, bool fine);
 extern void ApplyPlaybackReverse(bool reverse);
 
+// OWNER: UI/main loop only.
+// WRITES: UI thread only.
+// READS: UI thread only.
+struct UiState
+{
+	SmoothParam sm_amp_attack;
+	SmoothParam sm_amp_decay;
+	SmoothParam sm_amp_sustain;
+	SmoothParam sm_amp_release;
+	SmoothParam sm_flt_cutoff;
+	SmoothParam sm_flt_res;
+	SmoothParam sm_fx_s_wet;
+	SmoothParam sm_sat_drive;
+	SmoothParam sm_sat_tape_bump;
+	SmoothParam sm_sat_bit_reso;
+	SmoothParam sm_sat_bit_smpl;
+	SmoothParam sm_fx_c_wet;
+	SmoothParam sm_mod_depth;
+	SmoothParam sm_chorus_rate;
+	SmoothParam sm_chorus_wow;
+	SmoothParam sm_tape_rate;
+	SmoothParam sm_delay_wet;
+	SmoothParam sm_delay_time;
+	SmoothParam sm_delay_feedback;
+	SmoothParam sm_delay_spread;
+	SmoothParam sm_delay_freeze;
+	SmoothParam sm_reverb_wet;
+	SmoothParam sm_reverb_pre;
+	SmoothParam sm_reverb_damp;
+	SmoothParam sm_reverb_decay;
+
+	uint32_t last_ui_ms = 0;
+	uint16_t scan_cookie = 1;
+	FxContext fx_context = FxContext::Perform;
+};
+static UiState g_ui;
+
 extern volatile UiMode ui_mode;
 extern volatile UiMode shift_prev_mode;
 extern UiMode delete_prev_mode;
@@ -586,32 +623,6 @@ static void BuildAndPublishAudioParamsAudio(const AudioParams &p, float out_sr)
 	}
 }
 
-static SmoothParam sm_amp_attack;
-static SmoothParam sm_amp_decay;
-static SmoothParam sm_amp_sustain;
-static SmoothParam sm_amp_release;
-static SmoothParam sm_flt_cutoff;
-static SmoothParam sm_flt_res;
-static SmoothParam sm_fx_s_wet;
-static SmoothParam sm_sat_drive;
-static SmoothParam sm_sat_tape_bump;
-static SmoothParam sm_sat_bit_reso;
-static SmoothParam sm_sat_bit_smpl;
-static SmoothParam sm_fx_c_wet;
-static SmoothParam sm_mod_depth;
-static SmoothParam sm_chorus_rate;
-static SmoothParam sm_chorus_wow;
-static SmoothParam sm_tape_rate;
-static SmoothParam sm_delay_wet;
-static SmoothParam sm_delay_time;
-static SmoothParam sm_delay_feedback;
-static SmoothParam sm_delay_spread;
-static SmoothParam sm_delay_freeze;
-static SmoothParam sm_reverb_wet;
-static SmoothParam sm_reverb_pre;
-static SmoothParam sm_reverb_damp;
-static SmoothParam sm_reverb_decay;
-
 void RequestDisplayUpdate()
 {
 	g_display_update_pending = true;
@@ -632,12 +643,11 @@ void FlushDisplayIfDue(uint32_t now)
 	g_display_update_pending = false;
 }
 
-static uint32_t last_ui_ms = 0;
 void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_events, bool shift_held);
 
 void Ui::Init()
 {
-	last_ui_ms = System::GetNow();
+	g_ui.last_ui_ms = System::GetNow();
 }
 
 void Ui::Tick(uint32_t now_ms)
@@ -648,9 +658,9 @@ void Ui::Tick(uint32_t now_ms)
 	const uint32_t ui_tick_ms = playback_busy ? kUiTickPlaybackMs : kUiTickMs;
 
 	int32_t loops = 0;
-	while ((int32_t)(now_ms - last_ui_ms) >= (int32_t)ui_tick_ms && loops < 4)
+	while ((int32_t)(now_ms - g_ui.last_ui_ms) >= (int32_t)ui_tick_ms && loops < 4)
 	{
-		last_ui_ms += ui_tick_ms;
+		g_ui.last_ui_ms += ui_tick_ms;
 		int32_t enc_l_inc = 0;
 		int32_t enc_r_inc = 0;
 		uint32_t ev = 0;
@@ -2266,7 +2276,6 @@ static void FileListJobCancel()
 	g_list_job = {};
 }
 
-static uint16_t g_scan_cookie = 1;
 
 static void FileListJobStart(bool wav_only)
 {
@@ -2275,7 +2284,7 @@ static void FileListJobStart(bool wav_only)
 	g_list_job.done = false;
 	g_list_job.wav_only = wav_only;
 	g_list_job.count = 0;
-	g_list_job.cookie = g_scan_cookie++;
+	g_list_job.cookie = g_ui.scan_cookie++;
 	wav_file_count = 0;
 	load_selected = 0;
 	load_scroll = 0;
@@ -2338,87 +2347,87 @@ static void FileListJobTick(uint32_t budget_entries)
 
 void InitSmoothers()
 {
-	sm_amp_attack.Init(amp_attack, 20.0f, kUiTickHz);
-	sm_amp_decay.Init(amp_decay, 20.0f, kUiTickHz);
-	sm_amp_sustain.Init(amp_sustain, 20.0f, kUiTickHz);
-	sm_amp_release.Init(amp_release, 20.0f, kUiTickHz);
-	sm_flt_cutoff.Init(flt_cutoff, 20.0f, kUiTickHz);
-	sm_flt_res.Init(flt_res, 20.0f, kUiTickHz);
-	sm_fx_s_wet.Init(fx_s_wet, 80.0f, kUiTickHz);
-	sm_sat_drive.Init(sat_drive, 30.0f, kUiTickHz);
-	sm_sat_tape_bump.Init(sat_tape_bump, 30.0f, kUiTickHz);
-	sm_sat_bit_reso.Init(sat_bit_reso, 30.0f, kUiTickHz);
-	sm_sat_bit_smpl.Init(sat_bit_smpl, 30.0f, kUiTickHz);
-	sm_fx_c_wet.Init(fx_c_wet, 80.0f, kUiTickHz);
-	sm_mod_depth.Init(mod_depth, 40.0f, kUiTickHz);
-	sm_chorus_rate.Init(chorus_rate, 40.0f, kUiTickHz);
-	sm_chorus_wow.Init(chorus_wow, 40.0f, kUiTickHz);
-	sm_tape_rate.Init(tape_rate, 40.0f, kUiTickHz);
-	sm_delay_wet.Init(delay_wet, 80.0f, kUiTickHz);
-	sm_delay_time.Init(delay_time, 60.0f, kUiTickHz);
-	sm_delay_feedback.Init(delay_feedback, 60.0f, kUiTickHz);
-	sm_delay_spread.Init(delay_spread, 60.0f, kUiTickHz);
-	sm_delay_freeze.Init(delay_freeze, 0.0f, kUiTickHz);
-	sm_reverb_wet.Init(reverb_wet, 80.0f, kUiTickHz);
-	sm_reverb_pre.Init(reverb_pre, 60.0f, kUiTickHz);
-	sm_reverb_damp.Init(reverb_damp, 60.0f, kUiTickHz);
-	sm_reverb_decay.Init(reverb_decay, 80.0f, kUiTickHz);
+	g_ui.sm_amp_attack.Init(amp_attack, 20.0f, kUiTickHz);
+	g_ui.sm_amp_decay.Init(amp_decay, 20.0f, kUiTickHz);
+	g_ui.sm_amp_sustain.Init(amp_sustain, 20.0f, kUiTickHz);
+	g_ui.sm_amp_release.Init(amp_release, 20.0f, kUiTickHz);
+	g_ui.sm_flt_cutoff.Init(flt_cutoff, 20.0f, kUiTickHz);
+	g_ui.sm_flt_res.Init(flt_res, 20.0f, kUiTickHz);
+	g_ui.sm_fx_s_wet.Init(fx_s_wet, 80.0f, kUiTickHz);
+	g_ui.sm_sat_drive.Init(sat_drive, 30.0f, kUiTickHz);
+	g_ui.sm_sat_tape_bump.Init(sat_tape_bump, 30.0f, kUiTickHz);
+	g_ui.sm_sat_bit_reso.Init(sat_bit_reso, 30.0f, kUiTickHz);
+	g_ui.sm_sat_bit_smpl.Init(sat_bit_smpl, 30.0f, kUiTickHz);
+	g_ui.sm_fx_c_wet.Init(fx_c_wet, 80.0f, kUiTickHz);
+	g_ui.sm_mod_depth.Init(mod_depth, 40.0f, kUiTickHz);
+	g_ui.sm_chorus_rate.Init(chorus_rate, 40.0f, kUiTickHz);
+	g_ui.sm_chorus_wow.Init(chorus_wow, 40.0f, kUiTickHz);
+	g_ui.sm_tape_rate.Init(tape_rate, 40.0f, kUiTickHz);
+	g_ui.sm_delay_wet.Init(delay_wet, 80.0f, kUiTickHz);
+	g_ui.sm_delay_time.Init(delay_time, 60.0f, kUiTickHz);
+	g_ui.sm_delay_feedback.Init(delay_feedback, 60.0f, kUiTickHz);
+	g_ui.sm_delay_spread.Init(delay_spread, 60.0f, kUiTickHz);
+	g_ui.sm_delay_freeze.Init(delay_freeze, 0.0f, kUiTickHz);
+	g_ui.sm_reverb_wet.Init(reverb_wet, 80.0f, kUiTickHz);
+	g_ui.sm_reverb_pre.Init(reverb_pre, 60.0f, kUiTickHz);
+	g_ui.sm_reverb_damp.Init(reverb_damp, 60.0f, kUiTickHz);
+	g_ui.sm_reverb_decay.Init(reverb_decay, 80.0f, kUiTickHz);
 }
 
 void UpdateSmoothedParamsPerTick()
 {
-	sm_amp_attack.SetTarget(amp_attack);
-	sm_amp_decay.SetTarget(amp_decay);
-	sm_amp_sustain.SetTarget(amp_sustain);
-	sm_amp_release.SetTarget(amp_release);
-	sm_flt_cutoff.SetTarget(flt_cutoff);
-	sm_flt_res.SetTarget(flt_res);
-	sm_fx_s_wet.SetTarget(fx_s_wet);
-	sm_sat_drive.SetTarget(sat_drive);
-	sm_sat_tape_bump.SetTarget(sat_tape_bump);
-	sm_sat_bit_reso.SetTarget(sat_bit_reso);
-	sm_sat_bit_smpl.SetTarget(sat_bit_smpl);
-	sm_fx_c_wet.SetTarget(fx_c_wet);
-	sm_mod_depth.SetTarget(mod_depth);
-	sm_chorus_rate.SetTarget(chorus_rate);
-	sm_chorus_wow.SetTarget(chorus_wow);
-	sm_tape_rate.SetTarget(tape_rate);
-	sm_delay_wet.SetTarget(delay_wet);
-	sm_delay_time.SetTarget(delay_time);
-	sm_delay_feedback.SetTarget(delay_feedback);
-	sm_delay_spread.SetTarget(delay_spread);
-	sm_delay_freeze.SetTarget(delay_freeze);
-	sm_reverb_wet.SetTarget(reverb_wet);
-	sm_reverb_pre.SetTarget(reverb_pre);
-	sm_reverb_damp.SetTarget(reverb_damp);
-	sm_reverb_decay.SetTarget(reverb_decay);
+	g_ui.sm_amp_attack.SetTarget(amp_attack);
+	g_ui.sm_amp_decay.SetTarget(amp_decay);
+	g_ui.sm_amp_sustain.SetTarget(amp_sustain);
+	g_ui.sm_amp_release.SetTarget(amp_release);
+	g_ui.sm_flt_cutoff.SetTarget(flt_cutoff);
+	g_ui.sm_flt_res.SetTarget(flt_res);
+	g_ui.sm_fx_s_wet.SetTarget(fx_s_wet);
+	g_ui.sm_sat_drive.SetTarget(sat_drive);
+	g_ui.sm_sat_tape_bump.SetTarget(sat_tape_bump);
+	g_ui.sm_sat_bit_reso.SetTarget(sat_bit_reso);
+	g_ui.sm_sat_bit_smpl.SetTarget(sat_bit_smpl);
+	g_ui.sm_fx_c_wet.SetTarget(fx_c_wet);
+	g_ui.sm_mod_depth.SetTarget(mod_depth);
+	g_ui.sm_chorus_rate.SetTarget(chorus_rate);
+	g_ui.sm_chorus_wow.SetTarget(chorus_wow);
+	g_ui.sm_tape_rate.SetTarget(tape_rate);
+	g_ui.sm_delay_wet.SetTarget(delay_wet);
+	g_ui.sm_delay_time.SetTarget(delay_time);
+	g_ui.sm_delay_feedback.SetTarget(delay_feedback);
+	g_ui.sm_delay_spread.SetTarget(delay_spread);
+	g_ui.sm_delay_freeze.SetTarget(delay_freeze);
+	g_ui.sm_reverb_wet.SetTarget(reverb_wet);
+	g_ui.sm_reverb_pre.SetTarget(reverb_pre);
+	g_ui.sm_reverb_damp.SetTarget(reverb_damp);
+	g_ui.sm_reverb_decay.SetTarget(reverb_decay);
 
 	AudioParams p = {};
-	p.amp_attack = sm_amp_attack.Process();
-	p.amp_decay = sm_amp_decay.Process();
-	p.amp_sustain = sm_amp_sustain.Process();
-	p.amp_release = sm_amp_release.Process();
-	p.flt_cutoff = sm_flt_cutoff.Process();
-	p.flt_res = sm_flt_res.Process();
-	p.fx_s_wet = sm_fx_s_wet.Process();
-	p.sat_drive = sm_sat_drive.Process();
-	p.sat_tape_bump = sm_sat_tape_bump.Process();
-	p.sat_bit_reso = sm_sat_bit_reso.Process();
-	p.sat_bit_smpl = sm_sat_bit_smpl.Process();
-	p.fx_c_wet = sm_fx_c_wet.Process();
-	p.mod_depth = sm_mod_depth.Process();
-	p.chorus_rate = sm_chorus_rate.Process();
-	p.chorus_wow = sm_chorus_wow.Process();
-	p.tape_rate = sm_tape_rate.Process();
-	p.delay_wet = sm_delay_wet.Process();
-	p.delay_time = sm_delay_time.Process();
-	p.delay_feedback = sm_delay_feedback.Process();
-	p.delay_spread = sm_delay_spread.Process();
-	p.delay_freeze = sm_delay_freeze.Process();
-	p.reverb_wet = sm_reverb_wet.Process();
-	p.reverb_pre = sm_reverb_pre.Process();
-	p.reverb_damp = sm_reverb_damp.Process();
-	p.reverb_decay = sm_reverb_decay.Process();
+	p.amp_attack = g_ui.sm_amp_attack.Process();
+	p.amp_decay = g_ui.sm_amp_decay.Process();
+	p.amp_sustain = g_ui.sm_amp_sustain.Process();
+	p.amp_release = g_ui.sm_amp_release.Process();
+	p.flt_cutoff = g_ui.sm_flt_cutoff.Process();
+	p.flt_res = g_ui.sm_flt_res.Process();
+	p.fx_s_wet = g_ui.sm_fx_s_wet.Process();
+	p.sat_drive = g_ui.sm_sat_drive.Process();
+	p.sat_tape_bump = g_ui.sm_sat_tape_bump.Process();
+	p.sat_bit_reso = g_ui.sm_sat_bit_reso.Process();
+	p.sat_bit_smpl = g_ui.sm_sat_bit_smpl.Process();
+	p.fx_c_wet = g_ui.sm_fx_c_wet.Process();
+	p.mod_depth = g_ui.sm_mod_depth.Process();
+	p.chorus_rate = g_ui.sm_chorus_rate.Process();
+	p.chorus_wow = g_ui.sm_chorus_wow.Process();
+	p.tape_rate = g_ui.sm_tape_rate.Process();
+	p.delay_wet = g_ui.sm_delay_wet.Process();
+	p.delay_time = g_ui.sm_delay_time.Process();
+	p.delay_feedback = g_ui.sm_delay_feedback.Process();
+	p.delay_spread = g_ui.sm_delay_spread.Process();
+	p.delay_freeze = g_ui.sm_delay_freeze.Process();
+	p.reverb_wet = g_ui.sm_reverb_wet.Process();
+	p.reverb_pre = g_ui.sm_reverb_pre.Process();
+	p.reverb_damp = g_ui.sm_reverb_damp.Process();
+	p.reverb_decay = g_ui.sm_reverb_decay.Process();
 	p.playback_reverse = playback_reverse;
 
 	PublishAudioParamsFromUi(p);
@@ -2440,32 +2449,32 @@ void UpdateSmoothedParamsPerTick()
 		}
 	}
 
-	if (!sm_fx_s_wet.IsNearTarget()
-		|| !sm_sat_drive.IsNearTarget()
-		|| !sm_sat_tape_bump.IsNearTarget()
-		|| !sm_sat_bit_reso.IsNearTarget()
-		|| !sm_sat_bit_smpl.IsNearTarget()
-		|| !sm_fx_c_wet.IsNearTarget()
-		|| !sm_mod_depth.IsNearTarget()
-		|| !sm_chorus_rate.IsNearTarget()
-		|| !sm_chorus_wow.IsNearTarget()
-		|| !sm_tape_rate.IsNearTarget()
-		|| !sm_delay_wet.IsNearTarget()
-		|| !sm_delay_time.IsNearTarget()
-		|| !sm_delay_feedback.IsNearTarget()
-		|| !sm_delay_spread.IsNearTarget()
-		|| !sm_delay_freeze.IsNearTarget()
-		|| !sm_reverb_wet.IsNearTarget()
-		|| !sm_reverb_pre.IsNearTarget()
-		|| !sm_reverb_damp.IsNearTarget()
-		|| !sm_reverb_decay.IsNearTarget())
+	if (!g_ui.sm_fx_s_wet.IsNearTarget()
+		|| !g_ui.sm_sat_drive.IsNearTarget()
+		|| !g_ui.sm_sat_tape_bump.IsNearTarget()
+		|| !g_ui.sm_sat_bit_reso.IsNearTarget()
+		|| !g_ui.sm_sat_bit_smpl.IsNearTarget()
+		|| !g_ui.sm_fx_c_wet.IsNearTarget()
+		|| !g_ui.sm_mod_depth.IsNearTarget()
+		|| !g_ui.sm_chorus_rate.IsNearTarget()
+		|| !g_ui.sm_chorus_wow.IsNearTarget()
+		|| !g_ui.sm_tape_rate.IsNearTarget()
+		|| !g_ui.sm_delay_wet.IsNearTarget()
+		|| !g_ui.sm_delay_time.IsNearTarget()
+		|| !g_ui.sm_delay_feedback.IsNearTarget()
+		|| !g_ui.sm_delay_spread.IsNearTarget()
+		|| !g_ui.sm_delay_freeze.IsNearTarget()
+		|| !g_ui.sm_reverb_wet.IsNearTarget()
+		|| !g_ui.sm_reverb_pre.IsNearTarget()
+		|| !g_ui.sm_reverb_damp.IsNearTarget()
+		|| !g_ui.sm_reverb_decay.IsNearTarget())
 	{
 		fx_params_dirty = true;
 	}
-	if (!sm_amp_attack.IsNearTarget()
-		|| !sm_amp_release.IsNearTarget()
-		|| !sm_flt_cutoff.IsNearTarget()
-		|| !sm_flt_res.IsNearTarget())
+	if (!g_ui.sm_amp_attack.IsNearTarget()
+		|| !g_ui.sm_amp_release.IsNearTarget()
+		|| !g_ui.sm_flt_cutoff.IsNearTarget()
+		|| !g_ui.sm_flt_res.IsNearTarget())
 	{
 		audio_params_dirty = true;
 	}
@@ -2857,7 +2866,6 @@ static void ApplyPerformState(const PerformState& state)
 	fx_params_dirty = true;
 }
 
-static FxContext fx_context = FxContext::Perform;
 
 static void SaveFxContext()
 {
@@ -2867,12 +2875,12 @@ static void SaveFxContext()
 void SetFxContext(FxContext ctx, int32_t track)
 {
 	(void)track;
-	if (fx_context == FxContext::Perform && ctx == FxContext::Perform)
+	if (g_ui.fx_context == FxContext::Perform && ctx == FxContext::Perform)
 	{
 		return;
 	}
 	SaveFxContext();
-	fx_context = FxContext::Perform;
+	g_ui.fx_context = FxContext::Perform;
 	ApplyPerformState(main_perform_state);
 }
 
@@ -5885,4 +5893,5 @@ void DrawRecordTargetScreen(int32_t selected)
 	display.WriteString("L=NO  R=YES", font, true);
 	RequestDisplayUpdate();
 }
+
 
