@@ -57,94 +57,96 @@ constexpr size_t kLiveWaveStride = (kLiveWaveWindowFrames / kWaveCols) > 0
 	? (kLiveWaveWindowFrames / kWaveCols)
 	: 1;
 
-// Extern shared state owned by WaveContV3.cpp (UI/control thread).
-extern daisy::DaisyPod hw;
-extern volatile uint32_t g_audio_cmd;
-extern volatile uint32_t g_audio_flags_bits;
-extern volatile RecordInput record_input;
-extern volatile bool g_playback_reverse_target;
-extern volatile uint8_t g_audio_params_pub_idx;
-extern volatile uint8_t g_rt_pub_idx;
-extern volatile uint8_t g_fx_chain_pub_idx;
-extern volatile uint8_t g_preview_pub_idx;
-extern volatile float phones_volume;
-extern volatile bool g_audio_recording_active;
-extern volatile size_t g_recorded_length_audio;
-extern volatile size_t record_pos;
-extern bool g_reset_voices_pending;
-extern AudioParams g_audio_params_buf[2];
-extern volatile uint8_t g_audio_params_active_idx;
-extern AudioUiState g_audio_ui_state_buf[2];
-extern volatile uint8_t g_audio_ui_state_idx;
-extern volatile bool playback_active;
-extern volatile float playback_phase;
-extern volatile bool g_perform_voices_active;
-extern volatile bool preview_active;
-extern volatile size_t preview_read_index;
-extern volatile float preview_read_frac;
-extern volatile uint32_t preview_fade_samples_left;
-extern volatile uint32_t preview_fade_samples_total;
-extern PreviewControl g_preview_ctl_buf[2];
-extern volatile uint8_t g_preview_active_idx;
-extern volatile size_t preview_write_index;
-extern SampleRuntime g_rt_buf[2];
-extern volatile uint8_t g_rt_active_idx;
-extern FxChainRuntime g_fx_chain_buf[2];
-extern volatile uint8_t g_fx_chain_active_idx;
-extern FxChainRuntime g_fx_chain_audio;
-extern bool g_fx_chain_audio_valid;
-extern FxParamsAudio g_fx_params_buf[2];
-extern volatile uint8_t g_fx_params_idx;
-extern AudioParamsAudio g_audio_params_audio_buf[2];
-extern volatile uint8_t g_audio_params_audio_idx;
-extern volatile float g_delay_time_alpha;
-extern volatile float g_delay_param_alpha;
+static AudioShared* g_shared = nullptr;
+
+#define hw (*g_shared->hw)
+#define g_audio_cmd (*g_shared->audio_cmd)
+#define g_audio_flags_bits (*g_shared->audio_flags_bits)
+#define record_input (*g_shared->record_input)
+#define g_playback_reverse_target (*g_shared->playback_reverse_target)
+#define g_audio_params_pub_idx (*g_shared->audio_params_pub_idx)
+#define g_rt_pub_idx (*g_shared->rt_pub_idx)
+#define g_fx_chain_pub_idx (*g_shared->fx_chain_pub_idx)
+#define g_preview_pub_idx (*g_shared->preview_pub_idx)
+#define phones_volume (*g_shared->phones_volume)
+#define g_audio_recording_active (*g_shared->audio_recording_active)
+#define g_recorded_length_audio (*g_shared->recorded_length_audio)
+#define record_pos (*g_shared->record_pos)
+#define g_reset_voices_pending (*g_shared->reset_voices_pending)
+#define g_audio_params_buf (g_shared->audio_params_buf)
+#define g_audio_params_active_idx (*g_shared->audio_params_active_idx)
+#define g_audio_ui_state_buf (g_shared->audio_ui_state_buf)
+#define g_audio_ui_state_idx (*g_shared->audio_ui_state_idx)
+#define playback_active (*g_shared->playback_active)
+#define playback_phase (*g_shared->playback_phase)
+#define g_perform_voices_active (*g_shared->perform_voices_active)
+#define preview_active (*g_shared->preview_active)
+#define preview_read_index (*g_shared->preview_read_index)
+#define preview_read_frac (*g_shared->preview_read_frac)
+#define preview_fade_samples_left (*g_shared->preview_fade_samples_left)
+#define preview_fade_samples_total (*g_shared->preview_fade_samples_total)
+#define g_preview_ctl_buf (g_shared->preview_ctl_buf)
+#define g_preview_active_idx (*g_shared->preview_active_idx)
+#define preview_write_index (*g_shared->preview_write_index)
+#define g_rt_buf (g_shared->rt_buf)
+#define g_rt_active_idx (*g_shared->rt_active_idx)
+#define g_fx_chain_buf (g_shared->fx_chain_buf)
+#define g_fx_chain_active_idx (*g_shared->fx_chain_active_idx)
+#define g_fx_chain_audio (*g_shared->fx_chain_audio)
+#define g_fx_chain_audio_valid (*g_shared->fx_chain_audio_valid)
+#define g_fx_params_buf (g_shared->fx_params_buf)
+#define g_fx_params_idx (*g_shared->fx_params_idx)
+#define g_audio_params_audio_buf (g_shared->audio_params_audio_buf)
+#define g_audio_params_audio_idx (*g_shared->audio_params_audio_idx)
+#define g_delay_time_alpha (*g_shared->delay_time_alpha)
+#define g_delay_param_alpha (*g_shared->delay_param_alpha)
 #if STORAGE_SERVICE_PREVIEW_STREAM
-extern volatile bool preview_preload_active;
-extern volatile size_t preview_preload_frames;
-extern volatile uint8_t preview_pp_ready[2];
-extern volatile uint8_t preview_pp_active;
-extern volatile uint32_t preview_pp_pos;
-extern volatile uint32_t preview_underrun_count;
-extern volatile uint32_t preview_rb_min_level;
+#define preview_preload_active (*g_shared->preview_preload_active)
+#define preview_preload_frames (*g_shared->preview_preload_frames)
+#define preview_pp_ready (g_shared->preview_pp_ready)
+#define preview_pp_active (*g_shared->preview_pp_active)
+#define preview_pp_pos (*g_shared->preview_pp_pos)
+#define preview_underrun_count (*g_shared->preview_underrun_count)
+#define preview_rb_min_level (*g_shared->preview_rb_min_level)
 #endif
-extern void PushAudioEvent(uint32_t bits);
-extern void ResetPerformVoices();
-extern void StartRecordingAudioRT();
-extern void StartPlaybackAudio(uint8_t note, bool apply_pitch, bool reverse_playback);
-extern void StopPlaybackAudio(uint8_t note, bool apply_release);
-extern void StopPlaybackAllAudio();
-extern void DeactivateVoice(PerformVoice& voice);
-extern void AudioUiResetLiveWaveform(AudioUiState& uiw);
-extern size_t PreviewAvailableFrames(size_t read_idx, size_t write_idx);
-extern volatile float playback_rate;
-extern volatile float playback_amp;
-extern volatile size_t playback_env_samples;
-extern volatile bool playback_release_active;
-extern volatile float playback_release_pos;
-extern volatile float playback_release_start;
-extern volatile bool playback_reverse_active;
-extern volatile bool preview_hold;
-extern volatile int32_t preview_index;
-extern volatile uint32_t preview_sample_rate;
-extern volatile uint16_t preview_channels;
-extern volatile int32_t g_active_voice_count;
-extern uint32_t g_voice_skip_count;
-extern uint32_t g_voice_kill_count;
-extern volatile float cpu_load_pct;
-extern volatile float cpu_load_peak_pct;
-extern volatile uint32_t callback_cycles_last;
-extern volatile uint32_t callback_cycles_max;
-extern volatile uint32_t callback_overruns;
-extern float cpu_load_ema;
-extern volatile bool request_playhead_redraw;
-extern float SineTableLookup(float phase01);
-extern MidiCmd g_midi_cmd_q[];
-extern volatile uint8_t g_midi_cmd_wr;
-extern volatile uint8_t g_midi_cmd_rd;
-extern PlaybackCmd g_playback_cmd_q[];
-extern volatile uint8_t g_playback_cmd_wr;
-extern volatile uint8_t g_playback_cmd_rd;
+#define playback_rate (*g_shared->playback_rate)
+#define playback_amp (*g_shared->playback_amp)
+#define playback_env_samples (*g_shared->playback_env_samples)
+#define playback_release_active (*g_shared->playback_release_active)
+#define playback_release_pos (*g_shared->playback_release_pos)
+#define playback_release_start (*g_shared->playback_release_start)
+#define playback_reverse_active (*g_shared->playback_reverse_active)
+#define preview_hold (*g_shared->preview_hold)
+#define preview_index (*g_shared->preview_index)
+#define preview_sample_rate (*g_shared->preview_sample_rate)
+#define preview_channels (*g_shared->preview_channels)
+#define g_active_voice_count (*g_shared->active_voice_count)
+#define g_voice_skip_count (*g_shared->voice_skip_count)
+#define g_voice_kill_count (*g_shared->voice_kill_count)
+#define cpu_load_pct (*g_shared->cpu_load_pct)
+#define cpu_load_peak_pct (*g_shared->cpu_load_peak_pct)
+#define callback_cycles_last (*g_shared->callback_cycles_last)
+#define callback_cycles_max (*g_shared->callback_cycles_max)
+#define callback_overruns (*g_shared->callback_overruns)
+#define cpu_load_ema (*g_shared->cpu_load_ema)
+#define request_playhead_redraw (*g_shared->request_playhead_redraw)
+#define g_midi_cmd_q (g_shared->midi_cmd_q)
+#define g_midi_cmd_wr (*g_shared->midi_cmd_wr)
+#define g_midi_cmd_rd (*g_shared->midi_cmd_rd)
+#define g_playback_cmd_q (g_shared->playback_cmd_q)
+#define g_playback_cmd_wr (*g_shared->playback_cmd_wr)
+#define g_playback_cmd_rd (*g_shared->playback_cmd_rd)
+
+void PushAudioEvent(uint32_t bits);
+void ResetPerformVoices();
+void StartRecordingAudioRT();
+void StartPlaybackAudio(uint8_t note, bool apply_pitch, bool reverse_playback);
+void StopPlaybackAudio(uint8_t note, bool apply_release);
+void StopPlaybackAllAudio();
+void DeactivateVoice(PerformVoice& voice);
+void AudioUiResetLiveWaveform(AudioUiState& uiw);
+size_t PreviewAvailableFrames(size_t read_idx, size_t write_idx);
+float SineTableLookup(float phase01);
 
 // OWNER: Audio callback only.
 // WRITES: Audio callback. UI writes only via PublishParams/PushCommand (lock-free).
@@ -1834,6 +1836,66 @@ audio_done:
 void AudioEngine::Init(daisy::DaisyPod& /*hw*/)
 {
 }
+
+void AudioEngine::BindShared(AudioShared* shared)
+{
+	g_shared = shared;
+}
+
+void AudioEngine::InitVoices()
+{
+	g_audio.voice_mgr.Init(g_audio.perform_voices, kPerformVoiceCount);
+}
+
+bool AudioEngine::AllocatePerformSample(size_t bytes, void** out_ptr)
+{
+	return g_audio.sample_mem_mgr.Allocate(kPerformSampleId, bytes, out_ptr);
+}
+
+void AudioEngine::FreePerformSample()
+{
+	g_audio.sample_mem_mgr.Free(kPerformSampleId);
+}
+
+void AudioEngine::GetSampleBuffers(int16_t*& l, int16_t*& r) const
+{
+	l = g_audio.sample_buffer_l;
+	r = g_audio.sample_buffer_r;
+}
+
+void AudioEngine::GetSampleMemUsage(size_t& used, size_t& free_bytes) const
+{
+	used = g_audio.sample_mem_mgr.BytesUsed();
+	free_bytes = g_audio.sample_mem_mgr.BytesFree();
+}
+
+void AudioEngine::GetPreviewBuffers(PreviewBuffers& out) const
+{
+	out.buffer = g_audio.preview_buffer;
+	out.frames = kPreviewBufferFrames;
+	out.write_index = &preview_write_index;
+	out.read_index = &preview_read_index;
+#if STORAGE_SERVICE_PREVIEW_STREAM
+	out.preload_buf = g_audio.preview_preload_buf;
+	out.preload_frames = kPreviewPreloadFrames;
+	out.pp_buf_a = &g_audio.preview_pp_buf[0][0];
+	out.pp_buf_b = &g_audio.preview_pp_buf[1][0];
+	out.pp_frames = kPreviewPpFrames;
+	out.pp_ready_a = &preview_pp_ready[0];
+	out.pp_ready_b = &preview_pp_ready[1];
+	out.pp_active = &preview_pp_active;
+#else
+	out.preload_buf = nullptr;
+	out.preload_frames = 0;
+	out.pp_buf_a = nullptr;
+	out.pp_buf_b = nullptr;
+	out.pp_frames = 0;
+	out.pp_ready_a = nullptr;
+	out.pp_ready_b = nullptr;
+	out.pp_active = nullptr;
+#endif
+}
+
 void AudioEngine::Process(daisy::AudioHandle::InputBuffer in, daisy::AudioHandle::OutputBuffer out, size_t size)
 {
 	AudioCallbackImpl(in, out, size);

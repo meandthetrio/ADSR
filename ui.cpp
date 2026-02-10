@@ -149,48 +149,269 @@ struct SmoothParam
 	}
 };
 
+static AppContext* g_ctx = nullptr;
 
-extern daisy::DaisyPod hw;
-extern StorageService storage;
-
-extern uint32_t kUiTickMs;
-extern uint32_t kUiTickPlaybackMs;
-
-extern volatile int32_t g_enc_l_delta;
-extern volatile int32_t g_enc_r_delta;
-extern volatile uint32_t g_ctrl_events;
-extern volatile bool g_shift_held;
-extern volatile bool g_btn1_held;
-extern bool ui_button1_held;
-extern volatile int32_t encoder_r_accum;
-extern volatile bool encoder_r_button_press;
-extern bool g_display_update_pending;
-extern uint32_t g_last_draw_ms;
-extern PodDisplay display;
-
-extern void JobTick();
-
-extern const AudioUiState& GetAudioUiStateSnapshot(uint8_t& idx);
-
-extern float ClampF(float v, float min, float max);
-extern int ClampI(int v, int min, int max);
-extern float Clamp01(float v);
-
-extern int32_t NextMenuIndex(int32_t current, int32_t delta);
-extern int32_t NextPerformIndex(int32_t current, int32_t delta);
-extern int32_t LoadVisibleLines();
-extern void CopyString(char* dst, const char* src, size_t dst_len);
-extern bool IsPerformUiMode(UiMode mode);
-extern double NowMs();
-
-extern void RequestPlaybackStopAll();
-extern void RequestAudioCmd(uint32_t bits);
-extern void PublishFxChainFromUi();
-extern void PublishRuntimeFromUi();
-extern void ResetSaveState();
-extern void StartRecording();
+float ClampF(float v, float min, float max);
+int ClampI(int v, int min, int max);
+float Clamp01(float v);
+int32_t NextMenuIndex(int32_t current, int32_t delta);
+int32_t NextPerformIndex(int32_t current, int32_t delta);
+int32_t LoadVisibleLines();
+void CopyString(char* dst, const char* src, size_t dst_len);
+bool IsPerformUiMode(UiMode mode);
+double NowMs();
+const AudioUiState& GetAudioUiStateSnapshot(uint8_t& idx);
+void RequestPlaybackStopAll();
+void RequestAudioCmd(uint32_t bits);
+void PublishFxChainFromUi();
+void PublishRuntimeFromUi();
+void ResetSaveState();
+void StartRecording();
+void ApplyPlaybackReverse(bool reverse);
+void JobTick();
 void AdjustTrimNormalized(int32_t dl, int32_t dr, bool fine);
-extern void ApplyPlaybackReverse(bool reverse);
+
+static inline int16_t* SampleBufferL()
+{
+	int16_t* l = nullptr;
+	int16_t* r = nullptr;
+	g_ctx->audio->GetSampleBuffers(l, r);
+	return l;
+}
+
+static inline int16_t* SampleBufferR()
+{
+	int16_t* l = nullptr;
+	int16_t* r = nullptr;
+	g_ctx->audio->GetSampleBuffers(l, r);
+	return r;
+}
+
+#define hw (*g_ctx->hw)
+#define storage (*g_ctx->storage)
+#define display (*static_cast<PodDisplay*>(g_ctx->display))
+#define kUiTickMs (*g_ctx->ui_tick_ms)
+#define kUiTickPlaybackMs (*g_ctx->ui_tick_playback_ms)
+#define g_enc_l_delta (*g_ctx->enc_l_delta)
+#define g_enc_r_delta (*g_ctx->enc_r_delta)
+#define g_ctrl_events (*g_ctx->ctrl_events)
+#define g_shift_held (*g_ctx->shift_held)
+#define g_btn1_held (*g_ctx->btn1_held)
+#define ui_button1_held (*g_ctx->ui_button1_held)
+#define g_display_update_pending (*g_ctx->display_update_pending)
+#define g_last_draw_ms (*g_ctx->last_draw_ms)
+
+#define ui_mode (*g_ctx->ui_mode)
+#define shift_prev_mode (*g_ctx->shift_prev_mode)
+#define delete_prev_mode (*g_ctx->delete_prev_mode)
+#define load_prev_mode (*g_ctx->load_prev_mode)
+#define fx_detail_prev_mode (*g_ctx->fx_detail_prev_mode)
+#define edt_prev_mode (*g_ctx->edt_prev_mode)
+#define menu_index (*g_ctx->menu_index)
+#define shift_menu_index (*g_ctx->shift_menu_index)
+#define perform_index (*g_ctx->perform_index)
+#define amp_fader_index (*g_ctx->amp_fader_index)
+#define flt_fader_index (*g_ctx->flt_fader_index)
+#define fx_fader_index (*g_ctx->fx_fader_index)
+#define fx_detail_index (*g_ctx->fx_detail_index)
+#define fx_detail_param_index (*g_ctx->fx_detail_param_index)
+#define load_selected (*g_ctx->load_selected)
+#define load_scroll (*g_ctx->load_scroll)
+#define load_mode_index (*g_ctx->load_mode_index)
+#define wav_file_count (*g_ctx->wav_file_count)
+#define request_load_index (*g_ctx->request_load_index)
+#define request_delete_index (*g_ctx->request_delete_index)
+#define record_source_index (*g_ctx->record_source_index)
+#define record_target_index (*g_ctx->record_target_index)
+#define sat_mode (*g_ctx->sat_mode)
+#define chorus_mode (*g_ctx->chorus_mode)
+#define fx_window_active (*g_ctx->fx_window_active)
+#define amp_window_active (*g_ctx->amp_window_active)
+#define flt_window_active (*g_ctx->flt_window_active)
+#define preview_hold (*g_ctx->preview_hold)
+#define fx_params_dirty (*g_ctx->fx_params_dirty)
+#define audio_params_dirty (*g_ctx->audio_params_dirty)
+#define request_load_sample (*g_ctx->request_load_sample)
+#define request_load_scan (*g_ctx->request_load_scan)
+#define request_delete_scan (*g_ctx->request_delete_scan)
+#define request_delete_file (*g_ctx->request_delete_file)
+#define request_delete_redraw (*g_ctx->request_delete_redraw)
+#define request_shift_redraw (*g_ctx->request_shift_redraw)
+#define request_perform_redraw (*g_ctx->request_perform_redraw)
+#define request_fx_detail_redraw (*g_ctx->request_fx_detail_redraw)
+#define request_length_redraw (*g_ctx->request_length_redraw)
+#define button1_press (*g_ctx->button1_press)
+#define button2_press (*g_ctx->button2_press)
+#define sample_loaded (*g_ctx->sample_loaded)
+#define sample_length (*g_ctx->sample_length)
+#define record_countdown_start_ms (*g_ctx->record_countdown_start_ms)
+#define phones_volume (*g_ctx->phones_volume)
+#define perform_attack_norm (*g_ctx->perform_attack_norm)
+#define perform_release_norm (*g_ctx->perform_release_norm)
+#define sat_drive (*g_ctx->sat_drive)
+#define sat_tape_bump (*g_ctx->sat_tape_bump)
+#define sat_bit_reso (*g_ctx->sat_bit_reso)
+#define sat_bit_smpl (*g_ctx->sat_bit_smpl)
+#define fx_s_wet (*g_ctx->fx_s_wet)
+#define fx_c_wet (*g_ctx->fx_c_wet)
+#define mod_depth (*g_ctx->mod_depth)
+#define chorus_rate (*g_ctx->chorus_rate)
+#define chorus_wow (*g_ctx->chorus_wow)
+#define tape_rate (*g_ctx->tape_rate)
+#define delay_wet (*g_ctx->delay_wet)
+#define delay_time (*g_ctx->delay_time)
+#define delay_feedback (*g_ctx->delay_feedback)
+#define delay_spread (*g_ctx->delay_spread)
+#define delay_freeze (*g_ctx->delay_freeze)
+#define reverb_wet (*g_ctx->reverb_wet)
+#define reverb_pre (*g_ctx->reverb_pre)
+#define reverb_damp (*g_ctx->reverb_damp)
+#define reverb_decay (*g_ctx->reverb_decay)
+#define playback_reverse (*g_ctx->playback_reverse)
+#define amp_attack (*g_ctx->amp_attack)
+#define amp_decay (*g_ctx->amp_decay)
+#define amp_sustain (*g_ctx->amp_sustain)
+#define amp_release (*g_ctx->amp_release)
+#define flt_cutoff (*g_ctx->flt_cutoff)
+#define flt_res (*g_ctx->flt_res)
+#define sat_params_initialized (*g_ctx->sat_params_initialized)
+#define mod_params_initialized (*g_ctx->mod_params_initialized)
+#define delay_params_initialized (*g_ctx->delay_params_initialized)
+#define reverb_params_initialized (*g_ctx->reverb_params_initialized)
+#define save_in_progress (*g_ctx->save_in_progress)
+#define save_done (*g_ctx->save_done)
+#define save_success (*g_ctx->save_success)
+#define save_started (*g_ctx->save_started)
+#define save_start_ms (*g_ctx->save_start_ms)
+#define save_result_until_ms (*g_ctx->save_result_until_ms)
+#define save_draw_next_ms (*g_ctx->save_draw_next_ms)
+#define save_prev_mode (*g_ctx->save_prev_mode)
+#define save_filename (g_ctx->save_filename)
+#define sd_init_in_progress (*g_ctx->sd_init_in_progress)
+#define sd_mounted (*g_ctx->sd_mounted)
+#define sd_fault (*g_ctx->sd_fault)
+#define sd_fault_text (*g_ctx->sd_fault_text)
+#define sd_init_done (*g_ctx->sd_init_done)
+#define sd_init_success (*g_ctx->sd_init_success)
+#define sd_init_attempts (*g_ctx->sd_init_attempts)
+#define delete_mode (*g_ctx->delete_mode)
+#define delete_confirm (*g_ctx->delete_confirm)
+#define waveform_ready (*g_ctx->waveform_ready)
+#define waveform_dirty (*g_ctx->waveform_dirty)
+#define waveform_from_recording (*g_ctx->waveform_from_recording)
+#define load_context (*g_ctx->load_context)
+#define load_stub_mode (*g_ctx->load_stub_mode)
+#define record_state (*g_ctx->record_state)
+#define record_input (*g_ctx->record_input)
+#define current_sample_context (*g_ctx->current_sample_context)
+#define edt_sample_context (*g_ctx->edt_sample_context)
+#define delay_snow_next_ms (*g_ctx->delay_snow_next_ms)
+#define midi_ignore_until_ms (*g_ctx->midi_ignore_until_ms)
+#define record_text_mask (*g_ctx->record_text_mask)
+#define record_invert_mask (*g_ctx->record_invert_mask)
+#define record_fb_buf (*g_ctx->record_fb_buf)
+#define record_bold_mask (*g_ctx->record_bold_mask)
+#define load_lines (*g_ctx->load_lines)
+#define load_line_height (*g_ctx->load_line_height)
+#define load_chars_per_line (*g_ctx->load_chars_per_line)
+#define wav_files (g_ctx->wav_files)
+#define delete_confirm_name (g_ctx->delete_confirm_name)
+#define loaded_sample_name (g_ctx->loaded_sample_name)
+#define fx_chain_order (g_ctx->fx_chain_order)
+#define fx_chain_last_move_ms (*g_ctx->fx_chain_last_move_ms)
+#define fx_chain_fade_target (*g_ctx->fx_chain_fade_target)
+#define fx_chain_fade_samples_left (*g_ctx->fx_chain_fade_samples_left)
+#define fx_chain_fade_gain (*g_ctx->fx_chain_fade_gain)
+#define fx_chain_paused (*g_ctx->fx_chain_paused)
+#define fx_chain_pause_pending (*g_ctx->fx_chain_pause_pending)
+#define record_anim_start_ms (*g_ctx->record_anim_start_ms)
+#define g_audio_cmd (*g_ctx->audio_cmd)
+#define g_audio_params_pub_idx (*g_ctx->audio_params_pub_idx)
+#define g_rt_pub_idx (*g_ctx->rt_pub_idx)
+#define g_fx_chain_pub_idx (*g_ctx->fx_chain_pub_idx)
+#define g_preview_pub_idx (*g_ctx->preview_pub_idx)
+#define g_audio_params_buf (g_ctx->audio_params_buf)
+#define g_rt_buf (g_ctx->rt_buf)
+#define g_fx_chain_buf (g_ctx->fx_chain_buf)
+#define g_preview_ctl_buf (g_ctx->preview_ctl_buf)
+#define g_audio_ui_state_buf (g_ctx->audio_ui_state_buf)
+#define g_audio_ui_state_idx (*g_ctx->audio_ui_state_idx)
+#define g_rt_active_idx (*g_ctx->rt_active_idx)
+#define g_fx_params_buf (g_ctx->fx_params_buf)
+#define g_fx_params_idx (*g_ctx->fx_params_idx)
+#define g_audio_params_audio_buf (g_ctx->audio_params_audio_buf)
+#define g_audio_params_audio_idx (*g_ctx->audio_params_audio_idx)
+#define g_delay_time_alpha (*g_ctx->delay_time_alpha)
+#define g_delay_param_alpha (*g_ctx->delay_param_alpha)
+#define g_audio_recording_active (*g_ctx->audio_recording_active)
+#define g_recorded_length_audio (*g_ctx->recorded_length_audio)
+#define record_pos (*g_ctx->record_pos)
+#define g_record_start_ms (*g_ctx->record_start_ms)
+#define g_active_voice_count (*g_ctx->active_voice_count)
+#define sample_buffer_l (SampleBufferL())
+#define sample_buffer_r (SampleBufferR())
+#define sample_play_start (*g_ctx->sample_play_start)
+#define sample_play_end (*g_ctx->sample_play_end)
+#define sample_rate (*g_ctx->sample_rate)
+#define sample_channels (*g_ctx->sample_channels)
+#define trim_start (*g_ctx->trim_start)
+#define trim_end (*g_ctx->trim_end)
+#define snap_start_frame (*g_ctx->snap_start_frame)
+#define snap_end_frame (*g_ctx->snap_end_frame)
+#define playback_active (*g_ctx->playback_active)
+#define g_wf_job (*g_ctx->g_wf_job)
+#define g_list_job (*g_ctx->g_list_job)
+#define g_job (*g_ctx->g_job)
+#define loader_state (*g_ctx->loader_state)
+#define load_in_progress (*g_ctx->load_in_progress)
+#define load_target_is_edt (*g_ctx->load_target_is_edt)
+#define load_cookie_next (*g_ctx->load_cookie_next)
+#define load_cookie_active (*g_ctx->load_cookie_active)
+#define load_fail_budget_count (*g_ctx->load_fail_budget_count)
+#define load_fail_io_count (*g_ctx->load_fail_io_count)
+#define load_success_count (*g_ctx->load_success_count)
+#define delete_in_progress (*g_ctx->delete_in_progress)
+#define delete_cookie_next (*g_ctx->delete_cookie_next)
+#define delete_cookie_active (*g_ctx->delete_cookie_active)
+#define load_scan_start_ms (*g_ctx->load_scan_start_ms)
+#define list_build_pending (*g_ctx->list_build_pending)
+#define save_frames_written (*g_ctx->save_frames_written)
+#define waveform_title (*g_ctx->waveform_title)
+#define waveform_record_input (*g_ctx->record_input)
+#define preview_index (*g_ctx->preview_index)
+#define preview_sample_rate (*g_ctx->preview_sample_rate)
+#define preview_channels (*g_ctx->preview_channels)
+#define preview_rate (*g_ctx->preview_rate)
+#define preview_read_frac (*g_ctx->preview_read_frac)
+#define preview_read_index (*g_ctx->preview_read_index)
+#define preview_write_index (*g_ctx->preview_write_index)
+#define preview_data_offset (*g_ctx->preview_data_offset)
+#define preview_fade_samples_left (*g_ctx->preview_fade_samples_left)
+#define preview_fade_samples_total (*g_ctx->preview_fade_samples_total)
+#define preview_stream_cookie (*g_ctx->preview_stream_cookie)
+#define preview_stream_cookie_active (*g_ctx->preview_stream_cookie_active)
+#define preview_pending_start (*g_ctx->preview_pending_start)
+#define preview_pending_start_ms (*g_ctx->preview_pending_start_ms)
+#define preview_pp_ready (g_ctx->preview_pp_ready)
+#define preview_pp_active (*g_ctx->preview_pp_active)
+#define preview_pp_pos (*g_ctx->preview_pp_pos)
+#define preview_preload_frames (*g_ctx->preview_preload_frames)
+#define preview_preload_active (*g_ctx->preview_preload_active)
+#define cpu_load_pct (g_ctx->audio->GetStats().cpu_load_pct)
+#define cpu_load_peak_pct (g_ctx->audio->GetStats().cpu_load_peak_pct)
+#define callback_cycles_last (g_ctx->audio->GetStats().callback_cycles_last)
+#define callback_cycles_max (g_ctx->audio->GetStats().callback_cycles_max)
+#define callback_overruns (g_ctx->audio->GetStats().callback_overruns)
+#define cpu_load_ema (g_ctx->audio->GetStats().cpu_load_pct)
+
+
+
+
+
+
+
+
+void AdjustTrimNormalized(int32_t dl, int32_t dr, bool fine);
 
 // OWNER: UI/main loop only.
 // WRITES: UI thread only.
@@ -229,240 +450,23 @@ struct UiState
 };
 static UiState g_ui;
 
-extern volatile UiMode ui_mode;
-extern volatile UiMode shift_prev_mode;
-extern UiMode delete_prev_mode;
-extern UiMode load_prev_mode;
-extern UiMode fx_detail_prev_mode;
-extern UiMode edt_prev_mode;
-extern volatile int32_t menu_index;
-extern volatile int32_t shift_menu_index;
-extern volatile int32_t perform_index;
-extern volatile int32_t amp_fader_index;
-extern volatile int32_t flt_fader_index;
-extern volatile int32_t fx_fader_index;
-extern volatile int32_t fx_detail_index;
-extern volatile int32_t fx_detail_param_index;
-extern volatile int32_t load_selected;
-extern volatile int32_t load_scroll;
-extern volatile int32_t load_mode_index;
-extern volatile int32_t wav_file_count;
-extern volatile int32_t request_load_index;
-extern volatile int32_t request_delete_index;
-extern volatile int32_t record_source_index;
-extern volatile int32_t record_target_index;
-extern volatile int32_t sat_mode;
-extern volatile int32_t chorus_mode;
-extern volatile bool fx_window_active;
-extern volatile bool amp_window_active;
-extern volatile bool flt_window_active;
-extern volatile bool preview_hold;
-extern volatile bool fx_params_dirty;
-extern volatile bool audio_params_dirty;
-extern volatile bool request_load_sample;
-extern volatile bool request_load_scan;
-extern volatile bool request_delete_scan;
-extern volatile bool request_delete_file;
-extern bool request_delete_redraw;
-extern bool request_shift_redraw;
-extern bool request_perform_redraw;
-extern bool request_fx_detail_redraw;
-extern volatile bool request_length_redraw;
-extern volatile bool button1_press;
-extern volatile bool button2_press;
-extern volatile bool sample_loaded;
-extern volatile size_t sample_length;
-extern volatile uint32_t record_countdown_start_ms;
-extern volatile float phones_volume;
-extern volatile float perform_attack_norm;
-extern volatile float perform_release_norm;
-extern volatile float sat_drive;
-extern volatile float sat_tape_bump;
-extern volatile float sat_bit_reso;
-extern volatile float sat_bit_smpl;
-extern volatile float fx_s_wet;
-extern volatile float fx_c_wet;
-extern volatile float mod_depth;
-extern volatile float chorus_rate;
-extern volatile float chorus_wow;
-extern volatile float tape_rate;
-extern volatile float delay_wet;
-extern volatile float delay_time;
-extern volatile float delay_feedback;
-extern volatile float delay_spread;
-extern volatile float delay_freeze;
-extern volatile float reverb_wet;
-extern volatile float reverb_pre;
-extern volatile float reverb_damp;
-extern volatile float reverb_decay;
-extern volatile float playback_reverse;
-extern volatile float amp_attack;
-extern volatile float amp_decay;
-extern volatile float amp_sustain;
-extern volatile float amp_release;
-extern volatile float flt_cutoff;
-extern volatile float flt_res;
 
-extern volatile bool sat_params_initialized;
-extern volatile bool mod_params_initialized;
-extern volatile bool delay_params_initialized;
-extern volatile bool reverb_params_initialized;
 
-extern bool save_in_progress;
-extern bool save_done;
-extern bool save_success;
-extern bool save_started;
-extern uint32_t save_start_ms;
-extern uint32_t save_result_until_ms;
-extern uint32_t save_draw_next_ms;
-extern UiMode save_prev_mode;
-extern char save_filename[];
-extern bool sd_init_in_progress;
-extern bool sd_mounted;
-extern bool sd_fault;
-extern const char* sd_fault_text;
-extern bool sd_init_done;
-extern bool sd_init_success;
-extern int32_t sd_init_attempts;
-extern volatile bool delete_mode;
-extern volatile bool delete_confirm;
-extern bool waveform_ready;
-extern bool waveform_dirty;
-extern bool waveform_from_recording;
 
-extern LoadContext load_context;
-extern LoadStubMode load_stub_mode;
-extern volatile RecordState record_state;
-extern volatile RecordInput record_input;
-extern SampleContext current_sample_context;
-extern SampleContext edt_sample_context;
 
-extern uint32_t delay_snow_next_ms;
-extern uint32_t midi_ignore_until_ms;
 
-extern uint8_t record_text_mask[kDisplayH][kDisplayW];
-extern uint8_t record_invert_mask[kDisplayH][kDisplayW];
-extern uint8_t record_fb_buf[kDisplayH][kDisplayW];
-extern uint8_t record_bold_mask[kDisplayH][kDisplayW];
 
-extern int32_t load_lines;
-extern int32_t load_line_height;
-extern int32_t load_chars_per_line;
 
-extern char wav_files[][kMaxWavNameLen];
-extern char delete_confirm_name[];
-extern char loaded_sample_name[];
 
-extern volatile int32_t fx_chain_order[];
-extern uint32_t fx_chain_last_move_ms;
-extern float fx_chain_fade_target;
-extern int32_t fx_chain_fade_samples_left;
-extern float fx_chain_fade_gain;
-extern bool fx_chain_paused;
-extern bool fx_chain_pause_pending;
-extern double record_anim_start_ms;
 
-extern float FxWetStep(int32_t fx_index);
-extern volatile float* FxWetTarget(int32_t fx_index);
-extern int BitResoIndexFromValue(float value);
-extern float BitResoValueFromIndex(int idx);
 void PublishAudioParamsFromUi(const AudioParams& p);
 float FxWetValue(int32_t fx_index);
 static float AmpEnvMsFromFader(float value);
 static float FltCutoffFromFader(float value, float sample_rate);
 static float FltQFromFader(float value);
-extern volatile uint32_t g_audio_cmd;
-extern volatile uint8_t g_audio_params_pub_idx;
-extern volatile uint8_t g_rt_pub_idx;
-extern volatile uint8_t g_fx_chain_pub_idx;
-extern volatile uint8_t g_preview_pub_idx;
-extern AudioParams g_audio_params_buf[2];
-extern SampleRuntime g_rt_buf[2];
-extern FxChainRuntime g_fx_chain_buf[2];
-extern PreviewControl g_preview_ctl_buf[2];
-extern AudioUiState g_audio_ui_state_buf[2];
-extern volatile uint8_t g_audio_ui_state_idx;
-extern volatile uint8_t g_rt_active_idx;
-extern FxParamsAudio g_fx_params_buf[2];
-extern volatile uint8_t g_fx_params_idx;
-extern AudioParamsAudio g_audio_params_audio_buf[2];
-extern volatile uint8_t g_audio_params_audio_idx;
-extern volatile float g_delay_time_alpha;
-extern volatile float g_delay_param_alpha;
-extern volatile bool g_audio_recording_active;
-extern volatile size_t g_recorded_length_audio;
-extern volatile size_t record_pos;
-extern volatile uint32_t g_record_start_ms;
-extern volatile int32_t g_active_voice_count;
-extern int16_t* sample_buffer_l;
-extern int16_t* sample_buffer_r;
-extern volatile size_t sample_play_start;
-extern volatile size_t sample_play_end;
-extern volatile uint32_t sample_rate;
-extern volatile uint16_t sample_channels;
-extern float trim_start;
-extern float trim_end;
-extern uint32_t snap_start_frame;
-extern uint32_t snap_end_frame;
-extern volatile bool playback_active;
-extern bool AllocatePerformSample(size_t bytes, void** out_ptr);
-extern void FreePerformSample();
-extern BiquadLp perform_lpf_l1[];
-extern BiquadLp perform_lpf_l2[];
-extern BiquadLp perform_lpf_r1[];
-extern BiquadLp perform_lpf_r2[];
 WaveformCache perform_waveform_cache;
-extern bool g_reset_voices_pending;
-extern WaveformJob g_wf_job;
-extern FileListJob g_list_job;
-extern Job g_job;
-extern PerformState main_perform_state;
-extern LoaderState loader_state;
-extern bool load_in_progress;
-extern bool load_target_is_edt;
-extern uint16_t load_cookie_next;
-extern uint16_t load_cookie_active;
-extern uint32_t load_fail_budget_count;
-extern uint32_t load_fail_io_count;
-extern uint32_t load_success_count;
-extern bool delete_in_progress;
-extern uint16_t delete_cookie_next;
-extern uint16_t delete_cookie_active;
-extern uint32_t load_scan_start_ms;
-extern bool list_build_pending;
-extern size_t save_frames_written;
-extern const char* waveform_title;
-extern RecordInput waveform_record_input;
-extern volatile int32_t preview_index;
-extern volatile uint32_t preview_sample_rate;
-extern volatile uint16_t preview_channels;
-extern volatile float preview_rate;
-extern volatile float preview_read_frac;
-extern volatile size_t preview_read_index;
-extern volatile size_t preview_write_index;
-extern volatile uint32_t preview_data_offset;
-extern volatile uint32_t preview_fade_samples_left;
-extern volatile uint32_t preview_fade_samples_total;
-extern int16_t preview_buffer[];
 #if STORAGE_SERVICE_PREVIEW_STREAM
-extern uint16_t preview_stream_cookie;
-extern uint16_t preview_stream_cookie_active;
-extern bool preview_pending_start;
-extern uint32_t preview_pending_start_ms;
-extern int16_t preview_pp_buf[2][kPreviewPpFrames];
-extern volatile uint8_t preview_pp_ready[2];
-extern volatile uint8_t preview_pp_active;
-extern volatile uint32_t preview_pp_pos;
-extern int16_t preview_preload_buf[];
-extern volatile size_t preview_preload_frames;
-extern volatile bool preview_preload_active;
 #endif
-extern volatile float cpu_load_pct;
-extern volatile float cpu_load_peak_pct;
-extern volatile uint32_t callback_cycles_last;
-extern volatile uint32_t callback_cycles_max;
-extern volatile uint32_t callback_overruns;
-extern float cpu_load_ema;
 
 // Build and publish g_fx_params_buf (heavy mapping; call at <=50-100Hz).
 struct FxParamsUi
@@ -645,8 +649,9 @@ void FlushDisplayIfDue(uint32_t now)
 
 void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_events, bool shift_held);
 
-void Ui::Init()
+void Ui::Init(AppContext* ctx)
 {
+	g_ctx = ctx;
 	g_ui.last_ui_ms = System::GetNow();
 }
 
@@ -2174,7 +2179,6 @@ static inline bool FileListAllowedNow()
 	return true;
 }
 
-Job g_job = {};
 
 static void WaveformJobCancel()
 {

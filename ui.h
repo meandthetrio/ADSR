@@ -5,12 +5,14 @@
 #include "shared_messages.h"
 
 struct AudioUiState;
+struct AppContext;
 
 class Ui
 {
 public:
-	void Init();
+	void Init(AppContext* ctx);
 	void Tick(uint32_t now_ms);
+	size_t GetWaveformCacheBytes() const;
 };
 
 void RequestDisplayUpdate();

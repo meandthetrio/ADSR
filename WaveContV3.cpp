@@ -7,6 +7,7 @@
 #include "audio_engine.h"
 #include "ui.h"
 #include "app_controller.h"
+#include "StorageService.h"
 #include <cmath>
 #include <initializer_list>
 //#include <math.h>
@@ -194,13 +195,17 @@ static void EnableFtz()
 #endif
 }
 
+
 DaisyPod    hw;
 PodDisplay  display;
 bool g_display_update_pending = false;
 uint32_t g_last_draw_ms = 0;
 static AudioEngine g_audio_engine;
+static StorageService g_storage;
 Ui g_ui;
 static AppController g_app;
+static AppContext g_app_ctx;
+static AudioShared g_audio_shared;
 constexpr uint8_t kMidiCmdQSize = 16; // power of two
 MidiCmd g_midi_cmd_q[kMidiCmdQSize];
 volatile uint8_t g_midi_cmd_wr = 0;
@@ -442,9 +447,6 @@ PreviewControl g_preview_ctl_buf[2];
 volatile uint8_t g_preview_pub_idx = 0;
 volatile uint8_t g_preview_active_idx = 0;
 
-extern int16_t* sample_buffer_l;
-extern int16_t* sample_buffer_r;
-extern int16_t preview_buffer[kPreviewBufferFrames];
 
 
 PerformState main_perform_state;
@@ -537,6 +539,7 @@ void PushAudioEvent(uint32_t bits)
 
 WaveformJob g_wf_job = {};
 FileListJob g_list_job = {};
+Job g_job = {};
 
 FxParamsAudio g_fx_params_buf[2];
 volatile uint8_t g_fx_params_idx = 0;
@@ -544,8 +547,6 @@ AudioParamsAudio g_audio_params_audio_buf[2];
 volatile uint8_t g_audio_params_audio_idx = 0;
 
 int BitResoIndexFromValue(float value);
-extern volatile int32_t sat_mode;
-extern volatile int32_t chorus_mode;
 
 float Clamp01(float v)
 {
@@ -720,7 +721,6 @@ static int32_t last_perform_flt_selected = -1;
 uint32_t delay_snow_next_ms = 0;
 uint32_t midi_ignore_until_ms = 0;
 
-extern Job g_job;
 
 double NowMs()
 {
@@ -987,6 +987,335 @@ void AudioCallback(AudioHandle::InputBuffer in, AudioHandle::OutputBuffer out, s
 	g_audio_engine.Process(in, out, size);
 }
 
+static void InitAppContext(AppContext& ctx)
+{
+	ctx.hw = &hw;
+	ctx.display = &display;
+	ctx.ui = &g_ui;
+	ctx.audio = &g_audio_engine;
+	ctx.storage = &g_storage;
+	ctx.last_draw_ms = &g_last_draw_ms;
+	ctx.ui_tick_ms = &kUiTickMs;
+	ctx.ui_tick_playback_ms = &kUiTickPlaybackMs;
+
+	ctx.enc_l_delta = &g_enc_l_delta;
+	ctx.enc_r_delta = &g_enc_r_delta;
+	ctx.ctrl_events = &g_ctrl_events;
+	ctx.shift_held = &g_shift_held;
+	ctx.btn1_held = &g_btn1_held;
+	ctx.ui_button1_held = &ui_button1_held;
+
+	ctx.ui_mode = &ui_mode;
+	ctx.menu_index = &menu_index;
+	ctx.shift_menu_index = &shift_menu_index;
+	ctx.perform_index = &perform_index;
+	ctx.amp_fader_index = &amp_fader_index;
+	ctx.flt_fader_index = &flt_fader_index;
+	ctx.fx_fader_index = &fx_fader_index;
+	ctx.fx_chain_order = fx_chain_order;
+	ctx.fx_window_active = &fx_window_active;
+	ctx.amp_window_active = &amp_window_active;
+	ctx.flt_window_active = &flt_window_active;
+	ctx.shift_prev_mode = &shift_prev_mode;
+	ctx.record_input = &record_input;
+	ctx.load_selected = &load_selected;
+	ctx.load_scroll = &load_scroll;
+	ctx.request_load_scan = &request_load_scan;
+	ctx.list_build_pending = &list_build_pending;
+	ctx.request_load_sample = &request_load_sample;
+	ctx.request_load_index = &request_load_index;
+	ctx.load_in_progress = &load_in_progress;
+	ctx.load_cookie_next = &load_cookie_next;
+	ctx.load_cookie_active = &load_cookie_active;
+	ctx.load_target_is_edt = &load_target_is_edt;
+	ctx.load_context = &load_context;
+	ctx.loader_state = &loader_state;
+	ctx.load_success_count = &load_success_count;
+	ctx.load_fail_budget_count = &load_fail_budget_count;
+	ctx.load_fail_io_count = &load_fail_io_count;
+	ctx.wav_file_count = &wav_file_count;
+	ctx.sd_mounted = &sd_mounted;
+	ctx.sd_present = &sd_present;
+	ctx.sd_fault = &sd_fault;
+	ctx.sd_fault_text = &sd_fault_text;
+	ctx.sd_retries_remaining = &sd_retries_remaining;
+	ctx.sd_init_in_progress = &sd_init_in_progress;
+	ctx.sd_init_done = &sd_init_done;
+	ctx.sd_init_success = &sd_init_success;
+	ctx.sd_init_start_ms = &sd_init_start_ms;
+	ctx.sd_init_next_ms = &sd_init_next_ms;
+	ctx.sd_init_result_until_ms = &sd_init_result_until_ms;
+	ctx.sd_init_draw_next_ms = &sd_init_draw_next_ms;
+	ctx.sd_init_attempts = &sd_init_attempts;
+	ctx.sd_init_prev_mode = &sd_init_prev_mode;
+	ctx.save_in_progress = &save_in_progress;
+	ctx.save_done = &save_done;
+	ctx.save_success = &save_success;
+	ctx.save_started = &save_started;
+	ctx.save_start_ms = &save_start_ms;
+	ctx.save_result_until_ms = &save_result_until_ms;
+	ctx.save_draw_next_ms = &save_draw_next_ms;
+	ctx.save_prev_mode = &save_prev_mode;
+	ctx.save_filename = save_filename;
+	ctx.save_frames_written = &save_frames_written;
+	ctx.delete_mode = &delete_mode;
+	ctx.delete_prev_mode = &delete_prev_mode;
+	ctx.load_prev_mode = &load_prev_mode;
+	ctx.fx_detail_prev_mode = &fx_detail_prev_mode;
+	ctx.edt_prev_mode = &edt_prev_mode;
+	ctx.request_delete_scan = &request_delete_scan;
+	ctx.request_delete_file = &request_delete_file;
+	ctx.request_delete_index = &request_delete_index;
+	ctx.delete_confirm = &delete_confirm;
+	ctx.delete_confirm_name = delete_confirm_name;
+	ctx.phones_volume = &phones_volume;
+	ctx.delete_in_progress = &delete_in_progress;
+	ctx.delete_cookie_next = &delete_cookie_next;
+	ctx.delete_cookie_active = &delete_cookie_active;
+	ctx.wav_files = wav_files;
+	ctx.loaded_sample_name = loaded_sample_name;
+	ctx.load_lines = &load_lines;
+	ctx.load_line_height = &load_line_height;
+	ctx.load_chars_per_line = &load_chars_per_line;
+	ctx.load_scan_start_ms = &load_scan_start_ms;
+	ctx.current_sample_context = &current_sample_context;
+	ctx.edt_sample_context = &edt_sample_context;
+	ctx.load_mode_index = &load_mode_index;
+	ctx.load_stub_mode = &load_stub_mode;
+	ctx.sample_length = &sample_length;
+	ctx.sample_play_start = &sample_play_start;
+	ctx.sample_play_end = &sample_play_end;
+	ctx.sample_rate = &sample_rate;
+	ctx.sample_channels = &sample_channels;
+	ctx.sample_loaded = &sample_loaded;
+	ctx.playback_active = &playback_active;
+	ctx.playback_rate = &playback_rate;
+	ctx.playback_phase = &playback_phase;
+	ctx.playback_reverse = &playback_reverse;
+	ctx.perform_voices_active = &g_perform_voices_active;
+	ctx.audio_cmd = &g_audio_cmd;
+	ctx.audio_flags_bits = &g_audio_flags_bits;
+	ctx.audio_ui_state_buf = g_audio_ui_state_buf;
+	ctx.audio_ui_state_idx = &g_audio_ui_state_idx;
+	ctx.audio_recording_active = &g_audio_recording_active;
+	ctx.active_voice_count = &g_active_voice_count;
+	ctx.delay_time_alpha = &g_delay_time_alpha;
+	ctx.delay_param_alpha = &g_delay_param_alpha;
+	ctx.record_state = &record_state;
+	ctx.record_source_index = &record_source_index;
+	ctx.record_target_index = &record_target_index;
+	ctx.record_countdown_start_ms = &record_countdown_start_ms;
+	ctx.record_pos = &record_pos;
+	ctx.recorded_length_audio = &g_recorded_length_audio;
+	ctx.record_start_ms = &g_record_start_ms;
+	ctx.record_waveform_pending = &record_waveform_pending;
+	ctx.encoder_r_accum = &encoder_r_accum;
+	ctx.encoder_r_button_press = &encoder_r_button_press;
+	ctx.request_length_redraw = &request_length_redraw;
+	ctx.request_playhead_redraw = &request_playhead_redraw;
+	ctx.button1_press = &button1_press;
+	ctx.button2_press = &button2_press;
+	ctx.request_playback_stop_log = &request_playback_stop_log;
+	ctx.reverb_wet = &reverb_wet;
+	ctx.reverb_pre = &reverb_pre;
+	ctx.reverb_damp = &reverb_damp;
+	ctx.reverb_decay = &reverb_decay;
+	ctx.delay_wet = &delay_wet;
+	ctx.delay_time = &delay_time;
+	ctx.delay_feedback = &delay_feedback;
+	ctx.delay_spread = &delay_spread;
+	ctx.delay_freeze = &delay_freeze;
+	ctx.fx_s_wet = &fx_s_wet;
+	ctx.sat_drive = &sat_drive;
+	ctx.sat_tape_bump = &sat_tape_bump;
+	ctx.sat_bit_reso = &sat_bit_reso;
+	ctx.sat_bit_smpl = &sat_bit_smpl;
+	ctx.fx_c_wet = &fx_c_wet;
+	ctx.mod_depth = &mod_depth;
+	ctx.chorus_rate = &chorus_rate;
+	ctx.sat_mode = &sat_mode;
+	ctx.chorus_mode = &chorus_mode;
+	ctx.chorus_wow = &chorus_wow;
+	ctx.tape_rate = &tape_rate;
+	ctx.fx_params_dirty = &fx_params_dirty;
+	ctx.audio_params_dirty = &audio_params_dirty;
+	ctx.sat_params_initialized = &sat_params_initialized;
+	ctx.reverb_params_initialized = &reverb_params_initialized;
+	ctx.delay_params_initialized = &delay_params_initialized;
+	ctx.mod_params_initialized = &mod_params_initialized;
+	ctx.amp_attack = &amp_attack;
+	ctx.amp_decay = &amp_decay;
+	ctx.amp_sustain = &amp_sustain;
+	ctx.amp_release = &amp_release;
+	ctx.fx_detail_index = &fx_detail_index;
+	ctx.fx_detail_param_index = &fx_detail_param_index;
+	ctx.flt_cutoff = &flt_cutoff;
+	ctx.flt_res = &flt_res;
+	ctx.preview_hold = &preview_hold;
+	ctx.fx_chain_fade_gain = &fx_chain_fade_gain;
+	ctx.fx_chain_fade_target = &fx_chain_fade_target;
+	ctx.fx_chain_fade_samples_left = &fx_chain_fade_samples_left;
+	ctx.fx_chain_pause_pending = &fx_chain_pause_pending;
+	ctx.fx_chain_paused = &fx_chain_paused;
+	ctx.fx_chain_last_move_ms = &fx_chain_last_move_ms;
+	ctx.preview_active = &preview_active;
+	ctx.preview_index = &preview_index;
+	ctx.preview_sample_rate = &preview_sample_rate;
+	ctx.preview_channels = &preview_channels;
+	ctx.preview_rate = &preview_rate;
+	ctx.preview_read_frac = &preview_read_frac;
+	ctx.preview_read_index = &preview_read_index;
+	ctx.preview_write_index = &preview_write_index;
+	ctx.preview_data_offset = &preview_data_offset;
+	ctx.preview_fade_samples_left = &preview_fade_samples_left;
+	ctx.preview_fade_samples_total = &preview_fade_samples_total;
+	ctx.preview_pending_start = &preview_pending_start;
+	ctx.preview_pending_start_ms = &preview_pending_start_ms;
+	ctx.preview_underrun_count = &preview_underrun_count;
+	ctx.preview_rb_min_level = &preview_rb_min_level;
+	ctx.preview_stream_cookie = &preview_stream_cookie;
+	ctx.preview_stream_cookie_active = &preview_stream_cookie_active;
+	ctx.preview_pp_ready = preview_pp_ready;
+	ctx.preview_pp_active = &preview_pp_active;
+	ctx.preview_pp_pos = &preview_pp_pos;
+	ctx.preview_preload_frames = &preview_preload_frames;
+	ctx.preview_preload_active = &preview_preload_active;
+	ctx.led1_level = &led1_level;
+	ctx.led1_phase_ms = &led1_phase_ms;
+	ctx.record_anim_start_ms = &record_anim_start_ms;
+	ctx.request_shift_redraw = &request_shift_redraw;
+	ctx.request_perform_redraw = &request_perform_redraw;
+	ctx.request_fx_detail_redraw = &request_fx_detail_redraw;
+	ctx.delay_snow_next_ms = &delay_snow_next_ms;
+	ctx.midi_ignore_until_ms = &midi_ignore_until_ms;
+	ctx.g_job = &g_job;
+	ctx.g_wf_job = &g_wf_job;
+	ctx.g_list_job = &g_list_job;
+	ctx.waveform_ready = &waveform_ready;
+	ctx.waveform_dirty = &waveform_dirty;
+	ctx.waveform_from_recording = &waveform_from_recording;
+	ctx.waveform_title = &waveform_title;
+	ctx.request_delete_redraw = &request_delete_redraw;
+	ctx.display_update_pending = &g_display_update_pending;
+	ctx.waveform_compute_pending = &waveform_compute_pending;
+	ctx.waveform_compute_ctx = &waveform_compute_ctx;
+	ctx.audio_event_bits = &g_audio_event_bits;
+	ctx.sample_mem_used_bytes = &sample_mem_used_bytes;
+	ctx.sample_mem_free_bytes = &sample_mem_free_bytes;
+	ctx.waveform_cache_bytes = &waveform_cache_bytes;
+
+	ctx.audio_params_buf = g_audio_params_buf;
+	ctx.audio_params_pub_idx = &g_audio_params_pub_idx;
+	ctx.audio_params_active_idx = &g_audio_params_active_idx;
+	ctx.rt_buf = g_rt_buf;
+	ctx.rt_pub_idx = &g_rt_pub_idx;
+	ctx.rt_active_idx = &g_rt_active_idx;
+	ctx.fx_chain_buf = g_fx_chain_buf;
+	ctx.fx_chain_pub_idx = &g_fx_chain_pub_idx;
+	ctx.fx_chain_active_idx = &g_fx_chain_active_idx;
+	ctx.preview_ctl_buf = g_preview_ctl_buf;
+	ctx.preview_pub_idx = &g_preview_pub_idx;
+	ctx.preview_active_idx = &g_preview_active_idx;
+	ctx.fx_params_buf = g_fx_params_buf;
+	ctx.fx_params_idx = &g_fx_params_idx;
+	ctx.audio_params_audio_buf = g_audio_params_audio_buf;
+	ctx.audio_params_audio_idx = &g_audio_params_audio_idx;
+
+	ctx.record_text_mask = record_text_mask;
+	ctx.record_invert_mask = record_invert_mask;
+	ctx.record_fb_buf = record_fb_buf;
+	ctx.record_bold_mask = record_bold_mask;
+
+	ctx.trim_start = &trim_start;
+	ctx.trim_end = &trim_end;
+	ctx.snap_start_frame = &snap_start_frame;
+	ctx.snap_end_frame = &snap_end_frame;
+
+	ctx.perform_attack_norm = &perform_attack_norm;
+	ctx.perform_release_norm = &perform_release_norm;
+}
+
+static void InitAudioShared(AudioShared& sh)
+{
+	sh.hw = &hw;
+	sh.audio_cmd = &g_audio_cmd;
+	sh.audio_flags_bits = &g_audio_flags_bits;
+	sh.record_input = &record_input;
+	sh.playback_reverse_target = &g_playback_reverse_target;
+	sh.audio_params_pub_idx = &g_audio_params_pub_idx;
+	sh.rt_pub_idx = &g_rt_pub_idx;
+	sh.fx_chain_pub_idx = &g_fx_chain_pub_idx;
+	sh.preview_pub_idx = &g_preview_pub_idx;
+	sh.phones_volume = &phones_volume;
+	sh.audio_recording_active = &g_audio_recording_active;
+	sh.recorded_length_audio = &g_recorded_length_audio;
+	sh.record_pos = &record_pos;
+	sh.reset_voices_pending = &g_reset_voices_pending;
+	sh.audio_params_buf = g_audio_params_buf;
+	sh.audio_params_active_idx = &g_audio_params_active_idx;
+	sh.audio_ui_state_buf = g_audio_ui_state_buf;
+	sh.audio_ui_state_idx = &g_audio_ui_state_idx;
+	sh.playback_active = &playback_active;
+	sh.playback_phase = &playback_phase;
+	sh.perform_voices_active = &g_perform_voices_active;
+	sh.preview_active = &preview_active;
+	sh.preview_read_index = &preview_read_index;
+	sh.preview_read_frac = &preview_read_frac;
+	sh.preview_fade_samples_left = &preview_fade_samples_left;
+	sh.preview_fade_samples_total = &preview_fade_samples_total;
+	sh.preview_ctl_buf = g_preview_ctl_buf;
+	sh.preview_active_idx = &g_preview_active_idx;
+	sh.preview_write_index = &preview_write_index;
+	sh.rt_buf = g_rt_buf;
+	sh.rt_active_idx = &g_rt_active_idx;
+	sh.fx_chain_buf = g_fx_chain_buf;
+	sh.fx_chain_active_idx = &g_fx_chain_active_idx;
+	sh.fx_chain_audio = &g_fx_chain_audio;
+	sh.fx_chain_audio_valid = &g_fx_chain_audio_valid;
+	sh.fx_params_buf = g_fx_params_buf;
+	sh.fx_params_idx = &g_fx_params_idx;
+	sh.audio_params_audio_buf = g_audio_params_audio_buf;
+	sh.audio_params_audio_idx = &g_audio_params_audio_idx;
+	sh.delay_time_alpha = &g_delay_time_alpha;
+	sh.delay_param_alpha = &g_delay_param_alpha;
+#if STORAGE_SERVICE_PREVIEW_STREAM
+	sh.preview_preload_active = &preview_preload_active;
+	sh.preview_preload_frames = &preview_preload_frames;
+	sh.preview_pp_ready = preview_pp_ready;
+	sh.preview_pp_active = &preview_pp_active;
+	sh.preview_pp_pos = &preview_pp_pos;
+	sh.preview_underrun_count = &preview_underrun_count;
+	sh.preview_rb_min_level = &preview_rb_min_level;
+#endif
+	sh.playback_rate = &playback_rate;
+	sh.playback_amp = &playback_amp;
+	sh.playback_env_samples = &playback_env_samples;
+	sh.playback_release_active = &playback_release_active;
+	sh.playback_release_pos = &playback_release_pos;
+	sh.playback_release_start = &playback_release_start;
+	sh.playback_reverse_active = &playback_reverse_active;
+	sh.preview_hold = &preview_hold;
+	sh.preview_index = &preview_index;
+	sh.preview_sample_rate = &preview_sample_rate;
+	sh.preview_channels = &preview_channels;
+	sh.active_voice_count = &g_active_voice_count;
+	sh.voice_skip_count = &g_voice_skip_count;
+	sh.voice_kill_count = &g_voice_kill_count;
+	sh.cpu_load_pct = &cpu_load_pct;
+	sh.cpu_load_peak_pct = &cpu_load_peak_pct;
+	sh.callback_cycles_last = &callback_cycles_last;
+	sh.callback_cycles_max = &callback_cycles_max;
+	sh.callback_overruns = &callback_overruns;
+	sh.cpu_load_ema = &cpu_load_ema;
+	sh.request_playhead_redraw = &request_playhead_redraw;
+	sh.midi_cmd_q = g_midi_cmd_q;
+	sh.midi_cmd_wr = &g_midi_cmd_wr;
+	sh.midi_cmd_rd = &g_midi_cmd_rd;
+	sh.playback_cmd_q = g_playback_cmd_q;
+	sh.playback_cmd_wr = &g_playback_cmd_wr;
+	sh.playback_cmd_rd = &g_playback_cmd_rd;
+}
+
 int main(void)
 {
 	hw.Init();
@@ -1071,8 +1400,13 @@ int main(void)
 	display.Init(disp_cfg);
 	InitLoadLayout();
 
-	g_rt_buf[0].l = sample_buffer_l;
-	g_rt_buf[0].r = sample_buffer_r;
+	{
+		int16_t* sb_l = nullptr;
+		int16_t* sb_r = nullptr;
+		g_audio_engine.GetSampleBuffers(sb_l, sb_r);
+		g_rt_buf[0].l = sb_l;
+		g_rt_buf[0].r = sb_r;
+	}
 	g_rt_buf[0].length = 0;
 	g_rt_buf[0].play_start = 0;
 	g_rt_buf[0].play_end = 0;
@@ -1102,9 +1436,13 @@ int main(void)
 	g_fx_chain_audio_valid = true;
 
 	PreviewControl preview_init = {};
-	preview_init.l = preview_buffer;
+	{
+		PreviewBuffers pb = {};
+		g_audio_engine.GetPreviewBuffers(pb);
+		preview_init.l = pb.buffer;
+		preview_init.length = pb.frames;
+	}
 	preview_init.r = nullptr;
-	preview_init.length = kPreviewBufferFrames;
 	preview_init.rate = 1.0f;
 	preview_init.gain = 1.0f;
 	preview_init.mono = true;
@@ -1136,11 +1474,14 @@ int main(void)
 		}
 	}
 
+	InitAppContext(g_app_ctx);
+	InitAudioShared(g_audio_shared);
+	g_audio_engine.BindShared(&g_audio_shared);
 	hw.StartAdc();
 	hw.StartAudio(AudioCallback);
 	hw.midi.StartReceive();
 	g_midi_rx_started = true;
-	g_app.Init();
+	g_app.Init(&g_app_ctx);
 	while (1)
 	{
 		g_app.Tick(System::GetNow());

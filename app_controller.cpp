@@ -3,12 +3,9 @@
 #include "daisy_pod.h"
 #include "SamplerConfig.h"
 #include "StorageService.h"
+#include "audio_engine.h"
 #include "ui.h"
 #include "shared_messages.h"
-#include "WaveformCache.h"
-#include "SampleMemoryManager.h"
-#include "VoiceManager.h"
-#include "PerformVoice.h"
 
 using namespace daisy;
 
@@ -46,230 +43,210 @@ constexpr size_t kPreviewPpFrames = 2048;
 constexpr bool kLoadPresetsPlaceholder = true;
 constexpr int32_t kBaseMidiNote = 60;
 
-constexpr uint32_t kPerformSampleId = 1;
 
-extern DaisyPod hw;
-StorageService storage;
-extern Ui g_ui;
-extern SampleMemoryManager sample_mem_mgr;
-extern WaveformCache perform_waveform_cache;
-extern VoiceManager voice_mgr;
-extern PerformVoice perform_voices[kPerformVoiceCount];
-extern uint32_t g_last_draw_ms;
+static AppContext* g_ctx = nullptr;
 
-extern volatile UiMode ui_mode;
-extern volatile int32_t menu_index;
-extern volatile int32_t shift_menu_index;
-extern volatile int32_t perform_index;
-extern volatile int32_t amp_fader_index;
-extern volatile int32_t flt_fader_index;
-extern volatile int32_t fx_fader_index;
-extern volatile int32_t fx_chain_order[kPerformFaderCount];
-extern volatile bool fx_window_active;
-extern volatile bool amp_window_active;
-extern volatile bool flt_window_active;
-extern volatile UiMode shift_prev_mode;
-extern volatile RecordInput record_input;
-extern volatile int32_t load_selected;
-extern volatile int32_t load_scroll;
-extern volatile bool request_load_scan;
-extern volatile bool list_build_pending;
-extern volatile bool request_load_sample;
-extern volatile int32_t request_load_index;
-extern bool load_in_progress;
-extern uint16_t load_cookie_next;
-extern uint16_t load_cookie_active;
-extern bool load_target_is_edt;
-extern LoadContext load_context;
-extern LoaderState loader_state;
-extern volatile uint32_t load_success_count;
-extern volatile uint32_t load_fail_budget_count;
-extern volatile uint32_t load_fail_io_count;
-extern volatile int32_t wav_file_count;
-extern bool sd_mounted;
-extern bool sd_present;
-extern bool sd_fault;
-extern const char* sd_fault_text;
-extern uint32_t sd_retries_remaining;
-extern bool sd_init_in_progress;
-extern bool sd_init_done;
-extern bool sd_init_success;
-extern uint32_t sd_init_start_ms;
-extern uint32_t sd_init_next_ms;
-extern uint32_t sd_init_result_until_ms;
-extern uint32_t sd_init_draw_next_ms;
-extern int32_t sd_init_attempts;
-extern UiMode sd_init_prev_mode;
-extern bool save_in_progress;
-extern bool save_done;
-extern bool save_success;
-extern bool save_started;
-extern uint32_t save_start_ms;
-extern uint32_t save_result_until_ms;
-extern uint32_t save_draw_next_ms;
-extern UiMode save_prev_mode;
-extern char save_filename[kMaxWavNameLen];
-extern size_t save_frames_written;
-extern volatile bool delete_mode;
-extern UiMode delete_prev_mode;
-extern volatile bool request_delete_scan;
-extern volatile bool request_delete_file;
-extern volatile int32_t request_delete_index;
-extern volatile bool delete_confirm;
-extern char delete_confirm_name[];
-extern volatile float phones_volume;
-extern bool delete_in_progress;
-extern uint16_t delete_cookie_next;
-extern uint16_t delete_cookie_active;
-extern char wav_files[][kMaxWavNameLen];
-extern char loaded_sample_name[kMaxWavNameLen];
-extern int32_t load_lines;
-extern int32_t load_line_height;
-extern int32_t load_chars_per_line;
-extern uint32_t load_scan_start_ms;
-extern SampleContext current_sample_context;
-extern SampleContext edt_sample_context;
-extern int32_t load_mode_index;
-extern LoadStubMode load_stub_mode;
-extern int16_t* sample_buffer_l;
-extern int16_t* sample_buffer_r;
-extern volatile size_t sample_length;
-extern volatile size_t sample_play_start;
-extern volatile size_t sample_play_end;
-extern volatile uint32_t sample_rate;
-extern volatile uint16_t sample_channels;
-extern volatile bool sample_loaded;
-extern volatile bool playback_active;
-extern volatile float playback_rate;
-extern volatile float playback_phase;
-extern volatile float playback_reverse;
-extern volatile bool g_perform_voices_active;
-extern volatile uint32_t g_audio_cmd;
-extern volatile uint32_t g_audio_flags_bits;
-extern AudioUiState g_audio_ui_state_buf[2];
-extern volatile uint8_t g_audio_ui_state_idx;
-extern volatile bool g_audio_recording_active;
-extern volatile int32_t g_active_voice_count;
-extern volatile float g_delay_time_alpha;
-extern volatile float g_delay_param_alpha;
-extern volatile RecordState record_state;
-extern volatile int32_t record_source_index;
-extern volatile int32_t record_target_index;
-extern volatile uint32_t record_countdown_start_ms;
-extern volatile size_t record_pos;
-extern volatile size_t g_recorded_length_audio;
-extern volatile uint32_t g_record_start_ms;
-extern volatile bool record_waveform_pending;
-extern volatile int32_t encoder_r_accum;
-extern volatile bool encoder_r_button_press;
-extern volatile bool request_length_redraw;
-extern volatile bool request_playhead_redraw;
-extern volatile bool button1_press;
-extern volatile bool button2_press;
-extern volatile bool request_playback_stop_log;
-extern volatile float reverb_wet;
-extern volatile float reverb_pre;
-extern volatile float reverb_damp;
-extern volatile float reverb_decay;
-extern volatile float delay_wet;
-extern volatile float delay_time;
-extern volatile float delay_feedback;
-extern volatile float delay_spread;
-extern volatile float delay_freeze;
-extern volatile float fx_s_wet;
-extern volatile float sat_drive;
-extern volatile float sat_tape_bump;
-extern volatile float sat_bit_reso;
-extern volatile float sat_bit_smpl;
-extern volatile float fx_c_wet;
-extern volatile float mod_depth;
-extern volatile float chorus_rate;
-extern volatile int32_t sat_mode;
-extern volatile int32_t chorus_mode;
-extern volatile float chorus_wow;
-extern volatile float tape_rate;
-extern volatile bool fx_params_dirty;
-extern volatile bool audio_params_dirty;
-extern bool sat_params_initialized;
-extern bool reverb_params_initialized;
-extern bool delay_params_initialized;
-extern bool mod_params_initialized;
-extern volatile float amp_attack;
-extern volatile float amp_decay;
-extern volatile float amp_sustain;
-extern volatile float amp_release;
-extern volatile int32_t fx_detail_index;
-extern volatile int32_t fx_detail_param_index;
-extern volatile float flt_cutoff;
-extern volatile float flt_res;
-extern volatile bool preview_hold;
-extern float fx_chain_fade_gain;
-extern float fx_chain_fade_target;
-extern int32_t fx_chain_fade_samples_left;
-extern bool fx_chain_pause_pending;
-extern bool fx_chain_paused;
-extern uint32_t fx_chain_last_move_ms;
-extern volatile bool preview_active;
-extern volatile int32_t preview_index;
-extern volatile uint32_t preview_sample_rate;
-extern volatile uint16_t preview_channels;
-extern volatile float preview_rate;
-extern volatile float preview_read_frac;
-extern volatile size_t preview_read_index;
-extern volatile size_t preview_write_index;
-extern volatile uint32_t preview_data_offset;
-extern volatile uint32_t preview_fade_samples_left;
-extern volatile uint32_t preview_fade_samples_total;
-extern bool preview_pending_start;
-extern uint32_t preview_pending_start_ms;
-extern int16_t preview_buffer[kPreviewBufferFrames];
-#if STORAGE_SERVICE_PREVIEW_STREAM
-extern volatile uint32_t preview_underrun_count;
-extern volatile uint32_t preview_rb_min_level;
-extern uint16_t preview_stream_cookie;
-extern uint16_t preview_stream_cookie_active;
-extern int16_t preview_pp_buf[2][kPreviewPpFrames];
-extern volatile uint8_t preview_pp_ready[2];
-extern volatile uint8_t preview_pp_active;
-extern volatile uint32_t preview_pp_pos;
-extern int16_t preview_preload_buf[kPreviewPreloadFrames];
-extern volatile size_t preview_preload_frames;
-extern volatile bool preview_preload_active;
-#endif
-extern float led1_level;
-extern float led1_phase_ms;
-extern double record_anim_start_ms;
-extern bool request_shift_redraw;
-extern bool request_perform_redraw;
-extern bool request_fx_detail_redraw;
-extern uint32_t delay_snow_next_ms;
-extern uint32_t midi_ignore_until_ms;
-extern Job g_job;
-extern WaveformJob g_wf_job;
-extern FileListJob g_list_job;
-extern bool waveform_ready;
-extern bool waveform_dirty;
-extern bool waveform_from_recording;
-extern const char* waveform_title;
-extern bool request_delete_redraw;
-extern bool g_display_update_pending;
-extern volatile bool waveform_compute_pending;
-extern volatile SampleContext waveform_compute_ctx;
-extern volatile uint32_t g_audio_event_bits;
-extern volatile size_t sample_mem_used_bytes;
-extern volatile size_t sample_mem_free_bytes;
-extern volatile size_t waveform_cache_bytes;
+#define hw (*g_ctx->hw)
+#define storage (*g_ctx->storage)
+#define g_ui (*g_ctx->ui)
+#define g_last_draw_ms (*g_ctx->last_draw_ms)
 
-extern const AudioUiState& GetAudioUiStateSnapshot(uint8_t& idx);
-extern void RequestAudioCmd(uint32_t bits);
-extern void RequestPlaybackStart(uint8_t note, bool apply_pitch);
-extern void RequestPlaybackStop(uint8_t note, bool apply_release);
-extern void RequestPlaybackStopAll();
-extern void StartPerformVoice(int32_t note);
-extern void MountSd();
-extern void ApplyLoadedSampleFade(size_t length, uint32_t rate);
-extern double NowMs();
-extern const char* SdFaultText(StorageService::SdErrorCode code);
+#define ui_mode (*g_ctx->ui_mode)
+#define menu_index (*g_ctx->menu_index)
+#define shift_menu_index (*g_ctx->shift_menu_index)
+#define perform_index (*g_ctx->perform_index)
+#define amp_fader_index (*g_ctx->amp_fader_index)
+#define flt_fader_index (*g_ctx->flt_fader_index)
+#define fx_fader_index (*g_ctx->fx_fader_index)
+#define fx_chain_order (g_ctx->fx_chain_order)
+#define fx_window_active (*g_ctx->fx_window_active)
+#define amp_window_active (*g_ctx->amp_window_active)
+#define flt_window_active (*g_ctx->flt_window_active)
+#define shift_prev_mode (*g_ctx->shift_prev_mode)
+#define record_input (*g_ctx->record_input)
+#define load_selected (*g_ctx->load_selected)
+#define load_scroll (*g_ctx->load_scroll)
+#define request_load_scan (*g_ctx->request_load_scan)
+#define list_build_pending (*g_ctx->list_build_pending)
+#define request_load_sample (*g_ctx->request_load_sample)
+#define request_load_index (*g_ctx->request_load_index)
+#define load_in_progress (*g_ctx->load_in_progress)
+#define load_cookie_next (*g_ctx->load_cookie_next)
+#define load_cookie_active (*g_ctx->load_cookie_active)
+#define load_target_is_edt (*g_ctx->load_target_is_edt)
+#define load_context (*g_ctx->load_context)
+#define loader_state (*g_ctx->loader_state)
+#define load_success_count (*g_ctx->load_success_count)
+#define load_fail_budget_count (*g_ctx->load_fail_budget_count)
+#define load_fail_io_count (*g_ctx->load_fail_io_count)
+#define wav_file_count (*g_ctx->wav_file_count)
+#define sd_mounted (*g_ctx->sd_mounted)
+#define sd_present (*g_ctx->sd_present)
+#define sd_fault (*g_ctx->sd_fault)
+#define sd_fault_text (*g_ctx->sd_fault_text)
+#define sd_retries_remaining (*g_ctx->sd_retries_remaining)
+#define sd_init_in_progress (*g_ctx->sd_init_in_progress)
+#define sd_init_done (*g_ctx->sd_init_done)
+#define sd_init_success (*g_ctx->sd_init_success)
+#define sd_init_start_ms (*g_ctx->sd_init_start_ms)
+#define sd_init_next_ms (*g_ctx->sd_init_next_ms)
+#define sd_init_result_until_ms (*g_ctx->sd_init_result_until_ms)
+#define sd_init_draw_next_ms (*g_ctx->sd_init_draw_next_ms)
+#define sd_init_attempts (*g_ctx->sd_init_attempts)
+#define sd_init_prev_mode (*g_ctx->sd_init_prev_mode)
+#define save_in_progress (*g_ctx->save_in_progress)
+#define save_done (*g_ctx->save_done)
+#define save_success (*g_ctx->save_success)
+#define save_started (*g_ctx->save_started)
+#define save_start_ms (*g_ctx->save_start_ms)
+#define save_result_until_ms (*g_ctx->save_result_until_ms)
+#define save_draw_next_ms (*g_ctx->save_draw_next_ms)
+#define save_prev_mode (*g_ctx->save_prev_mode)
+#define save_filename (g_ctx->save_filename)
+#define save_frames_written (*g_ctx->save_frames_written)
+#define delete_mode (*g_ctx->delete_mode)
+#define delete_prev_mode (*g_ctx->delete_prev_mode)
+#define request_delete_scan (*g_ctx->request_delete_scan)
+#define request_delete_file (*g_ctx->request_delete_file)
+#define request_delete_index (*g_ctx->request_delete_index)
+#define delete_confirm (*g_ctx->delete_confirm)
+#define delete_confirm_name (g_ctx->delete_confirm_name)
+#define phones_volume (*g_ctx->phones_volume)
+#define delete_in_progress (*g_ctx->delete_in_progress)
+#define delete_cookie_next (*g_ctx->delete_cookie_next)
+#define delete_cookie_active (*g_ctx->delete_cookie_active)
+#define wav_files (g_ctx->wav_files)
+#define loaded_sample_name (g_ctx->loaded_sample_name)
+#define load_lines (*g_ctx->load_lines)
+#define load_line_height (*g_ctx->load_line_height)
+#define load_chars_per_line (*g_ctx->load_chars_per_line)
+#define load_scan_start_ms (*g_ctx->load_scan_start_ms)
+#define current_sample_context (*g_ctx->current_sample_context)
+#define edt_sample_context (*g_ctx->edt_sample_context)
+#define load_mode_index (*g_ctx->load_mode_index)
+#define load_stub_mode (*g_ctx->load_stub_mode)
+#define sample_length (*g_ctx->sample_length)
+#define sample_play_start (*g_ctx->sample_play_start)
+#define sample_play_end (*g_ctx->sample_play_end)
+#define sample_rate (*g_ctx->sample_rate)
+#define sample_channels (*g_ctx->sample_channels)
+#define sample_loaded (*g_ctx->sample_loaded)
+#define playback_active (*g_ctx->playback_active)
+#define playback_rate (*g_ctx->playback_rate)
+#define playback_phase (*g_ctx->playback_phase)
+#define playback_reverse (*g_ctx->playback_reverse)
+#define g_perform_voices_active (*g_ctx->perform_voices_active)
+#define g_audio_cmd (*g_ctx->audio_cmd)
+#define g_audio_flags_bits (*g_ctx->audio_flags_bits)
+#define g_audio_ui_state_buf (g_ctx->audio_ui_state_buf)
+#define g_audio_ui_state_idx (*g_ctx->audio_ui_state_idx)
+#define g_audio_recording_active (*g_ctx->audio_recording_active)
+#define g_active_voice_count (*g_ctx->active_voice_count)
+#define g_delay_time_alpha (*g_ctx->delay_time_alpha)
+#define g_delay_param_alpha (*g_ctx->delay_param_alpha)
+#define record_state (*g_ctx->record_state)
+#define record_source_index (*g_ctx->record_source_index)
+#define record_target_index (*g_ctx->record_target_index)
+#define record_countdown_start_ms (*g_ctx->record_countdown_start_ms)
+#define record_pos (*g_ctx->record_pos)
+#define g_recorded_length_audio (*g_ctx->recorded_length_audio)
+#define g_record_start_ms (*g_ctx->record_start_ms)
+#define record_waveform_pending (*g_ctx->record_waveform_pending)
+#define encoder_r_accum (*g_ctx->encoder_r_accum)
+#define encoder_r_button_press (*g_ctx->encoder_r_button_press)
+#define request_length_redraw (*g_ctx->request_length_redraw)
+#define request_playhead_redraw (*g_ctx->request_playhead_redraw)
+#define button1_press (*g_ctx->button1_press)
+#define button2_press (*g_ctx->button2_press)
+#define request_playback_stop_log (*g_ctx->request_playback_stop_log)
+#define reverb_wet (*g_ctx->reverb_wet)
+#define reverb_pre (*g_ctx->reverb_pre)
+#define reverb_damp (*g_ctx->reverb_damp)
+#define reverb_decay (*g_ctx->reverb_decay)
+#define delay_wet (*g_ctx->delay_wet)
+#define delay_time (*g_ctx->delay_time)
+#define delay_feedback (*g_ctx->delay_feedback)
+#define delay_spread (*g_ctx->delay_spread)
+#define delay_freeze (*g_ctx->delay_freeze)
+#define fx_s_wet (*g_ctx->fx_s_wet)
+#define sat_drive (*g_ctx->sat_drive)
+#define sat_tape_bump (*g_ctx->sat_tape_bump)
+#define sat_bit_reso (*g_ctx->sat_bit_reso)
+#define sat_bit_smpl (*g_ctx->sat_bit_smpl)
+#define fx_c_wet (*g_ctx->fx_c_wet)
+#define mod_depth (*g_ctx->mod_depth)
+#define chorus_rate (*g_ctx->chorus_rate)
+#define sat_mode (*g_ctx->sat_mode)
+#define chorus_mode (*g_ctx->chorus_mode)
+#define chorus_wow (*g_ctx->chorus_wow)
+#define tape_rate (*g_ctx->tape_rate)
+#define fx_params_dirty (*g_ctx->fx_params_dirty)
+#define audio_params_dirty (*g_ctx->audio_params_dirty)
+#define sat_params_initialized (*g_ctx->sat_params_initialized)
+#define reverb_params_initialized (*g_ctx->reverb_params_initialized)
+#define delay_params_initialized (*g_ctx->delay_params_initialized)
+#define mod_params_initialized (*g_ctx->mod_params_initialized)
+#define amp_attack (*g_ctx->amp_attack)
+#define amp_decay (*g_ctx->amp_decay)
+#define amp_sustain (*g_ctx->amp_sustain)
+#define amp_release (*g_ctx->amp_release)
+#define fx_detail_index (*g_ctx->fx_detail_index)
+#define fx_detail_param_index (*g_ctx->fx_detail_param_index)
+#define flt_cutoff (*g_ctx->flt_cutoff)
+#define flt_res (*g_ctx->flt_res)
+#define preview_hold (*g_ctx->preview_hold)
+#define fx_chain_fade_gain (*g_ctx->fx_chain_fade_gain)
+#define fx_chain_fade_target (*g_ctx->fx_chain_fade_target)
+#define fx_chain_fade_samples_left (*g_ctx->fx_chain_fade_samples_left)
+#define fx_chain_pause_pending (*g_ctx->fx_chain_pause_pending)
+#define fx_chain_paused (*g_ctx->fx_chain_paused)
+#define fx_chain_last_move_ms (*g_ctx->fx_chain_last_move_ms)
+#define preview_active (*g_ctx->preview_active)
+#define preview_index (*g_ctx->preview_index)
+#define preview_sample_rate (*g_ctx->preview_sample_rate)
+#define preview_channels (*g_ctx->preview_channels)
+#define preview_rate (*g_ctx->preview_rate)
+#define preview_read_frac (*g_ctx->preview_read_frac)
+#define preview_read_index (*g_ctx->preview_read_index)
+#define preview_write_index (*g_ctx->preview_write_index)
+#define preview_data_offset (*g_ctx->preview_data_offset)
+#define preview_fade_samples_left (*g_ctx->preview_fade_samples_left)
+#define preview_fade_samples_total (*g_ctx->preview_fade_samples_total)
+#define preview_pending_start (*g_ctx->preview_pending_start)
+#define preview_pending_start_ms (*g_ctx->preview_pending_start_ms)
+#define preview_underrun_count (*g_ctx->preview_underrun_count)
+#define preview_rb_min_level (*g_ctx->preview_rb_min_level)
+#define preview_stream_cookie (*g_ctx->preview_stream_cookie)
+#define preview_stream_cookie_active (*g_ctx->preview_stream_cookie_active)
+#define preview_pp_ready (g_ctx->preview_pp_ready)
+#define preview_pp_active (*g_ctx->preview_pp_active)
+#define preview_pp_pos (*g_ctx->preview_pp_pos)
+#define preview_preload_frames (*g_ctx->preview_preload_frames)
+#define preview_preload_active (*g_ctx->preview_preload_active)
+#define led1_level (*g_ctx->led1_level)
+#define led1_phase_ms (*g_ctx->led1_phase_ms)
+#define record_anim_start_ms (*g_ctx->record_anim_start_ms)
+#define request_shift_redraw (*g_ctx->request_shift_redraw)
+#define request_perform_redraw (*g_ctx->request_perform_redraw)
+#define request_fx_detail_redraw (*g_ctx->request_fx_detail_redraw)
+#define delay_snow_next_ms (*g_ctx->delay_snow_next_ms)
+#define midi_ignore_until_ms (*g_ctx->midi_ignore_until_ms)
+#define g_job (*g_ctx->g_job)
+#define g_wf_job (*g_ctx->g_wf_job)
+#define g_list_job (*g_ctx->g_list_job)
+#define waveform_ready (*g_ctx->waveform_ready)
+#define waveform_dirty (*g_ctx->waveform_dirty)
+#define waveform_from_recording (*g_ctx->waveform_from_recording)
+#define waveform_title (*g_ctx->waveform_title)
+#define request_delete_redraw (*g_ctx->request_delete_redraw)
+#define g_display_update_pending (*g_ctx->display_update_pending)
+#define waveform_compute_pending (*g_ctx->waveform_compute_pending)
+#define waveform_compute_ctx (*g_ctx->waveform_compute_ctx)
+#define g_audio_event_bits (*g_ctx->audio_event_bits)
+#define sample_mem_used_bytes (*g_ctx->sample_mem_used_bytes)
+#define sample_mem_free_bytes (*g_ctx->sample_mem_free_bytes)
+#define waveform_cache_bytes (*g_ctx->waveform_cache_bytes)
+
 
 // OWNER: UI/main loop.
 // WRITES: AppController only.
@@ -310,38 +287,40 @@ static AppState g_app;
 
 bool AllocatePerformSample(size_t bytes, void** out_ptr)
 {
-	return sample_mem_mgr.Allocate(kPerformSampleId, bytes, out_ptr);
+	return g_ctx->audio->AllocatePerformSample(bytes, out_ptr);
 }
 
 void FreePerformSample()
 {
-	sample_mem_mgr.Free(kPerformSampleId);
+	g_ctx->audio->FreePerformSample();
 }
 
-void AppController::Init()
+void AppController::Init(AppContext* ctx)
 {
+	g_ctx = ctx;
 	storage.Init();
-	voice_mgr.Init(perform_voices, kPerformVoiceCount);
+	g_ctx->audio->InitVoices();
 	ValidateConfig();
 	{
 		StorageService::PreviewStreamConfig cfg = {};
-		cfg.buffer = preview_buffer;
-		cfg.frames = kPreviewBufferFrames;
-		cfg.write_index = &preview_write_index;
-		cfg.read_index = &preview_read_index;
+		const PreviewBuffers pb = g_ctx->audio->GetPreviewBuffers();
+		cfg.buffer = pb.buffer;
+		cfg.frames = pb.frames;
+		cfg.write_index = pb.write_index;
+		cfg.read_index = pb.read_index;
 #if STORAGE_SERVICE_PREVIEW_STREAM
-		cfg.preload_buf = preview_preload_buf;
-		cfg.preload_frames = kPreviewPreloadFrames;
-		cfg.pp_buf_a = &preview_pp_buf[0][0];
-		cfg.pp_buf_b = &preview_pp_buf[1][0];
-		cfg.pp_frames = kPreviewPpFrames;
-		cfg.pp_ready_a = &preview_pp_ready[0];
-		cfg.pp_ready_b = &preview_pp_ready[1];
-		cfg.pp_active = &preview_pp_active;
+		cfg.preload_buf = pb.preload_buf;
+		cfg.preload_frames = pb.preload_frames;
+		cfg.pp_buf_a = pb.pp_buf_a;
+		cfg.pp_buf_b = pb.pp_buf_b;
+		cfg.pp_frames = pb.pp_frames;
+		cfg.pp_ready_a = pb.pp_ready_a;
+		cfg.pp_ready_b = pb.pp_ready_b;
+		cfg.pp_active = pb.pp_active;
 #endif
 		storage.SetPreviewStreamConfig(cfg);
 	}
-	g_ui.Init();
+	g_ui.Init(g_ctx);
 	MountSd();
 	DrawMenu(menu_index);
 	g_last_draw_ms = System::GetNow();
@@ -545,7 +524,7 @@ void AppController::Tick(uint32_t /*now_ms*/)
 					load_in_progress = false;
 					load_cookie_active = 0;
 					load_fail_io_count++;
-					sample_mem_mgr.Free(kPerformSampleId);
+					g_ctx->audio->FreePerformSample();
 					ui_mode = UiMode::Load;
 					load_context = LoadContext::Main;
 					loader_state = LoaderState::Failed;
@@ -922,8 +901,9 @@ void AppController::Tick(uint32_t /*now_ms*/)
 					StorageService::Op op = {};
 					op.kind = StorageService::OpKind::SaveStart;
 					CopyString(op.path, storage.GetSdPath(), sizeof(op.path));
-					op.src_l = sample_buffer_l;
-					op.src_r = sample_buffer_r;
+					const SampleBuffers bufs = g_ctx->audio->GetSampleBuffers();
+					op.src_l = bufs.l;
+					op.src_r = bufs.r;
 					op.frames = sample_length;
 					op.channels = (sample_channels == 0) ? 1 : sample_channels;
 					op.sample_rate = (sample_rate == 0) ? 48000 : sample_rate;
@@ -1574,9 +1554,8 @@ void AppController::Tick(uint32_t /*now_ms*/)
 		{
 			FlushDisplayIfDue(draw_now);
 		}
-		sample_mem_used_bytes = sample_mem_mgr.BytesUsed();
-		sample_mem_free_bytes = sample_mem_mgr.BytesFree();
-		waveform_cache_bytes = perform_waveform_cache.BytesUsed();
+		g_ctx->audio->GetSampleMemUsage(sample_mem_used_bytes, sample_mem_free_bytes);
+		waveform_cache_bytes = g_ctx->ui->GetWaveformCacheBytes();
  		hw.UpdateLeds();
 		hw.DelayMs(1);
 }
