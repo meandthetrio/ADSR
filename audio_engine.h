@@ -8,8 +8,6 @@
 struct AudioShared
 {
 	daisy::DaisyPod* hw = nullptr;
-	volatile uint32_t* audio_cmd = nullptr;
-	volatile uint32_t* audio_flags_bits = nullptr;
 	volatile RecordInput* record_input = nullptr;
 	volatile bool* playback_reverse_target = nullptr;
 	volatile uint8_t* audio_params_pub_idx = nullptr;
@@ -78,12 +76,6 @@ struct AudioShared
 	volatile uint32_t* callback_overruns = nullptr;
 	float* cpu_load_ema = nullptr;
 	volatile bool* request_playhead_redraw = nullptr;
-	MidiCmd* midi_cmd_q = nullptr;
-	volatile uint8_t* midi_cmd_wr = nullptr;
-	volatile uint8_t* midi_cmd_rd = nullptr;
-	PlaybackCmd* playback_cmd_q = nullptr;
-	volatile uint8_t* playback_cmd_wr = nullptr;
-	volatile uint8_t* playback_cmd_rd = nullptr;
 };
 
 struct AudioEngineStats
@@ -120,12 +112,21 @@ class AudioEngine
 public:
 	void Init(daisy::DaisyPod& hw);
 	void BindShared(AudioShared* shared);
+	void MidiCmdPushIsr(uint8_t kind, uint8_t note, uint8_t vel);
+	void RequestAudioCmd(uint32_t bits);
+	void RequestPlaybackStart(uint8_t note, bool apply_pitch);
+	void RequestPlaybackStop(uint8_t note, bool apply_release);
+	void RequestPlaybackStopAll();
+	void PushAudioEvent(uint32_t bits);
+	uint32_t PopAudioEvents();
+	void SetAudioFlagsBits(uint32_t bits);
 	void InitVoices();
 	bool AllocatePerformSample(size_t bytes, void** out_ptr);
 	void FreePerformSample();
 	void GetSampleBuffers(int16_t*& l, int16_t*& r) const;
 	void GetSampleMemUsage(size_t& used, size_t& free_bytes) const;
 	void GetPreviewBuffers(PreviewBuffers& out) const;
+	float NoteRatio(uint8_t note) const;
 	void Process(daisy::AudioHandle::InputBuffer in, daisy::AudioHandle::OutputBuffer out, size_t size);
 	const AudioEngineStats& GetStats() const { return stats_; }
 

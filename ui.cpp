@@ -161,8 +161,6 @@ void CopyString(char* dst, const char* src, size_t dst_len);
 bool IsPerformUiMode(UiMode mode);
 double NowMs();
 const AudioUiState& GetAudioUiStateSnapshot(uint8_t& idx);
-void RequestPlaybackStopAll();
-void RequestAudioCmd(uint32_t bits);
 void PublishFxChainFromUi();
 void PublishRuntimeFromUi();
 void ResetSaveState();
@@ -190,219 +188,210 @@ static inline int16_t* SampleBufferR()
 #define hw (*g_ctx->hw)
 #define storage (*g_ctx->storage)
 #define display (*static_cast<PodDisplay*>(g_ctx->display))
-#define kUiTickMs (*g_ctx->ui_tick_ms)
-#define kUiTickPlaybackMs (*g_ctx->ui_tick_playback_ms)
-#define g_enc_l_delta (*g_ctx->enc_l_delta)
-#define g_enc_r_delta (*g_ctx->enc_r_delta)
-#define g_ctrl_events (*g_ctx->ctrl_events)
-#define g_shift_held (*g_ctx->shift_held)
-#define g_btn1_held (*g_ctx->btn1_held)
-#define ui_button1_held (*g_ctx->ui_button1_held)
-#define g_display_update_pending (*g_ctx->display_update_pending)
-#define g_last_draw_ms (*g_ctx->last_draw_ms)
+#define kUiTickMs (g_ui.ui_tick_ms)
+#define kUiTickPlaybackMs (g_ui.ui_tick_playback_ms)
 
-#define ui_mode (*g_ctx->ui_mode)
-#define shift_prev_mode (*g_ctx->shift_prev_mode)
-#define delete_prev_mode (*g_ctx->delete_prev_mode)
-#define load_prev_mode (*g_ctx->load_prev_mode)
-#define fx_detail_prev_mode (*g_ctx->fx_detail_prev_mode)
-#define edt_prev_mode (*g_ctx->edt_prev_mode)
-#define menu_index (*g_ctx->menu_index)
-#define shift_menu_index (*g_ctx->shift_menu_index)
-#define perform_index (*g_ctx->perform_index)
-#define amp_fader_index (*g_ctx->amp_fader_index)
-#define flt_fader_index (*g_ctx->flt_fader_index)
-#define fx_fader_index (*g_ctx->fx_fader_index)
-#define fx_detail_index (*g_ctx->fx_detail_index)
-#define fx_detail_param_index (*g_ctx->fx_detail_param_index)
-#define load_selected (*g_ctx->load_selected)
-#define load_scroll (*g_ctx->load_scroll)
-#define load_mode_index (*g_ctx->load_mode_index)
-#define wav_file_count (*g_ctx->wav_file_count)
-#define request_load_index (*g_ctx->request_load_index)
-#define request_delete_index (*g_ctx->request_delete_index)
-#define record_source_index (*g_ctx->record_source_index)
-#define record_target_index (*g_ctx->record_target_index)
-#define sat_mode (*g_ctx->sat_mode)
-#define chorus_mode (*g_ctx->chorus_mode)
-#define fx_window_active (*g_ctx->fx_window_active)
-#define amp_window_active (*g_ctx->amp_window_active)
-#define flt_window_active (*g_ctx->flt_window_active)
-#define preview_hold (*g_ctx->preview_hold)
-#define fx_params_dirty (*g_ctx->fx_params_dirty)
-#define audio_params_dirty (*g_ctx->audio_params_dirty)
-#define request_load_sample (*g_ctx->request_load_sample)
-#define request_load_scan (*g_ctx->request_load_scan)
-#define request_delete_scan (*g_ctx->request_delete_scan)
-#define request_delete_file (*g_ctx->request_delete_file)
-#define request_delete_redraw (*g_ctx->request_delete_redraw)
-#define request_shift_redraw (*g_ctx->request_shift_redraw)
-#define request_perform_redraw (*g_ctx->request_perform_redraw)
-#define request_fx_detail_redraw (*g_ctx->request_fx_detail_redraw)
-#define request_length_redraw (*g_ctx->request_length_redraw)
-#define button1_press (*g_ctx->button1_press)
-#define button2_press (*g_ctx->button2_press)
-#define sample_loaded (*g_ctx->sample_loaded)
-#define sample_length (*g_ctx->sample_length)
-#define record_countdown_start_ms (*g_ctx->record_countdown_start_ms)
-#define phones_volume (*g_ctx->phones_volume)
-#define perform_attack_norm (*g_ctx->perform_attack_norm)
-#define perform_release_norm (*g_ctx->perform_release_norm)
-#define sat_drive (*g_ctx->sat_drive)
-#define sat_tape_bump (*g_ctx->sat_tape_bump)
-#define sat_bit_reso (*g_ctx->sat_bit_reso)
-#define sat_bit_smpl (*g_ctx->sat_bit_smpl)
-#define fx_s_wet (*g_ctx->fx_s_wet)
-#define fx_c_wet (*g_ctx->fx_c_wet)
-#define mod_depth (*g_ctx->mod_depth)
-#define chorus_rate (*g_ctx->chorus_rate)
-#define chorus_wow (*g_ctx->chorus_wow)
-#define tape_rate (*g_ctx->tape_rate)
-#define delay_wet (*g_ctx->delay_wet)
-#define delay_time (*g_ctx->delay_time)
-#define delay_feedback (*g_ctx->delay_feedback)
-#define delay_spread (*g_ctx->delay_spread)
-#define delay_freeze (*g_ctx->delay_freeze)
-#define reverb_wet (*g_ctx->reverb_wet)
-#define reverb_pre (*g_ctx->reverb_pre)
-#define reverb_damp (*g_ctx->reverb_damp)
-#define reverb_decay (*g_ctx->reverb_decay)
-#define playback_reverse (*g_ctx->playback_reverse)
-#define amp_attack (*g_ctx->amp_attack)
-#define amp_decay (*g_ctx->amp_decay)
-#define amp_sustain (*g_ctx->amp_sustain)
-#define amp_release (*g_ctx->amp_release)
-#define flt_cutoff (*g_ctx->flt_cutoff)
-#define flt_res (*g_ctx->flt_res)
-#define sat_params_initialized (*g_ctx->sat_params_initialized)
-#define mod_params_initialized (*g_ctx->mod_params_initialized)
-#define delay_params_initialized (*g_ctx->delay_params_initialized)
-#define reverb_params_initialized (*g_ctx->reverb_params_initialized)
-#define save_in_progress (*g_ctx->save_in_progress)
-#define save_done (*g_ctx->save_done)
-#define save_success (*g_ctx->save_success)
-#define save_started (*g_ctx->save_started)
-#define save_start_ms (*g_ctx->save_start_ms)
-#define save_result_until_ms (*g_ctx->save_result_until_ms)
-#define save_draw_next_ms (*g_ctx->save_draw_next_ms)
-#define save_prev_mode (*g_ctx->save_prev_mode)
-#define save_filename (g_ctx->save_filename)
-#define sd_init_in_progress (*g_ctx->sd_init_in_progress)
-#define sd_mounted (*g_ctx->sd_mounted)
-#define sd_fault (*g_ctx->sd_fault)
-#define sd_fault_text (*g_ctx->sd_fault_text)
-#define sd_init_done (*g_ctx->sd_init_done)
-#define sd_init_success (*g_ctx->sd_init_success)
-#define sd_init_attempts (*g_ctx->sd_init_attempts)
-#define delete_mode (*g_ctx->delete_mode)
-#define delete_confirm (*g_ctx->delete_confirm)
-#define waveform_ready (*g_ctx->waveform_ready)
-#define waveform_dirty (*g_ctx->waveform_dirty)
-#define waveform_from_recording (*g_ctx->waveform_from_recording)
-#define load_context (*g_ctx->load_context)
-#define load_stub_mode (*g_ctx->load_stub_mode)
-#define record_state (*g_ctx->record_state)
-#define record_input (*g_ctx->record_input)
-#define current_sample_context (*g_ctx->current_sample_context)
-#define edt_sample_context (*g_ctx->edt_sample_context)
-#define delay_snow_next_ms (*g_ctx->delay_snow_next_ms)
-#define midi_ignore_until_ms (*g_ctx->midi_ignore_until_ms)
-#define record_text_mask (*g_ctx->record_text_mask)
-#define record_invert_mask (*g_ctx->record_invert_mask)
-#define record_fb_buf (*g_ctx->record_fb_buf)
-#define record_bold_mask (*g_ctx->record_bold_mask)
-#define load_lines (*g_ctx->load_lines)
-#define load_line_height (*g_ctx->load_line_height)
-#define load_chars_per_line (*g_ctx->load_chars_per_line)
-#define wav_files (g_ctx->wav_files)
-#define delete_confirm_name (g_ctx->delete_confirm_name)
-#define loaded_sample_name (g_ctx->loaded_sample_name)
-#define fx_chain_order (g_ctx->fx_chain_order)
-#define fx_chain_last_move_ms (*g_ctx->fx_chain_last_move_ms)
-#define fx_chain_fade_target (*g_ctx->fx_chain_fade_target)
-#define fx_chain_fade_samples_left (*g_ctx->fx_chain_fade_samples_left)
-#define fx_chain_fade_gain (*g_ctx->fx_chain_fade_gain)
-#define fx_chain_paused (*g_ctx->fx_chain_paused)
-#define fx_chain_pause_pending (*g_ctx->fx_chain_pause_pending)
-#define record_anim_start_ms (*g_ctx->record_anim_start_ms)
-#define g_audio_cmd (*g_ctx->audio_cmd)
-#define g_audio_params_pub_idx (*g_ctx->audio_params_pub_idx)
-#define g_rt_pub_idx (*g_ctx->rt_pub_idx)
-#define g_fx_chain_pub_idx (*g_ctx->fx_chain_pub_idx)
-#define g_preview_pub_idx (*g_ctx->preview_pub_idx)
-#define g_audio_params_buf (g_ctx->audio_params_buf)
-#define g_rt_buf (g_ctx->rt_buf)
-#define g_fx_chain_buf (g_ctx->fx_chain_buf)
-#define g_preview_ctl_buf (g_ctx->preview_ctl_buf)
-#define g_audio_ui_state_buf (g_ctx->audio_ui_state_buf)
-#define g_audio_ui_state_idx (*g_ctx->audio_ui_state_idx)
-#define g_rt_active_idx (*g_ctx->rt_active_idx)
-#define g_fx_params_buf (g_ctx->fx_params_buf)
-#define g_fx_params_idx (*g_ctx->fx_params_idx)
-#define g_audio_params_audio_buf (g_ctx->audio_params_audio_buf)
-#define g_audio_params_audio_idx (*g_ctx->audio_params_audio_idx)
-#define g_delay_time_alpha (*g_ctx->delay_time_alpha)
-#define g_delay_param_alpha (*g_ctx->delay_param_alpha)
-#define g_audio_recording_active (*g_ctx->audio_recording_active)
-#define g_recorded_length_audio (*g_ctx->recorded_length_audio)
-#define record_pos (*g_ctx->record_pos)
-#define g_record_start_ms (*g_ctx->record_start_ms)
-#define g_active_voice_count (*g_ctx->active_voice_count)
+#define ui_mode (g_ui.ui_mode)
+#define shift_prev_mode (g_ui.shift_prev_mode)
+#define delete_prev_mode (g_ui.delete_prev_mode)
+#define load_prev_mode (g_ui.load_prev_mode)
+#define fx_detail_prev_mode (g_ui.fx_detail_prev_mode)
+#define edt_prev_mode (g_ui.edt_prev_mode)
+#define menu_index (g_ui.menu_index)
+#define shift_menu_index (g_ui.shift_menu_index)
+#define perform_index (g_ui.perform_index)
+#define amp_fader_index (g_ui.amp_fader_index)
+#define flt_fader_index (g_ui.flt_fader_index)
+#define fx_fader_index (g_ui.fx_fader_index)
+#define fx_detail_index (g_ui.fx_detail_index)
+#define fx_detail_param_index (g_ui.fx_detail_param_index)
+#define load_selected (g_ui.load_selected)
+#define load_scroll (g_ui.load_scroll)
+#define load_mode_index (g_ui.load_mode_index)
+#define wav_file_count (g_ui.wav_file_count)
+#define request_load_index (g_ui.request_load_index)
+#define request_delete_index (g_ui.request_delete_index)
+#define record_source_index (g_ui.record_source_index)
+#define record_target_index (g_ui.record_target_index)
+#define sat_mode (g_ui.sat_mode)
+#define chorus_mode (g_ui.chorus_mode)
+#define fx_window_active (g_ui.fx_window_active)
+#define amp_window_active (g_ui.amp_window_active)
+#define flt_window_active (g_ui.flt_window_active)
+#define preview_hold (g_ui.preview_hold)
+#define fx_params_dirty (g_ui.fx_params_dirty)
+#define audio_params_dirty (g_ui.audio_params_dirty)
+#define request_load_sample (g_ui.request_load_sample)
+#define request_load_scan (g_ui.request_load_scan)
+#define request_delete_scan (g_ui.request_delete_scan)
+#define request_delete_file (g_ui.request_delete_file)
+#define request_delete_redraw (g_ui.request_delete_redraw)
+#define request_shift_redraw (g_ui.request_shift_redraw)
+#define request_perform_redraw (g_ui.request_perform_redraw)
+#define request_fx_detail_redraw (g_ui.request_fx_detail_redraw)
+#define request_length_redraw (g_ui.request_length_redraw)
+#define button1_press (g_ui.button1_press)
+#define button2_press (g_ui.button2_press)
+#define sample_loaded (g_ui.sample_loaded)
+#define sample_length (g_ui.sample_length)
+#define record_countdown_start_ms (g_ui.record_countdown_start_ms)
+#define phones_volume (g_ui.phones_volume)
+#define perform_attack_norm (g_ui.perform_attack_norm)
+#define perform_release_norm (g_ui.perform_release_norm)
+#define sat_drive (g_ui.sat_drive)
+#define sat_tape_bump (g_ui.sat_tape_bump)
+#define sat_bit_reso (g_ui.sat_bit_reso)
+#define sat_bit_smpl (g_ui.sat_bit_smpl)
+#define fx_s_wet (g_ui.fx_s_wet)
+#define fx_c_wet (g_ui.fx_c_wet)
+#define mod_depth (g_ui.mod_depth)
+#define chorus_rate (g_ui.chorus_rate)
+#define chorus_wow (g_ui.chorus_wow)
+#define tape_rate (g_ui.tape_rate)
+#define delay_wet (g_ui.delay_wet)
+#define delay_time (g_ui.delay_time)
+#define delay_feedback (g_ui.delay_feedback)
+#define delay_spread (g_ui.delay_spread)
+#define delay_freeze (g_ui.delay_freeze)
+#define reverb_wet (g_ui.reverb_wet)
+#define reverb_pre (g_ui.reverb_pre)
+#define reverb_damp (g_ui.reverb_damp)
+#define reverb_decay (g_ui.reverb_decay)
+#define playback_reverse (g_ui.playback_reverse)
+#define amp_attack (g_ui.amp_attack)
+#define amp_decay (g_ui.amp_decay)
+#define amp_sustain (g_ui.amp_sustain)
+#define amp_release (g_ui.amp_release)
+#define flt_cutoff (g_ui.flt_cutoff)
+#define flt_res (g_ui.flt_res)
+#define sat_params_initialized (g_ui.sat_params_initialized)
+#define mod_params_initialized (g_ui.mod_params_initialized)
+#define delay_params_initialized (g_ui.delay_params_initialized)
+#define reverb_params_initialized (g_ui.reverb_params_initialized)
+#define save_in_progress (g_ui.save_in_progress)
+#define save_done (g_ui.save_done)
+#define save_success (g_ui.save_success)
+#define save_started (g_ui.save_started)
+#define save_start_ms (g_ui.save_start_ms)
+#define save_result_until_ms (g_ui.save_result_until_ms)
+#define save_draw_next_ms (g_ui.save_draw_next_ms)
+#define save_prev_mode (g_ui.save_prev_mode)
+#define save_filename (g_ui.save_filename)
+#define sd_init_in_progress (g_ui.sd_init_in_progress)
+#define sd_mounted (g_ui.sd_mounted)
+#define sd_fault (g_ui.sd_fault)
+#define sd_fault_text (g_ui.sd_fault_text)
+#define sd_init_done (g_ui.sd_init_done)
+#define sd_init_success (g_ui.sd_init_success)
+#define sd_init_attempts (g_ui.sd_init_attempts)
+#define delete_mode (g_ui.delete_mode)
+#define delete_confirm (g_ui.delete_confirm)
+#define waveform_ready (g_ui.waveform_ready)
+#define waveform_dirty (g_ui.waveform_dirty)
+#define waveform_from_recording (g_ui.waveform_from_recording)
+#define load_context (g_ui.load_context)
+#define load_stub_mode (g_ui.load_stub_mode)
+#define record_state (g_ui.record_state)
+#define record_input (g_ui.record_input)
+#define current_sample_context (g_ui.current_sample_context)
+#define edt_sample_context (g_ui.edt_sample_context)
+#define delay_snow_next_ms (g_ui.delay_snow_next_ms)
+#define midi_ignore_until_ms (g_ui.midi_ignore_until_ms)
+#define record_text_mask (g_ui.record_text_mask)
+#define record_invert_mask (g_ui.record_invert_mask)
+#define record_fb_buf (g_ui.record_fb_buf)
+#define record_bold_mask (g_ui.record_bold_mask)
+#define load_lines (g_ui.load_lines)
+#define load_line_height (g_ui.load_line_height)
+#define load_chars_per_line (g_ui.load_chars_per_line)
+#define wav_files (g_ui.wav_files)
+#define delete_confirm_name (g_ui.delete_confirm_name)
+#define loaded_sample_name (g_ui.loaded_sample_name)
+#define fx_chain_order (g_ui.fx_chain_order)
+#define fx_chain_last_move_ms (g_ui.fx_chain_last_move_ms)
+#define fx_chain_fade_target (g_ui.fx_chain_fade_target)
+#define fx_chain_fade_samples_left (g_ui.fx_chain_fade_samples_left)
+#define fx_chain_fade_gain (g_ui.fx_chain_fade_gain)
+#define fx_chain_paused (g_ui.fx_chain_paused)
+#define fx_chain_pause_pending (g_ui.fx_chain_pause_pending)
+#define record_anim_start_ms (g_ui.record_anim_start_ms)
+#define g_audio_params_pub_idx (g_ui.audio_params_pub_idx)
+#define g_rt_pub_idx (g_ui.rt_pub_idx)
+#define g_fx_chain_pub_idx (g_ui.fx_chain_pub_idx)
+#define g_preview_pub_idx (g_ui.preview_pub_idx)
+#define g_audio_params_buf (g_ui.audio_params_buf)
+#define g_rt_buf (g_ui.rt_buf)
+#define g_fx_chain_buf (g_ui.fx_chain_buf)
+#define g_preview_ctl_buf (g_ui.preview_ctl_buf)
+#define g_audio_ui_state_buf (g_ui.audio_ui_state_buf)
+#define g_audio_ui_state_idx (g_ui.audio_ui_state_idx)
+#define g_rt_active_idx (g_ui.rt_active_idx)
+#define g_fx_params_buf (g_ui.fx_params_buf)
+#define g_fx_params_idx (g_ui.fx_params_idx)
+#define g_audio_params_audio_buf (g_ui.audio_params_audio_buf)
+#define g_audio_params_audio_idx (g_ui.audio_params_audio_idx)
+#define g_delay_time_alpha (g_ui.delay_time_alpha)
+#define g_delay_param_alpha (g_ui.delay_param_alpha)
+#define g_audio_recording_active (g_ui.audio_recording_active)
+#define g_recorded_length_audio (g_ui.recorded_length_audio)
+#define record_pos (g_ui.record_pos)
+#define g_record_start_ms (g_ui.record_start_ms)
+#define g_active_voice_count (g_ui.active_voice_count)
 #define sample_buffer_l (SampleBufferL())
 #define sample_buffer_r (SampleBufferR())
-#define sample_play_start (*g_ctx->sample_play_start)
-#define sample_play_end (*g_ctx->sample_play_end)
-#define sample_rate (*g_ctx->sample_rate)
-#define sample_channels (*g_ctx->sample_channels)
-#define trim_start (*g_ctx->trim_start)
-#define trim_end (*g_ctx->trim_end)
-#define snap_start_frame (*g_ctx->snap_start_frame)
-#define snap_end_frame (*g_ctx->snap_end_frame)
-#define playback_active (*g_ctx->playback_active)
-#define g_wf_job (*g_ctx->g_wf_job)
-#define g_list_job (*g_ctx->g_list_job)
-#define g_job (*g_ctx->g_job)
-#define loader_state (*g_ctx->loader_state)
-#define load_in_progress (*g_ctx->load_in_progress)
-#define load_target_is_edt (*g_ctx->load_target_is_edt)
-#define load_cookie_next (*g_ctx->load_cookie_next)
-#define load_cookie_active (*g_ctx->load_cookie_active)
-#define load_fail_budget_count (*g_ctx->load_fail_budget_count)
-#define load_fail_io_count (*g_ctx->load_fail_io_count)
-#define load_success_count (*g_ctx->load_success_count)
-#define delete_in_progress (*g_ctx->delete_in_progress)
-#define delete_cookie_next (*g_ctx->delete_cookie_next)
-#define delete_cookie_active (*g_ctx->delete_cookie_active)
-#define load_scan_start_ms (*g_ctx->load_scan_start_ms)
-#define list_build_pending (*g_ctx->list_build_pending)
-#define save_frames_written (*g_ctx->save_frames_written)
-#define waveform_title (*g_ctx->waveform_title)
-#define waveform_record_input (*g_ctx->record_input)
-#define preview_index (*g_ctx->preview_index)
-#define preview_sample_rate (*g_ctx->preview_sample_rate)
-#define preview_channels (*g_ctx->preview_channels)
-#define preview_rate (*g_ctx->preview_rate)
-#define preview_read_frac (*g_ctx->preview_read_frac)
-#define preview_read_index (*g_ctx->preview_read_index)
-#define preview_write_index (*g_ctx->preview_write_index)
-#define preview_data_offset (*g_ctx->preview_data_offset)
-#define preview_fade_samples_left (*g_ctx->preview_fade_samples_left)
-#define preview_fade_samples_total (*g_ctx->preview_fade_samples_total)
-#define preview_stream_cookie (*g_ctx->preview_stream_cookie)
-#define preview_stream_cookie_active (*g_ctx->preview_stream_cookie_active)
-#define preview_pending_start (*g_ctx->preview_pending_start)
-#define preview_pending_start_ms (*g_ctx->preview_pending_start_ms)
-#define preview_pp_ready (g_ctx->preview_pp_ready)
-#define preview_pp_active (*g_ctx->preview_pp_active)
-#define preview_pp_pos (*g_ctx->preview_pp_pos)
-#define preview_preload_frames (*g_ctx->preview_preload_frames)
-#define preview_preload_active (*g_ctx->preview_preload_active)
-#define cpu_load_pct (g_ctx->audio->GetStats().cpu_load_pct)
-#define cpu_load_peak_pct (g_ctx->audio->GetStats().cpu_load_peak_pct)
-#define callback_cycles_last (g_ctx->audio->GetStats().callback_cycles_last)
-#define callback_cycles_max (g_ctx->audio->GetStats().callback_cycles_max)
-#define callback_overruns (g_ctx->audio->GetStats().callback_overruns)
-#define cpu_load_ema (g_ctx->audio->GetStats().cpu_load_pct)
+#define sample_play_start (g_ui.sample_play_start)
+#define sample_play_end (g_ui.sample_play_end)
+#define sample_rate (g_ui.sample_rate)
+#define sample_channels (g_ui.sample_channels)
+#define trim_start (g_ui.trim_start)
+#define trim_end (g_ui.trim_end)
+#define snap_start_frame (g_ui.snap_start_frame)
+#define snap_end_frame (g_ui.snap_end_frame)
+#define playback_active (g_ui.playback_active)
+#define g_wf_job (g_ui.wf_job)
+#define g_list_job (g_ui.list_job)
+#define g_job (g_ui.job)
+#define loader_state (g_ui.loader_state)
+#define load_in_progress (g_ui.load_in_progress)
+#define load_target_is_edt (g_ui.load_target_is_edt)
+#define load_cookie_next (g_ui.load_cookie_next)
+#define load_cookie_active (g_ui.load_cookie_active)
+#define load_fail_budget_count (g_ui.load_fail_budget_count)
+#define load_fail_io_count (g_ui.load_fail_io_count)
+#define load_success_count (g_ui.load_success_count)
+#define delete_in_progress (g_ui.delete_in_progress)
+#define delete_cookie_next (g_ui.delete_cookie_next)
+#define delete_cookie_active (g_ui.delete_cookie_active)
+#define load_scan_start_ms (g_ui.load_scan_start_ms)
+#define list_build_pending (g_ui.list_build_pending)
+#define save_frames_written (g_ui.save_frames_written)
+#define waveform_title (g_ui.waveform_title)
+#define waveform_record_input (g_ui.waveform_record_input)
+#define preview_index (g_ui.preview_index)
+#define preview_sample_rate (g_ui.preview_sample_rate)
+#define preview_channels (g_ui.preview_channels)
+#define preview_rate (g_ui.preview_rate)
+#define preview_read_frac (g_ui.preview_read_frac)
+#define preview_read_index (g_ui.preview_read_index)
+#define preview_write_index (g_ui.preview_write_index)
+#define preview_data_offset (g_ui.preview_data_offset)
+#define preview_fade_samples_left (g_ui.preview_fade_samples_left)
+#define preview_fade_samples_total (g_ui.preview_fade_samples_total)
+#define preview_stream_cookie (g_ui.preview_stream_cookie)
+#define preview_stream_cookie_active (g_ui.preview_stream_cookie_active)
+#define preview_pending_start (g_ui.preview_pending_start)
+#define preview_pending_start_ms (g_ui.preview_pending_start_ms)
+#define preview_pp_ready (g_ui.preview_pp_ready)
+#define preview_pp_active (g_ui.preview_pp_active)
+#define preview_pp_pos (g_ui.preview_pp_pos)
+#define preview_preload_frames (g_ui.preview_preload_frames)
+#define preview_preload_active (g_ui.preview_preload_active)
+#define cpu_load_pct (g_ui.cpu_load_pct)
+#define cpu_load_peak_pct (g_ui.cpu_load_peak_pct)
+#define callback_cycles_last (g_ui.callback_cycles_last)
+#define callback_cycles_max (g_ui.callback_cycles_max)
+#define callback_overruns (g_ui.callback_overruns)
+#define cpu_load_ema (g_ui.cpu_load_ema)
 
 
 
@@ -418,6 +407,275 @@ void AdjustTrimNormalized(int32_t dl, int32_t dr, bool fine);
 // READS: UI thread only.
 struct UiState
 {
+	uint32_t ui_tick_ms = 1;
+	uint32_t ui_tick_playback_ms = 5;
+	UiMode ui_mode = UiMode::Main;
+	int32_t menu_index = 0;
+	int32_t shift_menu_index = 0;
+	int32_t perform_index = 0;
+	int32_t amp_fader_index = 0;
+	int32_t flt_fader_index = 0;
+	int32_t fx_fader_index = 0;
+	int32_t fx_chain_order[kPerformFaderCount]
+		= {kFxSatIndex, kFxChorusIndex, kFxDelayIndex, kFxReverbIndex};
+	bool fx_window_active = false;
+	bool amp_window_active = false;
+	bool flt_window_active = false;
+	UiMode shift_prev_mode = UiMode::Main;
+	RecordInput record_input = RecordInput::LineIn;
+	RecordState record_state = RecordState::Armed;
+	int32_t record_source_index = 0;
+	int32_t record_target_index = kRecordTargetSave;
+	uint32_t record_countdown_start_ms = 0;
+	size_t record_pos = 0;
+	size_t recorded_length_audio = 0;
+	uint32_t record_start_ms = 0;
+	bool record_waveform_pending = false;
+	int32_t encoder_r_accum = 0;
+	bool encoder_r_button_press = false;
+	bool request_length_redraw = false;
+	int32_t load_selected = 0;
+	int32_t load_scroll = 0;
+	RecordInput waveform_record_input = RecordInput::LineIn;
+	LoadContext load_context = LoadContext::Main;
+
+	bool request_load_scan = false;
+	bool list_build_pending = false;
+	bool request_load_sample = false;
+	int32_t request_load_index = -1;
+	bool load_in_progress = false;
+	uint16_t load_cookie_next = 1;
+	uint16_t load_cookie_active = 0;
+	bool load_target_is_edt = false;
+	LoaderState loader_state = LoaderState::Idle;
+	uint32_t load_success_count = 0;
+	uint32_t load_fail_budget_count = 0;
+	uint32_t load_fail_io_count = 0;
+	int32_t wav_file_count = 0;
+
+	bool sd_mounted = false;
+	bool sd_present = false;
+	bool sd_fault = false;
+	const char* sd_fault_text = nullptr;
+	uint32_t sd_retries_remaining = 0;
+	bool sd_init_in_progress = false;
+	bool sd_init_done = false;
+	bool sd_init_success = false;
+	uint32_t sd_init_start_ms = 0;
+	uint32_t sd_init_next_ms = 0;
+	uint32_t sd_init_result_until_ms = 0;
+	uint32_t sd_init_draw_next_ms = 0;
+	int32_t sd_init_attempts = 0;
+	UiMode sd_init_prev_mode = UiMode::Main;
+
+	bool save_in_progress = false;
+	bool save_done = false;
+	bool save_success = false;
+	bool save_started = false;
+	uint32_t save_start_ms = 0;
+	uint32_t save_result_until_ms = 0;
+	uint32_t save_draw_next_ms = 0;
+	UiMode save_prev_mode = UiMode::Main;
+	char save_filename[kMaxWavNameLen] = {0};
+	size_t save_frames_written = 0;
+
+	bool delete_mode = false;
+	UiMode delete_prev_mode = UiMode::Main;
+	UiMode load_prev_mode = UiMode::Main;
+	UiMode fx_detail_prev_mode = UiMode::Perform;
+	UiMode edt_prev_mode = UiMode::Perform;
+	bool request_delete_scan = false;
+	bool request_delete_file = false;
+	int32_t request_delete_index = -1;
+	bool delete_confirm = false;
+	bool request_delete_redraw = false;
+	char delete_confirm_name[kMaxWavNameLen] = {0};
+	bool delete_in_progress = false;
+	uint16_t delete_cookie_next = 1;
+	uint16_t delete_cookie_active = 0;
+	char wav_files[kMaxWavFiles][kMaxWavNameLen] = {};
+	char loaded_sample_name[kMaxWavNameLen] = {};
+
+	int32_t load_mode_index = 0;
+	int32_t load_lines = 0;
+	int32_t load_line_height = 0;
+	int32_t load_chars_per_line = 0;
+	uint32_t load_scan_start_ms = 0;
+
+	SampleContext current_sample_context = SampleContext::Perform;
+	SampleContext edt_sample_context = SampleContext::Perform;
+	LoadStubMode load_stub_mode = LoadStubMode::Presets;
+	bool sample_loaded = false;
+	size_t sample_length = 0;
+	uint32_t sample_rate = 0;
+	uint16_t sample_channels = 0;
+	size_t sample_play_start = 0;
+	size_t sample_play_end = 0;
+	float trim_start = 0.0f;
+	float trim_end = 1.0f;
+	uint32_t snap_start_frame = 0;
+	uint32_t snap_end_frame = 0;
+
+	bool playback_active = false;
+	float playback_phase = 0.0f;
+	float playback_rate = 1.0f;
+	float playback_reverse = 0.0f;
+	bool playback_reverse_active = false;
+	bool playback_reverse_target = false;
+	bool perform_voices_active = false;
+	float playback_amp = 0.0f;
+	uint32_t playback_env_samples = 0;
+	bool playback_release_active = false;
+	float playback_release_pos = 0.0f;
+	float playback_release_start = 0.0f;
+	int32_t current_note = -1;
+	uint32_t preview_sample_rate = 48000;
+
+	bool preview_hold = false;
+	bool preview_active = false;
+	int32_t preview_index = -1;
+	uint16_t preview_channels = 1;
+	float preview_rate = 1.0f;
+	float preview_read_frac = 0.0f;
+	size_t preview_read_index = 0;
+	size_t preview_write_index = 0;
+	uint32_t preview_data_offset = 0;
+	uint32_t preview_fade_samples_left = 0;
+	uint32_t preview_fade_samples_total = 0;
+	uint16_t preview_stream_cookie = 1;
+	uint16_t preview_stream_cookie_active = 0;
+	bool preview_pending_start = false;
+	uint32_t preview_pending_start_ms = 0;
+	uint8_t preview_pp_ready[2] = {0, 0};
+	uint8_t preview_pp_active = 0;
+	uint32_t preview_pp_pos = 0;
+	size_t preview_preload_frames = 0;
+	bool preview_preload_active = false;
+	uint32_t preview_underrun_count = 0;
+	uint32_t preview_rb_min_level = 0xFFFFFFFFu;
+	bool fx_params_dirty = false;
+	bool audio_params_dirty = false;
+	bool request_shift_redraw = false;
+	bool request_perform_redraw = false;
+	bool request_fx_detail_redraw = false;
+	bool button1_press = false;
+	bool button2_press = false;
+	bool request_playhead_redraw = false;
+	bool request_playback_stop_log = false;
+	bool audio_recording_active = false;
+	bool reset_voices_pending = false;
+	int32_t active_voice_count = 0;
+	uint32_t voice_skip_count = 0;
+	uint32_t voice_kill_count = 0;
+	float delay_time_alpha = 1.0f;
+	float delay_param_alpha = 1.0f;
+	FxChainRuntime fx_chain_audio = {};
+	bool fx_chain_audio_valid = false;
+	float led1_level = 0.0f;
+	float led1_phase_ms = 0.0f;
+	uint32_t delay_snow_next_ms = 0;
+	uint32_t midi_ignore_until_ms = 0;
+	bool midi_rx_started = false;
+	bool ctrl_timer_running = false;
+	WaveformJob wf_job = {};
+	FileListJob list_job = {};
+	Job job = {};
+	bool waveform_ready = false;
+	bool waveform_dirty = false;
+	bool waveform_from_recording = false;
+	bool waveform_compute_pending = false;
+	SampleContext waveform_compute_ctx = SampleContext::Perform;
+	const char* waveform_title = nullptr;
+	float reverb_wet = kReverbDefaultWet;
+	float reverb_pre = 0.5f;
+	float reverb_damp = 0.5f;
+	float reverb_decay = 0.5f;
+	float delay_wet = kDelayDefaultWet;
+	float delay_time = 0.5f;
+	float delay_feedback = 0.5f;
+	float delay_spread = 0.5f;
+	float delay_freeze = 0.0f;
+	float fx_s_wet = 0.0f;
+	float sat_drive = 0.5f;
+	float sat_tape_bump = 0.5f;
+	float sat_bit_reso = 0.5f;
+	float sat_bit_smpl = 0.5f;
+	float fx_c_wet = 0.0f;
+	float mod_depth = 0.5f;
+	float chorus_rate = 0.5f;
+	int32_t sat_mode = 0;
+	int32_t chorus_mode = 0;
+	float chorus_wow = 0.5f;
+	float tape_rate = 0.5f;
+	bool fx_params_dirty = true;
+	bool audio_params_dirty = true;
+	bool sat_params_initialized = false;
+	bool reverb_params_initialized = false;
+	bool delay_params_initialized = false;
+	bool mod_params_initialized = false;
+	float amp_attack = 0.0f;
+	float amp_decay = 0.0f;
+	float amp_sustain = 0.0f;
+	float amp_release = 0.0f;
+	int32_t fx_detail_index = 0;
+	int32_t fx_detail_param_index = 0;
+	float flt_cutoff = 1.0f;
+	float flt_res = 0.02f;
+	float fx_chain_fade_gain = 1.0f;
+	float fx_chain_fade_target = 1.0f;
+	int32_t fx_chain_fade_samples_left = 0;
+	bool fx_chain_pause_pending = false;
+	bool fx_chain_paused = false;
+	uint32_t fx_chain_last_move_ms = 0;
+	size_t waveform_cache_bytes = 0;
+	size_t sample_mem_used_bytes = 0;
+	size_t sample_mem_free_bytes = 0;
+	AudioParams audio_params_buf[2] = {};
+	SampleRuntime rt_buf[2] = {};
+	FxChainRuntime fx_chain_buf[2] = {};
+	PreviewControl preview_ctl_buf[2] = {};
+	FxParamsAudio fx_params_buf[2] = {};
+	AudioParamsAudio audio_params_audio_buf[2] = {};
+	uint8_t audio_params_pub_idx = 0;
+	uint8_t audio_params_active_idx = 0;
+	uint8_t rt_pub_idx = 0;
+	uint8_t rt_active_idx = 0;
+	uint8_t fx_chain_pub_idx = 0;
+	uint8_t fx_chain_active_idx = 0;
+	uint8_t preview_pub_idx = 0;
+	uint8_t preview_active_idx = 0;
+	uint8_t fx_params_idx = 0;
+	uint8_t audio_params_audio_idx = 0;
+	AudioUiState audio_ui_state_buf[2];
+	uint8_t audio_ui_state_idx = 0;
+	float cpu_load_ema = 0.0f;
+	float cpu_load_pct = 0.0f;
+	float cpu_load_peak_pct = 0.0f;
+	uint32_t callback_cycles_last = 0;
+	uint32_t callback_cycles_max = 0;
+	uint32_t callback_overruns = 0;
+	uint32_t record_draw_next_ms = 0;
+	double record_anim_start_ms = -1.0;
+	RAM_D3_MEM_SECTION uint8_t record_text_mask[kDisplayH][kDisplayW];
+	RAM_D3_MEM_SECTION uint8_t record_invert_mask[kDisplayH][kDisplayW];
+	RAM_D3_MEM_SECTION uint8_t record_fb_buf[kDisplayH][kDisplayW];
+	RAM_D3_MEM_SECTION uint8_t record_bold_mask[kDisplayH][kDisplayW];
+	float phones_volume = 1.0f;
+	float perform_attack_norm = 0.0f;
+	float perform_release_norm = 0.0f;
+	int32_t fx_detail_index = 0;
+	int32_t fx_detail_param_index = 0;
+	int32_t sat_mode = 0;
+	int32_t chorus_mode = 0;
+
+	// Control snapshot (written from control timer ISR, consumed in UI tick)
+	volatile int32_t enc_l_delta = 0;
+	volatile int32_t enc_r_delta = 0;
+	volatile uint32_t ctrl_events = 0;
+	volatile bool shift_held = false;
+	volatile bool btn1_held = false;
+	bool ui_button1_held = false;
+
 	SmoothParam sm_amp_attack;
 	SmoothParam sm_amp_decay;
 	SmoothParam sm_amp_sustain;
@@ -445,6 +703,8 @@ struct UiState
 	SmoothParam sm_reverb_decay;
 
 	uint32_t last_ui_ms = 0;
+	uint32_t last_draw_ms = 0;
+	bool display_update_pending = false;
 	uint16_t scan_cookie = 1;
 	FxContext fx_context = FxContext::Perform;
 };
@@ -629,22 +889,22 @@ static void BuildAndPublishAudioParamsAudio(const AudioParams &p, float out_sr)
 
 void RequestDisplayUpdate()
 {
-	g_display_update_pending = true;
+	g_ui.display_update_pending = true;
 }
 
 void FlushDisplayIfDue(uint32_t now)
 {
-	if (!g_display_update_pending)
+	if (!g_ui.display_update_pending)
 	{
 		return;
 	}
-	if ((uint32_t)(now - g_last_draw_ms) < kDrawIntervalMs)
+	if ((uint32_t)(now - g_ui.last_draw_ms) < kDrawIntervalMs)
 	{
 		return;
 	}
-	g_last_draw_ms = now;
+	g_ui.last_draw_ms = now;
 	display.Update();
-	g_display_update_pending = false;
+	g_ui.display_update_pending = false;
 }
 
 void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_events, bool shift_held);
@@ -653,6 +913,359 @@ void Ui::Init(AppContext* ctx)
 {
 	g_ctx = ctx;
 	g_ui.last_ui_ms = System::GetNow();
+}
+
+uint32_t& Ui::UiTickMsRef()
+{
+	return g_ui.ui_tick_ms;
+}
+
+uint32_t& Ui::UiTickPlaybackMsRef()
+{
+	return g_ui.ui_tick_playback_ms;
+}
+
+bool Ui::IsDisplayUpdatePending() const
+{
+	return g_ui.display_update_pending;
+}
+
+void Ui::SetLastDrawMs(uint32_t now_ms)
+{
+	g_ui.last_draw_ms = now_ms;
+}
+
+UiMode Ui::GetMode() const
+{
+	return g_ui.ui_mode;
+}
+
+UiMode& Ui::ModeRef()
+{
+	return g_ui.ui_mode;
+}
+
+int32_t& Ui::MenuIndexRef()
+{
+	return g_ui.menu_index;
+}
+
+int32_t& Ui::ShiftMenuIndexRef()
+{
+	return g_ui.shift_menu_index;
+}
+
+int32_t& Ui::PerformIndexRef()
+{
+	return g_ui.perform_index;
+}
+
+int32_t& Ui::AmpFaderIndexRef()
+{
+	return g_ui.amp_fader_index;
+}
+
+int32_t& Ui::FltFaderIndexRef()
+{
+	return g_ui.flt_fader_index;
+}
+
+int32_t& Ui::FxFaderIndexRef()
+{
+	return g_ui.fx_fader_index;
+}
+
+int32_t* Ui::FxChainOrderRef()
+{
+	return g_ui.fx_chain_order;
+}
+
+const int32_t* Ui::FxChainOrder() const
+{
+	return g_ui.fx_chain_order;
+}
+
+bool& Ui::FxWindowActiveRef()
+{
+	return g_ui.fx_window_active;
+}
+
+bool& Ui::AmpWindowActiveRef()
+{
+	return g_ui.amp_window_active;
+}
+
+bool& Ui::FltWindowActiveRef()
+{
+	return g_ui.flt_window_active;
+}
+
+UiMode& Ui::ShiftPrevModeRef()
+{
+	return g_ui.shift_prev_mode;
+}
+
+RecordInput& Ui::RecordInputRef()
+{
+	return g_ui.record_input;
+}
+
+RecordInput* Ui::GetRecordInputPtr()
+{
+	return &g_ui.record_input;
+}
+
+RecordState& Ui::RecordStateRef() { return g_ui.record_state; }
+int32_t& Ui::RecordSourceIndexRef() { return g_ui.record_source_index; }
+int32_t& Ui::RecordTargetIndexRef() { return g_ui.record_target_index; }
+uint32_t& Ui::RecordCountdownStartMsRef() { return g_ui.record_countdown_start_ms; }
+size_t& Ui::RecordPosRef() { return g_ui.record_pos; }
+size_t& Ui::RecordedLengthAudioRef() { return g_ui.recorded_length_audio; }
+uint32_t& Ui::RecordStartMsRef() { return g_ui.record_start_ms; }
+bool& Ui::RecordWaveformPendingRef() { return g_ui.record_waveform_pending; }
+int32_t& Ui::EncoderRAccumRef() { return g_ui.encoder_r_accum; }
+bool& Ui::EncoderRButtonPressRef() { return g_ui.encoder_r_button_press; }
+bool& Ui::RequestLengthRedrawRef() { return g_ui.request_length_redraw; }
+bool& Ui::RequestPlayheadRedrawRef() { return g_ui.request_playhead_redraw; }
+bool& Ui::Button1PressRef() { return g_ui.button1_press; }
+bool& Ui::Button2PressRef() { return g_ui.button2_press; }
+bool& Ui::RequestPlaybackStopLogRef() { return g_ui.request_playback_stop_log; }
+bool& Ui::PerformVoicesActiveRef() { return g_ui.perform_voices_active; }
+float& Ui::PlaybackAmpRef() { return g_ui.playback_amp; }
+uint32_t& Ui::PlaybackEnvSamplesRef() { return g_ui.playback_env_samples; }
+bool& Ui::PlaybackReleaseActiveRef() { return g_ui.playback_release_active; }
+float& Ui::PlaybackReleasePosRef() { return g_ui.playback_release_pos; }
+float& Ui::PlaybackReleaseStartRef() { return g_ui.playback_release_start; }
+int32_t& Ui::CurrentNoteRef() { return g_ui.current_note; }
+bool& Ui::AudioRecordingActiveRef() { return g_ui.audio_recording_active; }
+bool& Ui::ResetVoicesPendingRef() { return g_ui.reset_voices_pending; }
+int32_t& Ui::ActiveVoiceCountRef() { return g_ui.active_voice_count; }
+uint32_t& Ui::VoiceSkipCountRef() { return g_ui.voice_skip_count; }
+uint32_t& Ui::VoiceKillCountRef() { return g_ui.voice_kill_count; }
+float& Ui::DelayTimeAlphaRef() { return g_ui.delay_time_alpha; }
+float& Ui::DelayParamAlphaRef() { return g_ui.delay_param_alpha; }
+FxChainRuntime& Ui::FxChainAudioRef() { return g_ui.fx_chain_audio; }
+bool& Ui::FxChainAudioValidRef() { return g_ui.fx_chain_audio_valid; }
+bool& Ui::PreviewHoldRef() { return g_ui.preview_hold; }
+bool& Ui::PreviewActiveRef() { return g_ui.preview_active; }
+int32_t& Ui::PreviewIndexRef() { return g_ui.preview_index; }
+uint16_t& Ui::PreviewChannelsRef() { return g_ui.preview_channels; }
+float& Ui::PreviewRateRef() { return g_ui.preview_rate; }
+float& Ui::PreviewReadFracRef() { return g_ui.preview_read_frac; }
+size_t& Ui::PreviewReadIndexRef() { return g_ui.preview_read_index; }
+size_t& Ui::PreviewWriteIndexRef() { return g_ui.preview_write_index; }
+uint32_t& Ui::PreviewDataOffsetRef() { return g_ui.preview_data_offset; }
+uint32_t& Ui::PreviewFadeSamplesLeftRef() { return g_ui.preview_fade_samples_left; }
+uint32_t& Ui::PreviewFadeSamplesTotalRef() { return g_ui.preview_fade_samples_total; }
+bool& Ui::PreviewPendingStartRef() { return g_ui.preview_pending_start; }
+uint32_t& Ui::PreviewPendingStartMsRef() { return g_ui.preview_pending_start_ms; }
+uint32_t& Ui::PreviewUnderrunCountRef() { return g_ui.preview_underrun_count; }
+uint32_t& Ui::PreviewRbMinLevelRef() { return g_ui.preview_rb_min_level; }
+uint16_t& Ui::PreviewStreamCookieRef() { return g_ui.preview_stream_cookie; }
+uint16_t& Ui::PreviewStreamCookieActiveRef() { return g_ui.preview_stream_cookie_active; }
+uint8_t* Ui::PreviewPpReadyPtr() { return g_ui.preview_pp_ready; }
+uint8_t& Ui::PreviewPpActiveRef() { return g_ui.preview_pp_active; }
+uint32_t& Ui::PreviewPpPosRef() { return g_ui.preview_pp_pos; }
+size_t& Ui::PreviewPreloadFramesRef() { return g_ui.preview_preload_frames; }
+bool& Ui::PreviewPreloadActiveRef() { return g_ui.preview_preload_active; }
+float& Ui::Led1LevelRef() { return g_ui.led1_level; }
+float& Ui::Led1PhaseMsRef() { return g_ui.led1_phase_ms; }
+bool& Ui::RequestShiftRedrawRef() { return g_ui.request_shift_redraw; }
+bool& Ui::RequestPerformRedrawRef() { return g_ui.request_perform_redraw; }
+bool& Ui::RequestFxDetailRedrawRef() { return g_ui.request_fx_detail_redraw; }
+uint32_t& Ui::DelaySnowNextMsRef() { return g_ui.delay_snow_next_ms; }
+uint32_t& Ui::MidiIgnoreUntilMsRef() { return g_ui.midi_ignore_until_ms; }
+bool& Ui::MidiRxStartedRef() { return g_ui.midi_rx_started; }
+bool& Ui::CtrlTimerRunningRef() { return g_ui.ctrl_timer_running; }
+float& Ui::TrimStartRef() { return g_ui.trim_start; }
+float& Ui::TrimEndRef() { return g_ui.trim_end; }
+uint32_t& Ui::SnapStartFrameRef() { return g_ui.snap_start_frame; }
+uint32_t& Ui::SnapEndFrameRef() { return g_ui.snap_end_frame; }
+bool& Ui::WaveformReadyRef() { return g_ui.waveform_ready; }
+bool& Ui::WaveformDirtyRef() { return g_ui.waveform_dirty; }
+bool& Ui::WaveformFromRecordingRef() { return g_ui.waveform_from_recording; }
+const char*& Ui::WaveformTitleRef() { return g_ui.waveform_title; }
+bool& Ui::WaveformComputePendingRef() { return g_ui.waveform_compute_pending; }
+SampleContext& Ui::WaveformComputeCtxRef() { return g_ui.waveform_compute_ctx; }
+WaveformJob& Ui::WaveformJobRef() { return g_ui.wf_job; }
+FileListJob& Ui::FileListJobRef() { return g_ui.list_job; }
+Job& Ui::JobRef() { return g_ui.job; }
+float& Ui::PerformAttackNormRef() { return g_ui.perform_attack_norm; }
+float& Ui::PerformReleaseNormRef() { return g_ui.perform_release_norm; }
+float& Ui::ReverbWetRef() { return g_ui.reverb_wet; }
+float& Ui::ReverbPreRef() { return g_ui.reverb_pre; }
+float& Ui::ReverbDampRef() { return g_ui.reverb_damp; }
+float& Ui::ReverbDecayRef() { return g_ui.reverb_decay; }
+float& Ui::DelayWetRef() { return g_ui.delay_wet; }
+float& Ui::DelayTimeRef() { return g_ui.delay_time; }
+float& Ui::DelayFeedbackRef() { return g_ui.delay_feedback; }
+float& Ui::DelaySpreadRef() { return g_ui.delay_spread; }
+float& Ui::DelayFreezeRef() { return g_ui.delay_freeze; }
+float& Ui::FxSWetRef() { return g_ui.fx_s_wet; }
+float& Ui::SatDriveRef() { return g_ui.sat_drive; }
+float& Ui::SatTapeBumpRef() { return g_ui.sat_tape_bump; }
+float& Ui::SatBitResoRef() { return g_ui.sat_bit_reso; }
+float& Ui::SatBitSmplRef() { return g_ui.sat_bit_smpl; }
+float& Ui::FxCWetRef() { return g_ui.fx_c_wet; }
+float& Ui::ModDepthRef() { return g_ui.mod_depth; }
+float& Ui::ChorusRateRef() { return g_ui.chorus_rate; }
+int32_t& Ui::SatModeRef() { return g_ui.sat_mode; }
+int32_t& Ui::ChorusModeRef() { return g_ui.chorus_mode; }
+float& Ui::ChorusWowRef() { return g_ui.chorus_wow; }
+float& Ui::TapeRateRef() { return g_ui.tape_rate; }
+bool& Ui::FxParamsDirtyRef() { return g_ui.fx_params_dirty; }
+bool& Ui::AudioParamsDirtyRef() { return g_ui.audio_params_dirty; }
+bool& Ui::SatParamsInitializedRef() { return g_ui.sat_params_initialized; }
+bool& Ui::ReverbParamsInitializedRef() { return g_ui.reverb_params_initialized; }
+bool& Ui::DelayParamsInitializedRef() { return g_ui.delay_params_initialized; }
+bool& Ui::ModParamsInitializedRef() { return g_ui.mod_params_initialized; }
+float& Ui::AmpAttackRef() { return g_ui.amp_attack; }
+float& Ui::AmpDecayRef() { return g_ui.amp_decay; }
+float& Ui::AmpSustainRef() { return g_ui.amp_sustain; }
+float& Ui::AmpReleaseRef() { return g_ui.amp_release; }
+int32_t& Ui::FxDetailIndexRef() { return g_ui.fx_detail_index; }
+int32_t& Ui::FxDetailParamIndexRef() { return g_ui.fx_detail_param_index; }
+float& Ui::FltCutoffRef() { return g_ui.flt_cutoff; }
+float& Ui::FltResRef() { return g_ui.flt_res; }
+float& Ui::FxChainFadeGainRef() { return g_ui.fx_chain_fade_gain; }
+float& Ui::FxChainFadeTargetRef() { return g_ui.fx_chain_fade_target; }
+int32_t& Ui::FxChainFadeSamplesLeftRef() { return g_ui.fx_chain_fade_samples_left; }
+bool& Ui::FxChainPausePendingRef() { return g_ui.fx_chain_pause_pending; }
+bool& Ui::FxChainPausedRef() { return g_ui.fx_chain_paused; }
+uint32_t& Ui::FxChainLastMoveMsRef() { return g_ui.fx_chain_last_move_ms; }
+AudioParams* Ui::AudioParamsBuf() { return g_ui.audio_params_buf; }
+uint8_t& Ui::AudioParamsPubIdxRef() { return g_ui.audio_params_pub_idx; }
+uint8_t& Ui::AudioParamsActiveIdxRef() { return g_ui.audio_params_active_idx; }
+SampleRuntime* Ui::RtBuf() { return g_ui.rt_buf; }
+uint8_t& Ui::RtPubIdxRef() { return g_ui.rt_pub_idx; }
+uint8_t& Ui::RtActiveIdxRef() { return g_ui.rt_active_idx; }
+FxChainRuntime* Ui::FxChainBuf() { return g_ui.fx_chain_buf; }
+uint8_t& Ui::FxChainPubIdxRef() { return g_ui.fx_chain_pub_idx; }
+uint8_t& Ui::FxChainActiveIdxRef() { return g_ui.fx_chain_active_idx; }
+PreviewControl* Ui::PreviewCtlBuf() { return g_ui.preview_ctl_buf; }
+uint8_t& Ui::PreviewPubIdxRef() { return g_ui.preview_pub_idx; }
+uint8_t& Ui::PreviewActiveIdxRef() { return g_ui.preview_active_idx; }
+FxParamsAudio* Ui::FxParamsBuf() { return g_ui.fx_params_buf; }
+uint8_t& Ui::FxParamsIdxRef() { return g_ui.fx_params_idx; }
+AudioParamsAudio* Ui::AudioParamsAudioBuf() { return g_ui.audio_params_audio_buf; }
+uint8_t& Ui::AudioParamsAudioIdxRef() { return g_ui.audio_params_audio_idx; }
+AudioUiState* Ui::AudioUiStateBuf() { return g_ui.audio_ui_state_buf; }
+uint8_t& Ui::AudioUiStateIdxRef() { return g_ui.audio_ui_state_idx; }
+float& Ui::CpuLoadEmaRef() { return g_ui.cpu_load_ema; }
+float& Ui::CpuLoadPctRef() { return g_ui.cpu_load_pct; }
+float& Ui::CpuLoadPeakPctRef() { return g_ui.cpu_load_peak_pct; }
+uint32_t& Ui::CallbackCyclesLastRef() { return g_ui.callback_cycles_last; }
+uint32_t& Ui::CallbackCyclesMaxRef() { return g_ui.callback_cycles_max; }
+uint32_t& Ui::CallbackOverrunsRef() { return g_ui.callback_overruns; }
+uint32_t& Ui::RecordDrawNextMsRef() { return g_ui.record_draw_next_ms; }
+double& Ui::RecordAnimStartMsRef() { return g_ui.record_anim_start_ms; }
+uint8_t (*Ui::RecordTextMask())[128] { return g_ui.record_text_mask; }
+uint8_t (*Ui::RecordInvertMask())[128] { return g_ui.record_invert_mask; }
+uint8_t (*Ui::RecordFbBuf())[128] { return g_ui.record_fb_buf; }
+	uint8_t (*Ui::RecordBoldMask())[128] { return g_ui.record_bold_mask; }
+size_t& Ui::WaveformCacheBytesRef() { return g_ui.waveform_cache_bytes; }
+size_t& Ui::SampleMemUsedBytesRef() { return g_ui.sample_mem_used_bytes; }
+size_t& Ui::SampleMemFreeBytesRef() { return g_ui.sample_mem_free_bytes; }
+
+int32_t& Ui::LoadSelectedRef()
+{
+	return g_ui.load_selected;
+}
+
+int32_t& Ui::LoadScrollRef()
+{
+	return g_ui.load_scroll;
+}
+
+bool& Ui::RequestLoadScanRef() { return g_ui.request_load_scan; }
+bool& Ui::ListBuildPendingRef() { return g_ui.list_build_pending; }
+bool& Ui::RequestLoadSampleRef() { return g_ui.request_load_sample; }
+int32_t& Ui::RequestLoadIndexRef() { return g_ui.request_load_index; }
+bool& Ui::LoadInProgressRef() { return g_ui.load_in_progress; }
+uint16_t& Ui::LoadCookieNextRef() { return g_ui.load_cookie_next; }
+uint16_t& Ui::LoadCookieActiveRef() { return g_ui.load_cookie_active; }
+bool& Ui::LoadTargetIsEdtRef() { return g_ui.load_target_is_edt; }
+LoadContext& Ui::LoadContextRef() { return g_ui.load_context; }
+LoaderState& Ui::LoaderStateRef() { return g_ui.loader_state; }
+uint32_t& Ui::LoadSuccessCountRef() { return g_ui.load_success_count; }
+uint32_t& Ui::LoadFailBudgetCountRef() { return g_ui.load_fail_budget_count; }
+uint32_t& Ui::LoadFailIoCountRef() { return g_ui.load_fail_io_count; }
+int32_t& Ui::WavFileCountRef() { return g_ui.wav_file_count; }
+bool& Ui::SdMountedRef() { return g_ui.sd_mounted; }
+bool& Ui::SdPresentRef() { return g_ui.sd_present; }
+bool& Ui::SdFaultRef() { return g_ui.sd_fault; }
+const char*& Ui::SdFaultTextRef() { return g_ui.sd_fault_text; }
+uint32_t& Ui::SdRetriesRemainingRef() { return g_ui.sd_retries_remaining; }
+bool& Ui::SdInitInProgressRef() { return g_ui.sd_init_in_progress; }
+bool& Ui::SdInitDoneRef() { return g_ui.sd_init_done; }
+bool& Ui::SdInitSuccessRef() { return g_ui.sd_init_success; }
+uint32_t& Ui::SdInitStartMsRef() { return g_ui.sd_init_start_ms; }
+uint32_t& Ui::SdInitNextMsRef() { return g_ui.sd_init_next_ms; }
+uint32_t& Ui::SdInitResultUntilMsRef() { return g_ui.sd_init_result_until_ms; }
+uint32_t& Ui::SdInitDrawNextMsRef() { return g_ui.sd_init_draw_next_ms; }
+int32_t& Ui::SdInitAttemptsRef() { return g_ui.sd_init_attempts; }
+UiMode& Ui::SdInitPrevModeRef() { return g_ui.sd_init_prev_mode; }
+bool& Ui::SaveInProgressRef() { return g_ui.save_in_progress; }
+bool& Ui::SaveDoneRef() { return g_ui.save_done; }
+bool& Ui::SaveSuccessRef() { return g_ui.save_success; }
+bool& Ui::SaveStartedRef() { return g_ui.save_started; }
+uint32_t& Ui::SaveStartMsRef() { return g_ui.save_start_ms; }
+uint32_t& Ui::SaveResultUntilMsRef() { return g_ui.save_result_until_ms; }
+uint32_t& Ui::SaveDrawNextMsRef() { return g_ui.save_draw_next_ms; }
+UiMode& Ui::SavePrevModeRef() { return g_ui.save_prev_mode; }
+size_t& Ui::SaveFramesWrittenRef() { return g_ui.save_frames_written; }
+char* Ui::SaveFilename() { return g_ui.save_filename; }
+bool& Ui::DeleteModeRef() { return g_ui.delete_mode; }
+UiMode& Ui::DeletePrevModeRef() { return g_ui.delete_prev_mode; }
+bool& Ui::RequestDeleteScanRef() { return g_ui.request_delete_scan; }
+bool& Ui::RequestDeleteFileRef() { return g_ui.request_delete_file; }
+int32_t& Ui::RequestDeleteIndexRef() { return g_ui.request_delete_index; }
+bool& Ui::DeleteConfirmRef() { return g_ui.delete_confirm; }
+char* Ui::DeleteConfirmName() { return g_ui.delete_confirm_name; }
+bool& Ui::DeleteInProgressRef() { return g_ui.delete_in_progress; }
+uint16_t& Ui::DeleteCookieNextRef() { return g_ui.delete_cookie_next; }
+uint16_t& Ui::DeleteCookieActiveRef() { return g_ui.delete_cookie_active; }
+bool& Ui::RequestDeleteRedrawRef() { return g_ui.request_delete_redraw; }
+UiMode& Ui::LoadPrevModeRef() { return g_ui.load_prev_mode; }
+UiMode& Ui::FxDetailPrevModeRef() { return g_ui.fx_detail_prev_mode; }
+UiMode& Ui::EdtPrevModeRef() { return g_ui.edt_prev_mode; }
+float& Ui::PhonesVolumeRef() { return g_ui.phones_volume; }
+char (*Ui::WavFiles())[kMaxWavNameLen] { return g_ui.wav_files; }
+char* Ui::LoadedSampleName() { return g_ui.loaded_sample_name; }
+int32_t& Ui::LoadLinesRef() { return g_ui.load_lines; }
+int32_t& Ui::LoadLineHeightRef() { return g_ui.load_line_height; }
+int32_t& Ui::LoadCharsPerLineRef() { return g_ui.load_chars_per_line; }
+uint32_t& Ui::LoadScanStartMsRef() { return g_ui.load_scan_start_ms; }
+SampleContext& Ui::CurrentSampleContextRef() { return g_ui.current_sample_context; }
+SampleContext& Ui::EdtSampleContextRef() { return g_ui.edt_sample_context; }
+int32_t& Ui::LoadModeIndexRef() { return g_ui.load_mode_index; }
+LoadStubMode& Ui::LoadStubModeRef() { return g_ui.load_stub_mode; }
+size_t& Ui::SampleLengthRef() { return g_ui.sample_length; }
+size_t& Ui::SamplePlayStartRef() { return g_ui.sample_play_start; }
+size_t& Ui::SamplePlayEndRef() { return g_ui.sample_play_end; }
+uint32_t& Ui::SampleRateRef() { return g_ui.sample_rate; }
+uint16_t& Ui::SampleChannelsRef() { return g_ui.sample_channels; }
+bool& Ui::SampleLoadedRef() { return g_ui.sample_loaded; }
+bool& Ui::PlaybackActiveRef() { return g_ui.playback_active; }
+float& Ui::PlaybackRateRef() { return g_ui.playback_rate; }
+float& Ui::PlaybackPhaseRef() { return g_ui.playback_phase; }
+float& Ui::PlaybackReverseRef() { return g_ui.playback_reverse; }
+bool& Ui::PlaybackReverseTargetRef() { return g_ui.playback_reverse_target; }
+bool& Ui::PlaybackReverseActiveRef() { return g_ui.playback_reverse_active; }
+uint32_t& Ui::PreviewSampleRateRef() { return g_ui.preview_sample_rate; }
+
+void Ui::AccumulateControls(int32_t enc_l_inc,
+							int32_t enc_r_inc,
+							uint32_t ctrl_events,
+							bool shift_held,
+							bool btn1_held)
+{
+	daisy::ScopedIrqBlocker irq;
+	g_ui.enc_l_delta += enc_l_inc;
+	g_ui.enc_r_delta += enc_r_inc;
+	g_ui.ctrl_events |= ctrl_events;
+	g_ui.shift_held = shift_held;
+	g_ui.btn1_held = btn1_held;
 }
 
 void Ui::Tick(uint32_t now_ms)
@@ -673,17 +1286,17 @@ void Ui::Tick(uint32_t now_ms)
 		bool btn1_held = false;
 		{
 			daisy::ScopedIrqBlocker irq;
-			enc_l_inc = g_enc_l_delta;
-			g_enc_l_delta = 0;
-			enc_r_inc = g_enc_r_delta;
-			g_enc_r_delta = 0;
-			ev = g_ctrl_events;
-			g_ctrl_events = 0;
-			shift_held = g_shift_held;
-			btn1_held = g_btn1_held;
+			enc_l_inc = g_ui.enc_l_delta;
+			g_ui.enc_l_delta = 0;
+			enc_r_inc = g_ui.enc_r_delta;
+			g_ui.enc_r_delta = 0;
+			ev = g_ui.ctrl_events;
+			g_ui.ctrl_events = 0;
+			shift_held = g_ui.shift_held;
+			btn1_held = g_ui.btn1_held;
 		}
 
-		ui_button1_held = btn1_held;
+		g_ui.ui_button1_held = btn1_held;
 		UiTick(enc_l_inc, enc_r_inc, ev, shift_held);
 		JobTick();
 		UpdateSmoothedParamsPerTick();
@@ -743,7 +1356,7 @@ void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_events, 
 	preview_hold = (ui_mode == UiMode::Load
 		&& (load_context == LoadContext::Edt || delete_mode)
 		&& !(kLoadPresetsPlaceholder && load_context == LoadContext::Main && !delete_mode))
-		? ui_button1_held
+		? g_ui.ui_button1_held
 		: false;
 	if (!sd_init_in_progress && ui_mode == UiMode::Shift)
 	{
@@ -821,7 +1434,7 @@ void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_events, 
 			ui_mode = UiMode::Record;
 			record_source_index = (record_input == RecordInput::Mic) ? 1 : 0;
 			record_state = RecordState::SourceSelect;
-			RequestPlaybackStopAll();
+			g_ctx->audio->RequestPlaybackStopAll();
 			record_anim_start_ms = NowMs();
 		}
 		else if (encoder_r_pressed && menu_index == 2)
@@ -1019,7 +1632,7 @@ void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_events, 
 			}
 			else if (record_state == RecordState::Recording)
 			{
-				RequestAudioCmd(kCmdRecStop);
+				g_ctx->audio->RequestAudioCmd(kCmdRecStop);
 			}
 			else if (record_state == RecordState::Review && sample_loaded)
 			{
@@ -1048,7 +1661,7 @@ void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_events, 
 				waveform_ready = false;
 				waveform_dirty = true;
 				waveform_from_recording = false;
-				RequestPlaybackStopAll();
+				g_ctx->audio->RequestPlaybackStopAll();
 				PublishRuntimeFromUi();
 				record_state = RecordState::SourceSelect;
 				request_length_redraw = true;
@@ -1065,7 +1678,7 @@ void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_events, 
 			else if (record_state == RecordState::SourceSelect)
 			{
 				ui_mode = UiMode::Main;
-				RequestPlaybackStopAll();
+				g_ctx->audio->RequestPlaybackStopAll();
 				record_anim_start_ms = -1.0;
 			}
 			else if (record_state == RecordState::BackConfirm)
@@ -1082,7 +1695,7 @@ void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_events, 
 			else
 			{
 				record_state = RecordState::SourceSelect;
-				RequestPlaybackStopAll();
+				g_ctx->audio->RequestPlaybackStopAll();
 				record_anim_start_ms = -1.0;
 			}
 		}
@@ -1756,7 +2369,7 @@ void UiTick(int32_t encoder_l_inc, int32_t encoder_r_inc, uint32_t ctrl_events, 
 		if ((System::GetNow() - record_countdown_start_ms) >= kRecordCountdownMs)
 		{
 			StartRecording();
-			RequestAudioCmd(kCmdRecStart);
+			g_ctx->audio->RequestAudioCmd(kCmdRecStart);
 		}
 	}
 }
@@ -2708,7 +3321,7 @@ void PublishRuntimeFromUi()
 	{
 		daisy::ScopedIrqBlocker irq;
 		g_rt_pub_idx = next;
-		g_audio_cmd |= kCmdCommitRuntime;
+		g_ctx->audio->RequestAudioCmd(kCmdCommitRuntime);
 	}
 }
 
@@ -2730,7 +3343,7 @@ void PublishFxChainFromUi()
 	{
 		daisy::ScopedIrqBlocker irq;
 		g_fx_chain_pub_idx = next;
-		g_audio_cmd |= kCmdCommitFxChain;
+		g_ctx->audio->RequestAudioCmd(kCmdCommitFxChain);
 	}
 }
 
@@ -2749,7 +3362,7 @@ void PublishPreviewControlFromUi()
 	{
 		daisy::ScopedIrqBlocker irq;
 		g_preview_pub_idx = next;
-		g_audio_cmd |= kCmdCommitPreview;
+		g_ctx->audio->RequestAudioCmd(kCmdCommitPreview);
 	}
 }
 #endif
@@ -2761,7 +3374,7 @@ void PublishAudioParamsFromUi(const AudioParams& p)
 	{
 		daisy::ScopedIrqBlocker irq;
 		g_audio_params_pub_idx = next;
-		g_audio_cmd |= kCmdCommitAudioParams;
+		g_ctx->audio->RequestAudioCmd(kCmdCommitAudioParams);
 	}
 }
 
@@ -2927,8 +3540,8 @@ void ApplyLoadedSampleFade(size_t length, uint32_t rate)
 
 static bool LoadSampleFromPath(const char* path)
 {
-	RequestPlaybackStopAll();
-	RequestAudioCmd(kCmdAllNotesOff);
+	g_ctx->audio->RequestPlaybackStopAll();
+	g_ctx->audio->RequestAudioCmd(kCmdAllNotesOff);
 	sample_loaded = false;
 	perform_attack_norm = 0.0f;
 	perform_release_norm = 0.0f;
@@ -3008,7 +3621,7 @@ void StopPreview()
 		daisy::ScopedIrqBlocker irq;
 		preview_write_index = 0;
 	}
-	RequestAudioCmd(kCmdPreviewStop);
+	g_ctx->audio->RequestAudioCmd(kCmdPreviewStop);
 #if STORAGE_SERVICE_PREVIEW_STREAM
 	StorageService::Op op = {};
 	op.kind = StorageService::OpKind::PreviewClose;
@@ -4427,8 +5040,8 @@ static void PrepareRecordingUiState()
     perform_attack_norm  = 0.0f;
     perform_release_norm = 0.0f;
 
-    RequestAudioCmd(kCmdAllNotesOff);
-    RequestPlaybackStopAll();
+    g_ctx->audio->RequestAudioCmd(kCmdAllNotesOff);
+    g_ctx->audio->RequestPlaybackStopAll();
 
     sample_channels = 1;
     sample_rate     = 48000;

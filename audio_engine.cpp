@@ -60,8 +60,8 @@ constexpr size_t kLiveWaveStride = (kLiveWaveWindowFrames / kWaveCols) > 0
 static AudioShared* g_shared = nullptr;
 
 #define hw (*g_shared->hw)
-#define g_audio_cmd (*g_shared->audio_cmd)
-#define g_audio_flags_bits (*g_shared->audio_flags_bits)
+#define g_audio_cmd (g_audio.audio_cmd)
+#define g_audio_flags_bits (g_audio.audio_flags_bits)
 #define record_input (*g_shared->record_input)
 #define g_playback_reverse_target (*g_shared->playback_reverse_target)
 #define g_audio_params_pub_idx (*g_shared->audio_params_pub_idx)
@@ -130,12 +130,12 @@ static AudioShared* g_shared = nullptr;
 #define callback_overruns (*g_shared->callback_overruns)
 #define cpu_load_ema (*g_shared->cpu_load_ema)
 #define request_playhead_redraw (*g_shared->request_playhead_redraw)
-#define g_midi_cmd_q (g_shared->midi_cmd_q)
-#define g_midi_cmd_wr (*g_shared->midi_cmd_wr)
-#define g_midi_cmd_rd (*g_shared->midi_cmd_rd)
-#define g_playback_cmd_q (g_shared->playback_cmd_q)
-#define g_playback_cmd_wr (*g_shared->playback_cmd_wr)
-#define g_playback_cmd_rd (*g_shared->playback_cmd_rd)
+#define g_midi_cmd_q (g_audio.midi_cmd_q)
+#define g_midi_cmd_wr (g_audio.midi_cmd_wr)
+#define g_midi_cmd_rd (g_audio.midi_cmd_rd)
+#define g_playback_cmd_q (g_audio.playback_cmd_q)
+#define g_playback_cmd_wr (g_audio.playback_cmd_wr)
+#define g_playback_cmd_rd (g_audio.playback_cmd_rd)
 
 void PushAudioEvent(uint32_t bits);
 void ResetPerformVoices();
@@ -146,7 +146,7 @@ void StopPlaybackAllAudio();
 void DeactivateVoice(PerformVoice& voice);
 void AudioUiResetLiveWaveform(AudioUiState& uiw);
 size_t PreviewAvailableFrames(size_t read_idx, size_t write_idx);
-float SineTableLookup(float phase01);
+static float SineTableLookup(float phase01);
 
 // OWNER: Audio callback only.
 // WRITES: Audio callback. UI writes only via PublishParams/PushCommand (lock-free).
@@ -159,6 +159,15 @@ struct AudioState
 	int16_t* sample_buffer_r = perform_sample_buffer_r;
 	SampleMemoryManager sample_mem_mgr;
 	VoiceManager voice_mgr;
+	MidiCmd midi_cmd_q[kMidiCmdQSize];
+	uint8_t midi_cmd_wr = 0;
+	uint8_t midi_cmd_rd = 0;
+	PlaybackCmd playback_cmd_q[kPlaybackCmdQSize];
+	uint8_t playback_cmd_wr = 0;
+	uint8_t playback_cmd_rd = 0;
+	volatile uint32_t audio_cmd = 0;
+	volatile uint32_t audio_flags_bits = 0;
+	volatile uint32_t audio_event_bits = 0;
 
 	DTCM_MEM_SECTION PerformVoice perform_voices[kPerformVoiceCount];
 	DTCM_MEM_SECTION BiquadLp perform_lpf_l1[kPerformVoiceCount];
@@ -220,6 +229,9 @@ struct AudioState
 	float last_rev_feedback = -1.0f;
 	float last_rev_lp = -1.0f;
 	float last_rev_predelay = -1.0f;
+	float sine_table[kSineTableSize + 1] = {};
+	float note_ratio[128] = {};
+	bool playback_reverse_audio = false;
 
 	AudioState()
 	: sample_mem_mgr(perform_sample_buffer_l, kPerformSampleRamBudgetBytes)
@@ -242,6 +254,34 @@ int16_t (&preview_buffer)[kPreviewBufferFrames] = g_audio.preview_buffer;
 int16_t (&preview_pp_buf)[2][kPreviewPpFrames] = g_audio.preview_pp_buf;
 int16_t (&preview_preload_buf)[kPreviewPreloadFrames] = g_audio.preview_preload_buf;
 #endif
+
+static float SineTableLookup(float phase01)
+{
+	const float idx = phase01 * static_cast<float>(kSineTableSize);
+	const int i = static_cast<int>(idx);
+	const float frac = idx - static_cast<float>(i);
+	const float a = g_audio.sine_table[i];
+	const float b = g_audio.sine_table[i + 1];
+	return a + (b - a) * frac;
+}
+
+static void InitSineTable()
+{
+	for (size_t i = 0; i <= kSineTableSize; ++i)
+	{
+		const float phase = static_cast<float>(i) / static_cast<float>(kSineTableSize);
+		g_audio.sine_table[i] = sinf(kTwoPi * phase);
+	}
+}
+
+static void InitNoteRatioTable()
+{
+	for (int i = 0; i < 128; ++i)
+	{
+		const float semis = static_cast<float>(i - kBaseMidiNote);
+		g_audio.note_ratio[i] = powf(2.0f, semis / 12.0f);
+	}
+}
 
 static inline bool AnyPerformVoiceActive()
 {
@@ -301,11 +341,11 @@ void ResetPerformVoices()
 
 void ApplyPlaybackReverseAudio(bool reverse)
 {
-	if (reverse == playback_reverse_audio)
+	if (reverse == g_audio.playback_reverse_audio)
 	{
 		return;
 	}
-	playback_reverse_audio = reverse;
+	g_audio.playback_reverse_audio = reverse;
 
 	const SampleRuntime rt = g_rt_buf[g_rt_active_idx];
 	if (!rt.loaded || rt.length == 0 || rt.l == nullptr)
@@ -417,7 +457,7 @@ void StartPerformVoice(int32_t note)
 	g_audio.perform_lpf_r2[voice_index].Reset();
 	const float sr = (rt.rate == 0) ? 48000.0f : static_cast<float>(rt.rate);
 	const uint8_t idx = (note >= 0 && note < 128) ? static_cast<uint8_t>(note) : 127;
-	const float pitch = g_note_ratio[idx];
+	const float pitch = g_audio.note_ratio[idx];
 	voice.rate = pitch * (sr / hw.AudioSampleRate());
 	voice.offset = window_start;
 	voice.length = window_end - window_start;
@@ -1835,11 +1875,88 @@ audio_done:
 #endif
 void AudioEngine::Init(daisy::DaisyPod& /*hw*/)
 {
+	InitSineTable();
+	InitNoteRatioTable();
 }
 
 void AudioEngine::BindShared(AudioShared* shared)
 {
 	g_shared = shared;
+}
+
+void AudioEngine::MidiCmdPushIsr(uint8_t kind, uint8_t note, uint8_t vel)
+{
+	const uint8_t wr = g_midi_cmd_wr;
+	const uint8_t next = (uint8_t)((wr + 1) & (kMidiCmdQSize - 1));
+	if (next == g_midi_cmd_rd)
+	{
+		return;
+	}
+
+	g_midi_cmd_q[wr].kind = kind;
+	g_midi_cmd_q[wr].note = note;
+	g_midi_cmd_q[wr].vel = vel;
+	g_midi_cmd_q[wr].t_ms = System::GetNow();
+	g_midi_cmd_wr = next;
+}
+
+void AudioEngine::RequestAudioCmd(uint32_t bits)
+{
+	daisy::ScopedIrqBlocker irq;
+	g_audio_cmd |= bits;
+}
+
+static inline void PlaybackCmdPush(uint8_t kind, uint8_t note, uint8_t flags)
+{
+	daisy::ScopedIrqBlocker irq;
+	const uint8_t wr = g_playback_cmd_wr;
+	const uint8_t next = (uint8_t)((wr + 1) & (kPlaybackCmdQSize - 1));
+	if (next == g_playback_cmd_rd)
+	{
+		return;
+	}
+	g_playback_cmd_q[wr].kind = kind;
+	g_playback_cmd_q[wr].note = note;
+	g_playback_cmd_q[wr].flags = flags;
+	g_playback_cmd_q[wr].t_ms = System::GetNow();
+	g_playback_cmd_wr = next;
+}
+
+void AudioEngine::RequestPlaybackStart(uint8_t note, bool apply_pitch)
+{
+	const uint8_t flags = apply_pitch ? kPlaybackCmdApplyPitch : 0;
+	PlaybackCmdPush(kPlaybackCmdStart, note, flags);
+}
+
+void AudioEngine::RequestPlaybackStop(uint8_t note, bool apply_release)
+{
+	const uint8_t flags = apply_release ? kPlaybackCmdApplyRelease : 0;
+	PlaybackCmdPush(kPlaybackCmdStop, note, flags);
+}
+
+void AudioEngine::RequestPlaybackStopAll()
+{
+	PlaybackCmdPush(kPlaybackCmdStopAll, 0, 0);
+}
+
+void AudioEngine::PushAudioEvent(uint32_t bits)
+{
+	daisy::ScopedIrqBlocker irq;
+	g_audio.audio_event_bits |= bits;
+}
+
+uint32_t AudioEngine::PopAudioEvents()
+{
+	daisy::ScopedIrqBlocker irq;
+	const uint32_t bits = g_audio.audio_event_bits;
+	g_audio.audio_event_bits = 0;
+	return bits;
+}
+
+void AudioEngine::SetAudioFlagsBits(uint32_t bits)
+{
+	daisy::ScopedIrqBlocker irq;
+	g_audio.audio_flags_bits = bits;
 }
 
 void AudioEngine::InitVoices()
@@ -1894,6 +2011,12 @@ void AudioEngine::GetPreviewBuffers(PreviewBuffers& out) const
 	out.pp_ready_b = nullptr;
 	out.pp_active = nullptr;
 #endif
+}
+
+float AudioEngine::NoteRatio(uint8_t note) const
+{
+	const uint8_t idx = (note < 128) ? note : 127;
+	return g_audio.note_ratio[idx];
 }
 
 void AudioEngine::Process(daisy::AudioHandle::InputBuffer in, daisy::AudioHandle::OutputBuffer out, size_t size)

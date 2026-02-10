@@ -28,6 +28,11 @@ check_modules:
 	@powershell -Command "if (Get-Command rg -ErrorAction SilentlyContinue) { if (rg -n '#include\\s+[<\"]ff\\.h[>\"]' StorageService.h ui.cpp ui.h) { Write-Host 'ERROR: ff.h leaked into headers'; exit 1 } }"
 	@powershell -Command "if (Get-Command rg -ErrorAction SilentlyContinue) { if (rg -n '#include\\s+\".*daisy.*\"' shared_messages.h) { Write-Host 'ERROR: shared_messages.h should not include Daisy headers'; exit 1 } }"
 
+.PHONY: check_e13
+check_e13:
+	@powershell -Command "if (Get-Command rg -ErrorAction SilentlyContinue) { if (rg -n 'extern\\s+' -g '*.h' -g '*.cpp') { Write-Host 'ERROR: extern globals found'; exit 1 } }"
+	@powershell -Command "if (Get-Command rg -ErrorAction SilentlyContinue) { if (rg -n '^\\s*(static\\s+)?(volatile\\s+)?(bool|int|int32_t|uint32_t|size_t|float|double|UiMode|.*Queue|.*Index|.*Flag)\\s+g_' WaveContV3.cpp) { Write-Host 'ERROR: runtime g_* globals found in WaveContV3.cpp'; exit 1 } }"
+
 # Core location, and generic Makefile.
 SYSTEM_FILES_DIR = $(LIBDAISY_DIR)/core
 include $(SYSTEM_FILES_DIR)/Makefile
