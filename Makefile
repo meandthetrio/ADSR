@@ -20,6 +20,22 @@ USE_FATFS = 1
 AUDIO_BLOCK_SIZE ?= 48
 CXXFLAGS += -DAUDIO_BLOCK_SIZE=$(AUDIO_BLOCK_SIZE)
 
+# Build modes
+BUILD ?= RELEASE
+PERF ?= 0
+
+ifeq ($(BUILD),DEBUG)
+    CXXFLAGS += -Og -g3 -DDEBUG_BUILD=1
+else
+    CXXFLAGS += -O3 -DNDEBUG=1 -DRELEASE_BUILD=1
+    LTO ?= 1
+    ifeq ($(LTO),1)
+        CXXFLAGS += -flto
+    endif
+endif
+
+CXXFLAGS += -DPERF=$(PERF)
+
 # Guardrails: module include boundaries.
 .PHONY: check_modules
 check_modules:
@@ -32,6 +48,18 @@ check_modules:
 check_e13:
 	@powershell -Command "if (Get-Command rg -ErrorAction SilentlyContinue) { if (rg -n 'extern\\s+' -g '*.h' -g '*.cpp') { Write-Host 'ERROR: extern globals found'; exit 1 } }"
 	@powershell -Command "if (Get-Command rg -ErrorAction SilentlyContinue) { if (rg -n '^\\s*(static\\s+)?(volatile\\s+)?(bool|int|int32_t|uint32_t|size_t|float|double|UiMode|.*Queue|.*Index|.*Flag)\\s+g_' WaveContV3.cpp) { Write-Host 'ERROR: runtime g_* globals found in WaveContV3.cpp'; exit 1 } }"
+
+.PHONY: release debug check_release
+release:
+	@$(MAKE) BUILD=RELEASE
+
+debug:
+	@$(MAKE) BUILD=DEBUG
+
+check_release:
+	@powershell -Command "if (Get-Command rg -ErrorAction SilentlyContinue) { if (rg -n 'PERF_DIAGNOSTICS\\s+1' -g '*.h' -g '*.cpp') { Write-Host 'ERROR: PERF_DIAGNOSTICS left in code'; exit 1 } }"
+	@powershell -Command \"if (Get-Command rg -ErrorAction SilentlyContinue) { if (rg -n 'printf|sprintf|snprintf|LogLine' -g '*.h' -g '*.cpp' --glob '!BuildConfig.h') { Write-Host 'ERROR: printf/sprintf/snprintf/LogLine found'; exit 1 } }\"
+	@powershell -Command \"if (Get-Command rg -ErrorAction SilentlyContinue) { if (-not (rg -n '#define\\s+ENABLE_DEBUG_UI\\s+0' BuildConfig.h)) { Write-Host 'ERROR: ENABLE_DEBUG_UI not defaulting to 0 in RELEASE'; exit 1 } }\"
 
 # Core location, and generic Makefile.
 SYSTEM_FILES_DIR = $(LIBDAISY_DIR)/core

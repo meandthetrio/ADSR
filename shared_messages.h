@@ -1,12 +1,9 @@
 #pragma once
 
-#ifndef PERF_DIAGNOSTICS
-#define PERF_DIAGNOSTICS 1
-#endif
-
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "BuildConfig.h"
 
 constexpr int kWaveCols = 128;
 
@@ -345,7 +342,7 @@ struct AudioUiState
 	bool playback_active = false;
 	float playback_phase = 0.0f;
 	bool perform_voices_active = false;
-#if PERF_DIAGNOSTICS
+#if ENABLE_PERF_COUNTERS
 	float cpu_load_pct = 0.0f;
 	float cpu_load_peak_pct = 0.0f;
 	uint32_t callback_cycles_last = 0;

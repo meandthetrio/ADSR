@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "BuildConfig.h"
 
 #include "daisy_pod.h"
 #include "dev/oled_ssd130x.h"
@@ -2585,6 +2586,76 @@ void CopyString(char* dst, const char* src, size_t max_len)
 	dst[i] = '\0';
 }
 
+static size_t AppendStr(char* dst, size_t max_len, const char* src)
+{
+	if (!dst || !src || max_len == 0)
+	{
+		return 0;
+	}
+	size_t pos = StrLen(dst);
+	while (*src && pos + 1 < max_len)
+	{
+		dst[pos++] = *src++;
+	}
+	dst[pos] = '\0';
+	return pos;
+}
+
+static size_t WriteUInt(char* dst, size_t max_len, uint32_t value)
+{
+	if (!dst || max_len == 0)
+	{
+		return 0;
+	}
+	char tmp[16];
+	size_t i = 0;
+	do
+	{
+		tmp[i++] = static_cast<char>('0' + (value % 10));
+		value /= 10;
+	} while (value != 0 && i < sizeof(tmp));
+	size_t pos = 0;
+	while (i > 0 && pos + 1 < max_len)
+	{
+		dst[pos++] = tmp[--i];
+	}
+	dst[pos] = '\0';
+	return pos;
+}
+
+static size_t WriteInt(char* dst, size_t max_len, int32_t value)
+{
+	if (!dst || max_len == 0)
+	{
+		return 0;
+	}
+	size_t pos = 0;
+	if (value < 0)
+	{
+		if (max_len < 2)
+		{
+			dst[0] = '\0';
+			return 0;
+		}
+		dst[pos++] = '-';
+		value = -value;
+	}
+	char tmp[16];
+	size_t i = 0;
+	uint32_t v = static_cast<uint32_t>(value);
+	do
+	{
+		tmp[i++] = static_cast<char>('0' + (v % 10));
+		v /= 10;
+	} while (v != 0 && i < sizeof(tmp));
+	while (i > 0 && pos + 1 < max_len)
+	{
+		dst[pos++] = tmp[--i];
+	}
+	dst[pos] = '\0';
+	return pos;
+}
+
 static bool HasWavExtension(const char* name)
 {
 	const size_t len = StrLen(name);
@@ -3959,13 +4030,16 @@ void DrawMenu(int32_t selected)
 			}
 		}
 	}
-#if PERF_DIAGNOSTICS
+#if ENABLE_DEBUG_UI && ENABLE_PERF_COUNTERS
 	{
 		const FontDef font = Font_6x8;
-		char cpu_label[12];
+		char cpu_label[12] = "CPU ";
+		char cpu_num[6];
 		int cpu_pct = static_cast<int>(cpu_load_pct + 0.5f);
 		cpu_pct = clamp_i(cpu_pct, 0, 100);
-		snprintf(cpu_label, sizeof(cpu_label), "CPU %d%%", cpu_pct);
+		WriteInt(cpu_num, sizeof(cpu_num), cpu_pct);
+		AppendStr(cpu_label, sizeof(cpu_label), cpu_num);
+		AppendStr(cpu_label, sizeof(cpu_label), "%");
 		const int text_w = static_cast<int>(StrLen(cpu_label)) * font.FontWidth;
 		int x = kDisplayW - text_w - 1;
 		if (x < 0)
@@ -4440,13 +4514,16 @@ void DrawPerformScreen(int32_t selected,
 						false);
 		}
 	}
-#if PERF_DIAGNOSTICS
+#if ENABLE_DEBUG_UI && ENABLE_PERF_COUNTERS
 	{
 		const FontDef font = Font_6x8;
-		char cpu_label[12];
+		char cpu_label[12] = "CPU ";
+		char cpu_num[6];
 		int cpu_pct = static_cast<int>(cpu_load_pct + 0.5f);
 		cpu_pct = ClampI(cpu_pct, 0, 100);
-		snprintf(cpu_label, sizeof(cpu_label), "CPU %d%%", cpu_pct);
+		WriteInt(cpu_num, sizeof(cpu_num), cpu_pct);
+		AppendStr(cpu_label, sizeof(cpu_label), cpu_num);
+		AppendStr(cpu_label, sizeof(cpu_label), "%");
 		const int text_w = static_cast<int>(StrLen(cpu_label)) * font.FontWidth;
 		int x = kDisplayW - text_w - 1;
 		if (x < 0)
@@ -5171,9 +5248,9 @@ void DrawRecordCountdown()
 
 	// Big countdown number centered.
 	char buf[8];
-	snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(remaining_s));
+	WriteUInt(buf, sizeof(buf), remaining_s);
 	const int scale = 4;
-	const int text_w = static_cast<int>(std::strlen(buf)) * font.FontWidth * scale;
+	const int text_w = static_cast<int>(StrLen(buf)) * font.FontWidth * scale;
 	const int text_h = font.FontHeight * scale;
 	const int text_x = (kDisplayW - text_w) / 2;
 	const int text_y = (kDisplayH - text_h) / 2;
@@ -5301,7 +5378,7 @@ void DrawShiftMenu(int32_t selected)
 			}
 			const int pct = ClampI(static_cast<int>(vol * 100.0f + 0.5f), 0, 100);
 			char pct_buf[8];
-			snprintf(pct_buf, sizeof(pct_buf), "%d", pct);
+			WriteInt(pct_buf, sizeof(pct_buf), pct);
 			const int text_w = static_cast<int>(StrLen(pct_buf)) * font.FontWidth;
 			int x = kDisplayW - text_w - 2;
 			if (x < 2)
@@ -5340,9 +5417,13 @@ void DrawSdInitScreen()
 		display.WriteString(dots, font, true);
 		display.SetCursor(0, (font.FontHeight + 2) * 2);
 		char buf[24];
-		snprintf(buf, sizeof(buf), "TRY %ld/%ld",
-				 static_cast<long>(sd_init_attempts + 1),
-				 static_cast<long>(kSdInitAttempts));
+		CopyString(buf, "TRY ", sizeof(buf));
+		char tmp[8];
+		WriteInt(tmp, sizeof(tmp), sd_init_attempts + 1);
+		AppendStr(buf, sizeof(buf), tmp);
+		AppendStr(buf, sizeof(buf), "/");
+		WriteInt(tmp, sizeof(tmp), kSdInitAttempts);
+		AppendStr(buf, sizeof(buf), tmp);
 		display.WriteString(buf, font, true);
 	}
 	RequestDisplayUpdate();
@@ -5393,7 +5474,7 @@ float ClampF(float v, float lo, float hi)
 
 void ValidateConfig()
 {
-#if PERF_DIAGNOSTICS
+#if ENABLE_DEBUG_UI && ENABLE_PERF_COUNTERS
 	if (kMaxSampleFrames != static_cast<size_t>(kSampleRateHz) * kMaxSampleSeconds)
 	{
 		while (1) {}

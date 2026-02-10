@@ -10,5 +10,6 @@ out/
 .DS_Store
 WaveContV3.cpp-f
 WaveContV3.cpp.bak
+_tmp_*.txt
 .vscode/*
 !.vscode/tasks.json

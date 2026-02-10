@@ -3,6 +3,7 @@
 #include "per/tim.h"
 #include "util/scopedirqblocker.h"
 #include "SamplerConfig.h"
+#include "BuildConfig.h"
 #include "shared_messages.h"
 #include "audio_engine.h"
 #include "ui.h"
@@ -12,7 +13,6 @@
 #include <initializer_list>
 //#include <math.h>
 #include <cstring>
-#include <cstdio>
 
 using namespace daisy;
 
@@ -34,11 +34,7 @@ using PodDisplay = OledDisplay<SSD130xI2c128x64Driver>;
 #define RAM_D3_MEM_SECTION __attribute__((section(".ramd3_bss")))
 #endif
 
-#ifndef PERF_DIAGNOSTICS
-#define PERF_DIAGNOSTICS 1
-#endif
-
-#if PERF_DIAGNOSTICS
+#if ENABLE_PERF_COUNTERS
 #define PERF_CYCLES_START(var) const uint32_t var = DWT->CYCCNT
 #define PERF_CYCLES_END(var)   const uint32_t var = DWT->CYCCNT
 #else
@@ -639,7 +635,7 @@ int main(void)
 	hw.Init();
 	EnableFtz();
 	g_audio_engine.Init(hw);
-	#if PERF_DIAGNOSTICS
+	#if ENABLE_PERF_COUNTERS
 	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
 	DWT->CYCCNT = 0;
 	DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;

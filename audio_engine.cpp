@@ -1,5 +1,6 @@
 #include "audio_engine.h"
 #include "audio_dsp.h"
+#include "BuildConfig.h"
 #include "SamplerConfig.h"
 #include "shared_messages.h"
 #include "PerformVoice.h"
@@ -14,11 +15,7 @@
 #define STORAGE_SERVICE_PREVIEW_STREAM PREVIEW_STREAM_FROM_SD
 #endif
 
-#ifndef PERF_DIAGNOSTICS
-#define PERF_DIAGNOSTICS 1
-#endif
-
-#if PERF_DIAGNOSTICS
+#if ENABLE_PERF_COUNTERS
 #define PERF_CYCLES_START(var) const uint32_t var = DWT->CYCCNT
 #define PERF_CYCLES_END(var)   const uint32_t var = DWT->CYCCNT
 #else
@@ -640,7 +637,7 @@ void AudioCallbackImpl(daisy::AudioHandle::InputBuffer in, daisy::AudioHandle::O
 	uiw.playback_active = playback_active_now;
 	uiw.playback_phase = playback_phase;
 	uiw.perform_voices_active = perform_active_now;
-	#if PERF_DIAGNOSTICS
+	#if ENABLE_PERF_COUNTERS
 	uiw.cpu_load_pct = cpu_load_pct;
 	uiw.cpu_load_peak_pct = cpu_load_peak_pct;
 	uiw.callback_cycles_last = callback_cycles_last;
@@ -1818,7 +1815,7 @@ audio_done:
 		g_fx_chain_audio.pause_pending = false;
 		g_fx_chain_audio.fade_gain = 0.0f;
 	}
-	#if PERF_DIAGNOSTICS
+	#if ENABLE_PERF_COUNTERS
 	PERF_CYCLES_END(cyc_end);
 	const uint32_t cyc_used = cyc_end - cyc_start;
 	callback_cycles_last = cyc_used;

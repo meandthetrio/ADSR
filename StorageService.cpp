@@ -245,6 +245,48 @@ static void CopyString(char* dst, size_t dst_len, const char* src)
 	dst[i] = '\0';
 }
 
+static bool AppendChar(char* dst, size_t dst_len, size_t& pos, char c)
+{
+	if (pos + 1 >= dst_len)
+	{
+		return false;
+	}
+	dst[pos++] = c;
+	dst[pos] = '\0';
+	return true;
+}
+
+static bool AppendStr(char* dst, size_t dst_len, size_t& pos, const char* src)
+{
+	if (!src)
+	{
+		return false;
+	}
+	while (*src)
+	{
+		if (!AppendChar(dst, dst_len, pos, *src++))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool AppendHexFixed(char* dst, size_t dst_len, size_t& pos, uint32_t value, size_t width)
+{
+	static const char* kHex = "0123456789ABCDEF";
+	for (size_t i = 0; i < width; ++i)
+	{
+		const size_t shift = (width - 1 - i) * 4;
+		const uint8_t nibble = (uint8_t)((value >> shift) & 0x0Fu);
+		if (!AppendChar(dst, dst_len, pos, kHex[nibble]))
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 static bool BuildNextSavePath(char* out_name,
 							  size_t out_name_len,
 							  char* out_path,
@@ -262,18 +304,35 @@ static bool BuildNextSavePath(char* out_name,
 	}
 	const uint32_t now = static_cast<uint32_t>(daisy::System::GetNow());
 	const uint32_t counter = save_counter++;
-	const int name_len = snprintf(out_name,
-								  out_name_len,
-								  "Rec_%08lX_%04lX.wav",
-								  static_cast<unsigned long>(now),
-								  static_cast<unsigned long>(counter & 0xFFFFu));
-	if (name_len <= 0 || name_len >= static_cast<int>(out_name_len))
+	size_t name_pos = 0;
+	out_name[0] = '\0';
+	if (!AppendStr(out_name, out_name_len, name_pos, "Rec_"))
 	{
 		return false;
 	}
-	const int path_len = snprintf(out_path, out_path_len, "%s%s",
-								  base_dir, out_name);
-	if (path_len <= 0 || path_len >= static_cast<int>(out_path_len))
+	if (!AppendHexFixed(out_name, out_name_len, name_pos, now, 8))
+	{
+		return false;
+	}
+	if (!AppendChar(out_name, out_name_len, name_pos, '_'))
+	{
+		return false;
+	}
+	if (!AppendHexFixed(out_name, out_name_len, name_pos, counter & 0xFFFFu, 4))
+	{
+		return false;
+	}
+	if (!AppendStr(out_name, out_name_len, name_pos, ".wav"))
+	{
+		return false;
+	}
+	size_t path_pos = 0;
+	out_path[0] = '\0';
+	if (!AppendStr(out_path, out_path_len, path_pos, base_dir))
+	{
+		return false;
+	}
+	if (!AppendStr(out_path, out_path_len, path_pos, out_name))
 	{
 		return false;
 	}
